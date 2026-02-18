@@ -55,6 +55,12 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
         return handle_internal(req, &state).await;
     }
 
+    // ── Apex domain → forward to local dashboard ──────────────────────────────
+    if host == state.domain.as_str() {
+        debug!(host, "apex domain — forwarding to local dashboard");
+        return forward(req, "http://127.0.0.1:3000", host, &state.http_client).await;
+    }
+
     // ── Try custom domain lookup first ────────────────────────────────────────
     let conn = match db::open(&state.db_path) {
         Ok(c) => c,
