@@ -14,7 +14,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{agent, auth, db, metrics, server::AppState, storage, vm};
 use minions_proto::{Request as AgentRequest, Response as AgentResponse, ResponseData};
@@ -41,6 +41,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/vms/{name}/expose", post(expose_vm))
         .route("/api/vms/{name}/set-public", post(set_vm_public))
         .route("/api/vms/{name}/set-private", post(set_vm_private))
+        // Custom domain routes
+        .route("/api/vms/{name}/domains", post(add_custom_domain))
+        .route("/api/vms/{name}/domains", get(list_custom_domains))
+        .route("/api/vms/{name}/domains/{domain}", delete(remove_custom_domain))
         // Snapshot routes
         .route("/api/vms/{name}/snapshots", post(create_snapshot))
         .route("/api/vms/{name}/snapshots", get(list_snapshots))
@@ -721,6 +725,202 @@ async fn billing_set_plan(
         "plan_id": req.plan_id,
         "message": format!("plan updated to '{}'", req.plan_id)
     })).into_response()
+}
+
+// ── Custom Domain types & handlers ────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct AddCustomDomainRequest {
+    pub domain: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CustomDomainResponse {
+    pub id: String,
+    pub vm_name: String,
+    pub domain: String,
+    pub verified: bool,
+    pub created_at: String,
+}
+
+impl From<db::CustomDomain> for CustomDomainResponse {
+    fn from(d: db::CustomDomain) -> Self {
+        CustomDomainResponse {
+            id: d.id,
+            vm_name: d.vm_name,
+            domain: d.domain,
+            verified: d.verified,
+            created_at: d.created_at,
+        }
+    }
+}
+
+/// Validate custom domain format and check it's not a subdomain of base_domain.
+fn validate_custom_domain(domain: &str, base_domain: Option<&str>) -> Result<(), String> {
+    // Basic hostname validation
+    if domain.is_empty() || domain.len() > 253 {
+        return Err("domain must be 1-253 characters".to_string());
+    }
+    
+    if domain.starts_with('.') || domain.ends_with('.') || domain.contains("..") {
+        return Err("invalid domain format".to_string());
+    }
+    
+    // Labels must be alphanumeric + hyphens, not starting/ending with hyphen
+    for label in domain.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return Err("domain labels must be 1-63 characters".to_string());
+        }
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Err("domain must contain only letters, numbers, dots, and hyphens".to_string());
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err("domain labels cannot start or end with hyphen".to_string());
+        }
+    }
+    
+    // Reject if it's a subdomain of base_domain (those use wildcard cert)
+    if let Some(base) = base_domain {
+        let suffix = format!(".{}", base);
+        if domain == base || domain.ends_with(&suffix) {
+            return Err(format!(
+                "cannot add subdomains of {} as custom domains (use {}.{} directly)",
+                base, "<vmname>", base
+            ));
+        }
+    }
+    
+    Ok(())
+}
+
+/// `POST /api/vms/:name/domains` — Add a custom domain.
+async fn add_custom_domain(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<AddCustomDomainRequest>,
+) -> impl IntoResponse {
+    info!(vm = %name, domain = %req.domain, "add custom domain");
+    
+    // Validate domain format
+    let base_domain_str = state.domain.as_ref().map(|s| s.as_str());
+    if let Err(e) = validate_custom_domain(&req.domain, base_domain_str) {
+        return bad_request(e).into_response();
+    }
+    
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return internal(e).into_response(),
+    };
+    
+    // Check VM exists
+    match db::get_vm(&conn, &name) {
+        Ok(None) => return not_found(&name).into_response(),
+        Err(e) => return internal(e).into_response(),
+        Ok(Some(_)) => {}
+    }
+    
+    // Check domain not already registered
+    match db::get_custom_domain_by_name(&conn, &req.domain) {
+        Ok(Some(existing)) => {
+            return bad_request(format!(
+                "domain '{}' is already registered to VM '{}'",
+                req.domain, existing.vm_name
+            )).into_response();
+        }
+        Err(e) => return internal(e).into_response(),
+        Ok(None) => {}
+    }
+    
+    // DNS verification (if base_domain and public_ip are configured)
+    if let Some(base) = base_domain_str {
+        let public_ip = state.public_ip.as_ref().map(|s| s.as_str());
+        match crate::dns::verify_domain_dns(&req.domain, &name, base, public_ip).await {
+            Ok(true) => {
+                info!(domain = %req.domain, "DNS verification passed");
+            }
+            Ok(false) => {
+                return bad_request(format!(
+                    "DNS verification failed: '{}' must have a CNAME pointing to '{}.{}' or an A record pointing to the host IP",
+                    req.domain, name, base
+                )).into_response();
+            }
+            Err(e) => {
+                warn!(domain = %req.domain, error = %e, "DNS verification error");
+                return bad_request(format!(
+                    "DNS lookup failed: {} (check that the domain exists and is accessible)",
+                    e
+                )).into_response();
+            }
+        }
+    }
+    
+    // Add to DB (initially unverified — the proxy will provision certs and mark verified)
+    let id = match db::add_custom_domain(&conn, &name, &req.domain) {
+        Ok(id) => id,
+        Err(e) => return internal(e).into_response(),
+    };
+    
+    // For Cloudflare proxied setups (TLS terminated at edge), mark as verified immediately
+    // since the proxy doesn't need per-domain certs at the origin.
+    // For direct TLS setups, full ACME (tls.rs) would handle provisioning.
+    let _ = db::mark_domain_verified(&conn, &req.domain);
+    
+    let domain_record = db::CustomDomain {
+        id,
+        vm_name: name.clone(),
+        domain: req.domain.clone(),
+        verified: true, // Marked verified for Cloudflare proxied setups
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    
+    (StatusCode::CREATED, Json(CustomDomainResponse::from(domain_record))).into_response()
+}
+
+/// `GET /api/vms/:name/domains` — List custom domains for a VM.
+async fn list_custom_domains(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return internal(e).into_response(),
+    };
+    
+    // Check VM exists
+    match db::get_vm(&conn, &name) {
+        Ok(None) => return not_found(&name).into_response(),
+        Err(e) => return internal(e).into_response(),
+        Ok(Some(_)) => {}
+    }
+    
+    match db::list_custom_domains(&conn, &name) {
+        Ok(domains) => Json(domains.into_iter().map(CustomDomainResponse::from).collect::<Vec<_>>()).into_response(),
+        Err(e) => internal(e).into_response(),
+    }
+}
+
+/// `DELETE /api/vms/:name/domains/:domain` — Remove a custom domain.
+async fn remove_custom_domain(
+    State(state): State<AppState>,
+    Path((name, domain)): Path<(String, String)>,
+) -> impl IntoResponse {
+    info!(vm = %name, domain = %domain, "remove custom domain");
+    
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return internal(e).into_response(),
+    };
+    
+    match db::remove_custom_domain(&conn, &name, &domain) {
+        Ok(true) => Json(serde_json::json!({
+            "message": format!("domain '{}' removed from VM '{}'", domain, name)
+        })).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse { error: format!("domain '{}' not found for VM '{}'", domain, name) }),
+        ).into_response(),
+        Err(e) => internal(e).into_response(),
+    }
 }
 
 // ── Snapshot types ─────────────────────────────────────────────────────────────

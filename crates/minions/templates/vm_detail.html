@@ -137,6 +137,74 @@
   </div>
 </section>
 
+<!-- Custom Domains -->
+<section class="mb-8">
+  <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Custom Domains</h2>
+  <div class="rounded-xl border border-gray-800 bg-gray-900 p-5 space-y-4">
+    <!-- Add domain form -->
+    <form hx-post="/dashboard/vms/{{ vm_name }}/domains"
+          hx-target="body"
+          class="flex items-end gap-3">
+      <div class="flex-1">
+        <label class="text-xs text-gray-500 uppercase tracking-wide block mb-1">Domain Name</label>
+        <input type="text" name="domain" placeholder="www.example.com"
+               class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white font-mono
+                      focus:outline-none focus:border-indigo-500"
+               required />
+      </div>
+      <button type="submit"
+              class="rounded-lg bg-indigo-700 hover:bg-indigo-600 px-4 py-1.5 text-sm font-medium text-white transition">
+        + Add Domain
+      </button>
+    </form>
+
+    <!-- Domain list -->
+    {% if custom_domains.is_empty() %}
+      <p class="text-sm text-gray-600">No custom domains configured. Add a CNAME record pointing to {{ vm_name }}.{{ domain }} to get started.</p>
+    {% else %}
+      <div class="overflow-hidden rounded-lg border border-gray-800">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-950 text-gray-400 text-xs uppercase tracking-wide">
+            <tr>
+              <th class="px-4 py-2 text-left">Domain</th>
+              <th class="px-4 py-2 text-left">Status</th>
+              <th class="px-4 py-2 text-right"></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-800">
+            {% for d in custom_domains %}
+            <tr class="hover:bg-gray-800 transition">
+              <td class="px-4 py-2 font-mono text-white">{{ d.domain }}</td>
+              <td class="px-4 py-2">
+                {% if d.verified %}
+                  <span class="inline-flex items-center rounded-full bg-green-900/40 px-2 py-0.5 text-xs font-medium text-green-400 border border-green-800">
+                    verified
+                  </span>
+                {% else %}
+                  <span class="inline-flex items-center rounded-full bg-yellow-900/40 px-2 py-0.5 text-xs font-medium text-yellow-400 border border-yellow-800">
+                    pending
+                  </span>
+                {% endif %}
+              </td>
+              <td class="px-4 py-2 text-right">
+                <button
+                  hx-delete="/dashboard/vms/{{ vm_name }}/domains/{{ d.domain }}"
+                  hx-confirm="Remove custom domain {{ d.domain }}?"
+                  hx-target="closest tr"
+                  hx-swap="outerHTML"
+                  class="text-xs text-red-400 hover:text-red-300 transition">
+                  Remove
+                </button>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+  </div>
+</section>
+
 <!-- Metrics -->
 <section class="mb-8">
   <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Live Metrics</h2>

@@ -35,3 +35,5 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 # HTTP client (CLI remote mode) — rustls avoids the openssl/pkg-config dependency
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+# DNS resolution for custom domain verification
+hickory-resolver = "0.24"

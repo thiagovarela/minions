@@ -1887,6 +1887,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "hickory-resolver",
  "libc",
  "minions-proto",
  "minions-proxy",

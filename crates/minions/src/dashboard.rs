@@ -123,6 +123,11 @@ struct SnapRow {
     size_mb: u64,
 }
 
+struct CustomDomainRow {
+    domain: String,
+    verified: bool,
+}
+
 // ── Templates ─────────────────────────────────────────────────────────────────
 
 #[derive(Template)]
@@ -166,6 +171,7 @@ struct VmDetailTemplate {
     proxy_port: u16,
     proxy_public: bool,
     domain: String,
+    custom_domains: Vec<CustomDomainRow>,
 }
 
 #[derive(Template)]
@@ -201,6 +207,8 @@ pub fn router() -> Router<AppState> {
         .route("/dashboard/vms/{name}/expose", post(vm_expose))
         .route("/dashboard/vms/{name}/set-public", post(vm_set_public))
         .route("/dashboard/vms/{name}/set-private", post(vm_set_private))
+        .route("/dashboard/vms/{name}/domains", post(vm_add_domain))
+        .route("/dashboard/vms/{name}/domains/{domain}", delete(vm_remove_domain))
         .route("/dashboard/vms/{name}", delete(vm_destroy))
         .route(
             "/dashboard/vms/{name}/snapshots/{snap}/restore",
@@ -291,6 +299,10 @@ async fn vm_detail(
         SnapRow { name: s.name, created_at: s.created_at, size_mb }
     }).collect();
 
+    let custom_domains = db::list_custom_domains(&conn, &name).unwrap_or_default().into_iter().map(|d| {
+        CustomDomainRow { domain: d.domain, verified: d.verified }
+    }).collect();
+
     let (has_metrics, mf) = build_metrics_fields(&name, &state.metrics);
 
     render(VmDetailTemplate {
@@ -314,6 +326,7 @@ async fn vm_detail(
         proxy_port: vm.proxy_port,
         proxy_public: vm.proxy_public,
         domain: state.domain.as_deref().map_or(String::new(), |d| d.to_string()),
+        custom_domains,
     })
 }
 
@@ -495,6 +508,66 @@ async fn vm_set_private(
             Redirect::to(&format!("/dashboard/vms/{name}")).into_response()
         }
         Ok(false) => Html("<span class='text-red-400 text-sm'>✗ VM not found</span>").into_response(),
+        Err(e) => Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct AddDomainForm {
+    domain: String,
+}
+
+async fn vm_add_domain(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Form(form): Form<AddDomainForm>,
+) -> Response {
+    if check_session(&headers, &state.sessions).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    
+    // Call the API internally via reqwest (reuse validation + DNS check logic)
+    let api_url = format!("http://127.0.0.1:3000/api/vms/{}/domains", name);
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&api_url)
+        .json(&serde_json::json!({ "domain": form.domain }))
+        .send()
+        .await;
+    
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            // Refresh the page to show the new domain
+            Redirect::to(&format!("/dashboard/vms/{name}")).into_response()
+        }
+        Ok(r) => {
+            let error = r.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            Html(format!("<span class='text-red-400 text-sm'>✗ {}</span>", error)).into_response()
+        }
+        Err(e) => {
+            Html(format!("<span class='text-red-400 text-sm'>✗ {}</span>", e)).into_response()
+        }
+    }
+}
+
+async fn vm_remove_domain(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path((name, domain)): Path<(String, String)>,
+) -> Response {
+    if check_session(&headers, &state.sessions).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
+    };
+    
+    match db::remove_custom_domain(&conn, &name, &domain) {
+        Ok(true) => StatusCode::OK.into_response(),
+        Ok(false) => Html("<span class='text-red-400 text-sm'>✗ Domain not found</span>").into_response(),
         Err(e) => Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
     }
 }
