@@ -27,6 +27,9 @@ pub struct Vm {
     pub proxy_port: u16,
     /// Whether the VM is publicly accessible without auth (default false).
     pub proxy_public: bool,
+    /// SSH gateway user who owns this VM.
+    /// NULL for VMs created directly via the HTTP API (admin/system VMs).
+    pub owner_id: Option<String>,
 }
 
 /// Open (or create) the state database.
@@ -60,26 +63,44 @@ fn migrate(conn: &Connection) -> Result<()> {
             created_at      TEXT NOT NULL,
             stopped_at      TEXT,
             proxy_port      INTEGER NOT NULL DEFAULT 80,
-            proxy_public    INTEGER NOT NULL DEFAULT 0
+            proxy_public    INTEGER NOT NULL DEFAULT 0,
+            owner_id        TEXT
         );
 
         -- Partial unique indexes to prevent IP/CID conflicts for active VMs.
         -- Stopped VMs don't hold resources, so their IPs/CIDs can be reused.
         CREATE UNIQUE INDEX IF NOT EXISTS idx_vms_ip_active
             ON vms(ip) WHERE status != 'stopped';
-        
+
         CREATE UNIQUE INDEX IF NOT EXISTS idx_vms_cid_active
             ON vms(vsock_cid) WHERE status != 'stopped';
+
+        -- Index for efficient per-owner VM lookups.
+        CREATE INDEX IF NOT EXISTS idx_vms_owner
+            ON vms(owner_id) WHERE owner_id IS NOT NULL;
         ",
     )
     .context("run migration")?;
 
-    // Idempotent column additions for existing databases (errors ignored).
+    // Idempotent column additions for existing databases (errors are ignored
+    // because SQLite errors on duplicate ADD COLUMN).
     let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN proxy_port   INTEGER NOT NULL DEFAULT 80;");
     let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN proxy_public  INTEGER NOT NULL DEFAULT 0;");
+    let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN owner_id      TEXT;");
 
     Ok(())
 }
+
+// ── Column list used in every SELECT ─────────────────────────────────────────
+// Keeping it in one place makes column-index changes hard to miss.
+// Indices: 0=name 1=status 2=ip 3=vsock_cid 4=ch_pid 5=ch_api_socket
+//          6=ch_vsock_socket 7=tap_device 8=mac_address 9=vcpus
+//          10=memory_mb 11=rootfs_path 12=created_at 13=stopped_at
+//          14=proxy_port 15=proxy_public 16=owner_id
+const VM_COLUMNS: &str =
+    "name,status,ip,vsock_cid,ch_pid,ch_api_socket,ch_vsock_socket,\
+     tap_device,mac_address,vcpus,memory_mb,rootfs_path,created_at,stopped_at,\
+     proxy_port,proxy_public,owner_id";
 
 /// Insert a new VM row (status = "creating").
 pub fn insert_vm(conn: &Connection, vm: &Vm) -> Result<()> {
@@ -87,8 +108,8 @@ pub fn insert_vm(conn: &Connection, vm: &Vm) -> Result<()> {
         "INSERT INTO vms
             (name, status, ip, vsock_cid, ch_pid, ch_api_socket, ch_vsock_socket,
              tap_device, mac_address, vcpus, memory_mb, rootfs_path, created_at, stopped_at,
-             proxy_port, proxy_public)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+             proxy_port, proxy_public, owner_id)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
         params![
             vm.name,
             vm.status,
@@ -106,20 +127,17 @@ pub fn insert_vm(conn: &Connection, vm: &Vm) -> Result<()> {
             vm.stopped_at,
             vm.proxy_port as i64,
             if vm.proxy_public { 1i64 } else { 0i64 },
+            vm.owner_id,
         ],
     )
     .context("insert vm")?;
     Ok(())
 }
 
-/// Retrieve a VM by name.
+/// Retrieve a VM by name (admin — no ownership check).
 pub fn get_vm(conn: &Connection, name: &str) -> Result<Option<Vm>> {
-    let mut stmt = conn.prepare(
-        "SELECT name,status,ip,vsock_cid,ch_pid,ch_api_socket,ch_vsock_socket,
-                tap_device,mac_address,vcpus,memory_mb,rootfs_path,created_at,stopped_at,
-                proxy_port,proxy_public
-         FROM vms WHERE name=?1",
-    )?;
+    let sql = format!("SELECT {VM_COLUMNS} FROM vms WHERE name=?1");
+    let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query(params![name])?;
     if let Some(row) = rows.next()? {
         Ok(Some(row_to_vm(row)?))
@@ -128,15 +146,40 @@ pub fn get_vm(conn: &Connection, name: &str) -> Result<Option<Vm>> {
     }
 }
 
-/// List all VMs.
+/// Retrieve a VM by name **and** verify it belongs to `owner_id`.
+#[allow(dead_code)]
+/// Returns `Ok(None)` if not found, `Err` if the VM exists but is owned by
+/// someone else (caller should surface this as a 403).
+pub fn get_vm_owned(conn: &Connection, name: &str, owner_id: &str) -> Result<Option<Vm>> {
+    let sql = format!("SELECT {VM_COLUMNS} FROM vms WHERE name=?1");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(params![name])?;
+    match rows.next()? {
+        None => Ok(None),
+        Some(row) => {
+            let vm = row_to_vm(row)?;
+            match &vm.owner_id {
+                Some(oid) if oid == owner_id => Ok(Some(vm)),
+                Some(_) => anyhow::bail!("VM '{name}' belongs to another user"),
+                None => anyhow::bail!("VM '{name}' belongs to another user"),
+            }
+        }
+    }
+}
+
+/// List all VMs (admin — no ownership filter).
 pub fn list_vms(conn: &Connection) -> Result<Vec<Vm>> {
-    let mut stmt = conn.prepare(
-        "SELECT name,status,ip,vsock_cid,ch_pid,ch_api_socket,ch_vsock_socket,
-                tap_device,mac_address,vcpus,memory_mb,rootfs_path,created_at,stopped_at,
-                proxy_port,proxy_public
-         FROM vms ORDER BY created_at",
-    )?;
-    let rows = stmt.query_map([], |row| {
+    let sql = format!("SELECT {VM_COLUMNS} FROM vms ORDER BY created_at");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| Ok(row_to_vm(row).expect("parse vm row")))?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// List only the VMs owned by a specific SSH gateway user.
+pub fn list_vms_by_owner(conn: &Connection, owner_id: &str) -> Result<Vec<Vm>> {
+    let sql = format!("SELECT {VM_COLUMNS} FROM vms WHERE owner_id=?1 ORDER BY created_at");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![owner_id], |row| {
         Ok(row_to_vm(row).expect("parse vm row"))
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -213,20 +256,14 @@ pub fn delete_vm(conn: &Connection, name: &str) -> Result<()> {
 }
 
 /// Pick the lowest available IP in 10.0.0.2..=10.0.0.254.
-///
-/// This function is atomic — it queries for the first available IP in a way
-/// that is safe even if multiple concurrent calls are happening.
 pub fn next_available_ip(conn: &Connection) -> Result<String> {
-    // Get all currently in-use IPs (non-stopped VMs)
     let used: Vec<String> = conn
         .prepare("SELECT ip FROM vms WHERE status != 'stopped'")?
         .query_map([], |r| r.get(0))?
         .collect::<std::result::Result<_, _>>()?;
 
-    // Convert to a set for O(1) lookups
     let used_set: std::collections::HashSet<String> = used.into_iter().collect();
 
-    // Find the first available IP
     for i in 2u32..=254 {
         let candidate = format!("10.0.0.{i}");
         if !used_set.contains(&candidate) {
@@ -237,20 +274,14 @@ pub fn next_available_ip(conn: &Connection) -> Result<String> {
 }
 
 /// Pick the lowest available VSOCK CID (3..=255).
-///
-/// This function is atomic — it queries for the first available CID in a way
-/// that is safe even if multiple concurrent calls are happening.
 pub fn next_available_cid(conn: &Connection) -> Result<u32> {
-    // Get all currently in-use CIDs (non-stopped VMs)
     let used: Vec<u32> = conn
         .prepare("SELECT vsock_cid FROM vms WHERE status != 'stopped'")?
         .query_map([], |r| r.get::<_, u32>(0))?
         .collect::<std::result::Result<_, _>>()?;
 
-    // Convert to a set for O(1) lookups
     let used_set: std::collections::HashSet<u32> = used.into_iter().collect();
 
-    // Find the first available CID
     for cid in 3u32..=255 {
         if !used_set.contains(&cid) {
             return Ok(cid);
@@ -279,6 +310,7 @@ fn row_to_vm(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vm> {
         stopped_at: row.get(13)?,
         proxy_port: proxy_port as u16,
         proxy_public: proxy_public != 0,
+        owner_id: row.get(16)?,
     })
 }
 
@@ -298,4 +330,113 @@ pub fn set_proxy_public(conn: &Connection, name: &str, public: bool) -> Result<b
         params![if public { 1i64 } else { 0i64 }, name],
     )?;
     Ok(changed > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        migrate(&conn).unwrap();
+        conn
+    }
+
+    fn sample_vm(name: &str, owner_id: Option<&str>) -> Vm {
+        Vm {
+            name: name.to_string(),
+            status: "stopped".to_string(),
+            ip: format!("10.0.0.{}", name.len()),
+            vsock_cid: name.len() as u32 + 3,
+            ch_pid: None,
+            ch_api_socket: format!("/run/minions/{name}.sock"),
+            ch_vsock_socket: format!("/run/minions/{name}.vsock"),
+            tap_device: format!("tap-{name}"),
+            mac_address: "52:54:00:00:00:01".to_string(),
+            vcpus: 2,
+            memory_mb: 1024,
+            rootfs_path: format!("/var/lib/minions/vms/{name}/rootfs.ext4"),
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            stopped_at: None,
+            proxy_port: 80,
+            proxy_public: false,
+            owner_id: owner_id.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_insert_and_get_with_owner() {
+        let conn = test_conn();
+        let vm = sample_vm("alice-vm", Some("user-alice"));
+        insert_vm(&conn, &vm).unwrap();
+
+        let found = get_vm(&conn, "alice-vm").unwrap().unwrap();
+        assert_eq!(found.owner_id.as_deref(), Some("user-alice"));
+    }
+
+    #[test]
+    fn test_insert_and_get_without_owner() {
+        let conn = test_conn();
+        let vm = sample_vm("sys-vm", None);
+        insert_vm(&conn, &vm).unwrap();
+
+        let found = get_vm(&conn, "sys-vm").unwrap().unwrap();
+        assert_eq!(found.owner_id, None, "admin VM should have no owner");
+    }
+
+    #[test]
+    fn test_list_vms_by_owner_filters_correctly() {
+        let conn = test_conn();
+        insert_vm(&conn, &sample_vm("vm1", Some("alice"))).unwrap();
+        insert_vm(&conn, &sample_vm("vm2", Some("bob"))).unwrap();
+        insert_vm(&conn, &sample_vm("vm3", Some("alice"))).unwrap();
+        insert_vm(&conn, &sample_vm("vm4", None)).unwrap();
+
+        let alice_vms = list_vms_by_owner(&conn, "alice").unwrap();
+        assert_eq!(alice_vms.len(), 2);
+        assert!(alice_vms.iter().all(|v| v.owner_id.as_deref() == Some("alice")));
+
+        let bob_vms = list_vms_by_owner(&conn, "bob").unwrap();
+        assert_eq!(bob_vms.len(), 1);
+
+        // list_vms returns all
+        let all = list_vms(&conn).unwrap();
+        assert_eq!(all.len(), 4);
+    }
+
+    #[test]
+    fn test_get_vm_owned_correct_owner() {
+        let conn = test_conn();
+        insert_vm(&conn, &sample_vm("owned-vm", Some("user-x"))).unwrap();
+
+        let result = get_vm_owned(&conn, "owned-vm", "user-x").unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_get_vm_owned_wrong_owner() {
+        let conn = test_conn();
+        insert_vm(&conn, &sample_vm("owned-vm", Some("user-x"))).unwrap();
+
+        let result = get_vm_owned(&conn, "owned-vm", "user-y");
+        assert!(result.is_err(), "wrong owner should return Err");
+    }
+
+    #[test]
+    fn test_get_vm_owned_admin_vm_rejected() {
+        let conn = test_conn();
+        insert_vm(&conn, &sample_vm("admin-vm", None)).unwrap();
+
+        // Admin (owner_id=NULL) VMs are not accessible by SSH gateway users.
+        let result = get_vm_owned(&conn, "admin-vm", "any-user");
+        assert!(result.is_err(), "admin VM should not be accessible by SSH users");
+    }
+
+    #[test]
+    fn test_get_vm_owned_not_found() {
+        let conn = test_conn();
+        let result = get_vm_owned(&conn, "nonexistent", "user-x").unwrap();
+        assert!(result.is_none());
+    }
 }

@@ -2,13 +2,21 @@
 //!
 //! Parses the command string the user typed (e.g. `ls`, `new myvm --cpus 2`)
 //! and calls the local minions HTTP API.
+//!
+//! ## Multi-tenancy
+//!
+//! Every VM-mutating command first calls `check_owns()`, which fetches the VM
+//! from the API and verifies that its `owner_id` matches the authenticated
+//! user's ID.  Users can only see and operate on their own VMs.
+//! Admin access (direct API key) bypasses this and can reach all VMs.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::db::User;
 
-/// HTTP client wrapper for the local minions API.
+// ── HTTP client wrapper ───────────────────────────────────────────────────────
+
 pub struct ApiClient {
     client: reqwest::Client,
     base_url: String,
@@ -28,9 +36,12 @@ impl ApiClient {
         }
     }
 
-    pub async fn list_vms(&self) -> Result<Vec<VmInfo>> {
+    /// List VMs owned by `owner_id`. The SSH gateway always passes the
+    /// authenticated user's ID so users only see their own VMs.
+    pub async fn list_vms(&self, owner_id: &str) -> Result<Vec<VmInfo>> {
+        let url = format!("{}/api/vms?owner_id={}", self.base_url, owner_id);
         let resp = self
-            .auth(self.client.get(format!("{}/api/vms", self.base_url)))
+            .auth(self.client.get(url))
             .send()
             .await?
             .error_for_status()?
@@ -39,23 +50,38 @@ impl ApiClient {
         Ok(resp)
     }
 
+    /// Fetch a single VM by name (returns all fields including owner_id).
+    pub async fn get_vm(&self, name: &str) -> Result<Option<VmInfo>> {
+        let resp = self
+            .auth(self.client.get(format!("{}/api/vms/{}", self.base_url, name)))
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(resp.error_for_status()?.json::<VmInfo>().await?))
+    }
+
+    /// Create a VM owned by `owner_id`.
     pub async fn create_vm(
         &self,
         name: &str,
         cpus: u32,
         memory_mb: u32,
+        owner_id: &str,
     ) -> Result<VmInfo> {
         #[derive(Serialize)]
         struct Req<'a> {
             name: &'a str,
             cpus: u32,
             memory_mb: u32,
+            owner_id: &'a str,
         }
         let resp = self
             .auth(
                 self.client
                     .post(format!("{}/api/vms", self.base_url))
-                    .json(&Req { name, cpus, memory_mb }),
+                    .json(&Req { name, cpus, memory_mb, owner_id }),
             )
             .send()
             .await?
@@ -66,22 +92,16 @@ impl ApiClient {
     }
 
     pub async fn destroy_vm(&self, name: &str) -> Result<()> {
-        self.auth(
-            self.client
-                .delete(format!("{}/api/vms/{}", self.base_url, name)),
-        )
-        .send()
-        .await?
-        .error_for_status()?;
+        self.auth(self.client.delete(format!("{}/api/vms/{}", self.base_url, name)))
+            .send()
+            .await?
+            .error_for_status()?;
         Ok(())
     }
 
     pub async fn stop_vm(&self, name: &str) -> Result<VmInfo> {
         let resp = self
-            .auth(
-                self.client
-                    .post(format!("{}/api/vms/{}/stop", self.base_url, name)),
-            )
+            .auth(self.client.post(format!("{}/api/vms/{}/stop", self.base_url, name)))
             .send()
             .await?
             .error_for_status()?
@@ -92,10 +112,7 @@ impl ApiClient {
 
     pub async fn restart_vm(&self, name: &str) -> Result<VmInfo> {
         let resp = self
-            .auth(
-                self.client
-                    .post(format!("{}/api/vms/{}/restart", self.base_url, name)),
-            )
+            .auth(self.client.post(format!("{}/api/vms/{}/restart", self.base_url, name)))
             .send()
             .await?
             .error_for_status()?
@@ -106,9 +123,7 @@ impl ApiClient {
 
     pub async fn rename_vm(&self, name: &str, new_name: &str) -> Result<()> {
         #[derive(Serialize)]
-        struct Req<'a> {
-            new_name: &'a str,
-        }
+        struct Req<'a> { new_name: &'a str }
         self.auth(
             self.client
                 .post(format!("{}/api/vms/{}/rename", self.base_url, name))
@@ -120,16 +135,18 @@ impl ApiClient {
         Ok(())
     }
 
-    pub async fn copy_vm(&self, name: &str, new_name: &str) -> Result<VmInfo> {
+    /// Copy a VM; the copy is owned by `owner_id`.
+    pub async fn copy_vm(&self, name: &str, new_name: &str, owner_id: &str) -> Result<VmInfo> {
         #[derive(Serialize)]
         struct Req<'a> {
             new_name: &'a str,
+            owner_id: &'a str,
         }
         let resp = self
             .auth(
                 self.client
                     .post(format!("{}/api/vms/{}/copy", self.base_url, name))
-                    .json(&Req { new_name }),
+                    .json(&Req { new_name, owner_id }),
             )
             .send()
             .await?
@@ -154,27 +171,23 @@ impl ApiClient {
     }
 
     pub async fn set_vm_public(&self, name: &str) -> Result<()> {
-        self.auth(
-            self.client
-                .post(format!("{}/api/vms/{}/set-public", self.base_url, name)),
-        )
-        .send()
-        .await?
-        .error_for_status()?;
+        self.auth(self.client.post(format!("{}/api/vms/{}/set-public", self.base_url, name)))
+            .send()
+            .await?
+            .error_for_status()?;
         Ok(())
     }
 
     pub async fn set_vm_private(&self, name: &str) -> Result<()> {
-        self.auth(
-            self.client
-                .post(format!("{}/api/vms/{}/set-private", self.base_url, name)),
-        )
-        .send()
-        .await?
-        .error_for_status()?;
+        self.auth(self.client.post(format!("{}/api/vms/{}/set-private", self.base_url, name)))
+            .send()
+            .await?
+            .error_for_status()?;
         Ok(())
     }
 }
+
+// ── VmInfo ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct VmInfo {
@@ -188,9 +201,29 @@ pub struct VmInfo {
     pub proxy_port: u16,
     #[serde(default)]
     pub proxy_public: bool,
+    /// The SSH gateway user who owns this VM, or None for admin-created VMs.
+    pub owner_id: Option<String>,
 }
 
 fn default_proxy_port() -> u16 { 80 }
+
+// ── Ownership enforcement ─────────────────────────────────────────────────────
+
+/// Fetch a VM and verify it is owned by `user`.
+///
+/// Returns the VM on success. Errors with a user-facing message if the VM
+/// does not exist or belongs to a different user.
+async fn check_owns<'a>(api: &ApiClient, name: &str, user: &User) -> Result<VmInfo> {
+    match api.get_vm(name).await? {
+        None => bail!("VM '{}' not found\r\n", name),
+        Some(vm) => {
+            match &vm.owner_id {
+                Some(oid) if oid == &user.id => Ok(vm),
+                _ => bail!("VM '{}' not found\r\n", name), // intentionally vague — don't leak existence
+            }
+        }
+    }
+}
 
 // ── Command execution ──────────────────────────────────────────────────────────
 
@@ -221,8 +254,9 @@ async fn execute(
 
     match parts[0] {
         // ── ls / list ──────────────────────────────────────────────────────
+        // Only shows VMs owned by the authenticated user.
         "ls" | "list" => {
-            let vms = api.list_vms().await?;
+            let vms = api.list_vms(&user.id).await?;
             if vms.is_empty() {
                 return Ok("no VMs\r\n".to_string());
             }
@@ -244,6 +278,7 @@ async fn execute(
         }
 
         // ── new ────────────────────────────────────────────────────────────
+        // Created VM is owned by the authenticated user.
         "new" => {
             let mut name = uuid_name();
             let mut cpus: u32 = 2;
@@ -253,30 +288,22 @@ async fn execute(
                 match parts[i] {
                     "--name" | "-n" => {
                         i += 1;
-                        if i < parts.len() {
-                            name = parts[i].to_string();
-                        }
+                        if i < parts.len() { name = parts[i].to_string(); }
                     }
                     "--cpus" | "-c" => {
                         i += 1;
-                        if i < parts.len() {
-                            cpus = parts[i].parse().unwrap_or(2);
-                        }
+                        if i < parts.len() { cpus = parts[i].parse().unwrap_or(2); }
                     }
                     "--memory" | "--mem" | "-m" => {
                         i += 1;
-                        if i < parts.len() {
-                            memory_mb = parts[i].parse().unwrap_or(1024);
-                        }
+                        if i < parts.len() { memory_mb = parts[i].parse().unwrap_or(1024); }
                     }
-                    arg if !arg.starts_with('-') => {
-                        name = parts[i].to_string();
-                    }
+                    arg if !arg.starts_with('-') => { name = parts[i].to_string(); }
                     _ => {}
                 }
                 i += 1;
             }
-            let vm = api.create_vm(&name, cpus, memory_mb).await?;
+            let vm = api.create_vm(&name, cpus, memory_mb, &user.id).await?;
             Ok(format!(
                 "✓ VM '{}' created\r\n  IP: {}\r\n  CPUs: {}  Memory: {} MiB\r\n  SSH: ssh root@{}\r\n",
                 vm.name, vm.ip, vm.cpus, vm.memory_mb, vm.ip
@@ -289,6 +316,7 @@ async fn execute(
                 return Ok("usage: rm <name>\r\n".to_string());
             }
             let name = parts[1];
+            check_owns(api, name, user).await?;
             api.destroy_vm(name).await?;
             Ok(format!("✓ VM '{}' destroyed\r\n", name))
         }
@@ -298,6 +326,7 @@ async fn execute(
             if parts.len() < 2 {
                 return Ok("usage: stop <name>\r\n".to_string());
             }
+            check_owns(api, parts[1], user).await?;
             let vm = api.stop_vm(parts[1]).await?;
             Ok(format!("✓ VM '{}' stopped\r\n", vm.name))
         }
@@ -307,6 +336,7 @@ async fn execute(
             if parts.len() < 2 {
                 return Ok("usage: restart <name>\r\n".to_string());
             }
+            check_owns(api, parts[1], user).await?;
             let vm = api.restart_vm(parts[1]).await?;
             Ok(format!("✓ VM '{}' restarted (status: {})\r\n", vm.name, vm.status))
         }
@@ -316,11 +346,13 @@ async fn execute(
             if parts.len() < 3 {
                 return Ok("usage: rename <old-name> <new-name>\r\n".to_string());
             }
+            check_owns(api, parts[1], user).await?;
             api.rename_vm(parts[1], parts[2]).await?;
             Ok(format!("✓ VM '{}' renamed to '{}'\r\n", parts[1], parts[2]))
         }
 
         // ── cp / copy ──────────────────────────────────────────────────────
+        // The copy is owned by the same user as the source.
         "cp" | "copy" => {
             if parts.len() < 2 {
                 return Ok("usage: cp <source> [new-name]\r\n".to_string());
@@ -332,7 +364,8 @@ async fn execute(
                 let prefix = &source[..source.len().min(6)];
                 format!("{}-copy", prefix)
             };
-            let vm = api.copy_vm(source, &new_name).await?;
+            check_owns(api, source, user).await?;
+            let vm = api.copy_vm(source, &new_name, &user.id).await?;
             Ok(format!(
                 "✓ VM '{}' copied to '{}'\r\n  IP: {}\r\n  SSH: ssh root@{}\r\n",
                 source, vm.name, vm.ip, vm.ip
@@ -350,7 +383,7 @@ async fn execute(
         // ── ssh-key ────────────────────────────────────────────────────────
         "ssh-key" => {
             if parts.len() < 2 {
-                return Ok("usage: ssh-key <list|add|remove>\r\n".to_string());
+                return Ok("usage: ssh-key <list|remove>\r\n".to_string());
             }
             match parts[1] {
                 "list" => {
@@ -405,6 +438,7 @@ async fn execute(
                 .find(|w| w[0] == "--port" || w[0] == "-p")
                 .and_then(|w| w[1].parse().ok())
                 .unwrap_or(80);
+            check_owns(api, vm_name, user).await?;
             api.expose_vm(vm_name, port).await?;
             Ok(format!(
                 "✓ VM '{}' exposed on proxy port {}\r\n  URL: https://{}.miniclankers.com\r\n",
@@ -417,6 +451,7 @@ async fn execute(
             if parts.len() < 2 {
                 return Ok("usage: set-public <vm>\r\n".to_string());
             }
+            check_owns(api, parts[1], user).await?;
             api.set_vm_public(parts[1]).await?;
             Ok(format!(
                 "✓ VM '{}' is now publicly accessible (no login required)\r\n",
@@ -427,6 +462,7 @@ async fn execute(
             if parts.len() < 2 {
                 return Ok("usage: set-private <vm>\r\n".to_string());
             }
+            check_owns(api, parts[1], user).await?;
             api.set_vm_private(parts[1]).await?;
             Ok(format!(
                 "✓ VM '{}' is now private (login required to access)\r\n",
@@ -449,7 +485,7 @@ fn help() -> String {
     [
         "MINICLANKERS.COM — VM management",
         "",
-        "  ls                              list VMs",
+        "  ls                              list your VMs",
         "  new [name] [--cpus N] [--mem M] create a new VM",
         "  rm <name>                       destroy a VM",
         "  stop <name>                     stop a VM (keep rootfs)",

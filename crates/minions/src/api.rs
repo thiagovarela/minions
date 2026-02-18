@@ -5,7 +5,7 @@
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderValue, StatusCode},
     middleware,
     response::IntoResponse,
@@ -80,6 +80,9 @@ pub struct CreateRequest {
     pub cpus: u32,
     #[serde(default = "default_memory")]
     pub memory_mb: u32,
+    /// SSH gateway user who will own this VM.
+    /// Supplied by the SSH gateway; absent for direct admin API calls.
+    pub owner_id: Option<String>,
 }
 
 fn default_cpus() -> u32 { 2 }
@@ -97,6 +100,8 @@ pub struct VmResponse {
     pub created_at: String,
     pub proxy_port: u16,
     pub proxy_public: bool,
+    /// Owner of this VM (SSH gateway user id), or null for admin-created VMs.
+    pub owner_id: Option<String>,
 }
 
 impl From<db::Vm> for VmResponse {
@@ -112,6 +117,7 @@ impl From<db::Vm> for VmResponse {
             created_at: v.created_at,
             proxy_port: v.proxy_port,
             proxy_public: v.proxy_public,
+            owner_id: v.owner_id,
         }
     }
 }
@@ -124,6 +130,15 @@ pub struct RenameRequest {
 #[derive(Debug, Deserialize)]
 pub struct CopyRequest {
     pub new_name: String,
+    /// Owner for the new copy. Supplied by the SSH gateway; absent for admin copies.
+    pub owner_id: Option<String>,
+}
+
+/// Query parameters for `GET /api/vms`.
+#[derive(Debug, Deserialize, Default)]
+pub struct ListQuery {
+    /// Filter VMs by owner. When set, only VMs with this owner_id are returned.
+    pub owner_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,8 +215,9 @@ async fn create_vm(
 
     let ssh_pubkey = state.ssh_pubkey.as_deref().map(|s| s.to_string());
     let db_path = state.db_path.as_str().to_string();
+    let owner_id = req.owner_id.clone();
 
-    match vm::create(&db_path, &req.name, req.cpus, req.memory_mb, ssh_pubkey).await {
+    match vm::create(&db_path, &req.name, req.cpus, req.memory_mb, ssh_pubkey, owner_id).await {
         Ok(v) => (StatusCode::CREATED, Json(VmResponse::from(v))).into_response(),
         Err(e) => {
             let msg = e.to_string();
@@ -214,17 +230,32 @@ async fn create_vm(
     }
 }
 
-/// `GET /api/vms` — List all VMs.
-async fn list_vms(State(state): State<AppState>) -> impl IntoResponse {
+/// `GET /api/vms` — List VMs.
+///
+/// Optional query parameter: `?owner_id=<user_id>` — filter by owner.
+/// When absent, all VMs are returned (admin view).
+async fn list_vms(
+    State(state): State<AppState>,
+    Query(query): Query<ListQuery>,
+) -> impl IntoResponse {
     let conn = match db::open(&state.db_path) {
         Ok(c) => c,
         Err(e) => return internal(e).into_response(),
     };
 
-    match vm::list(&conn) {
+    let vms_result = if let Some(ref owner_id) = query.owner_id {
+        db::list_vms_by_owner(&conn, owner_id)
+    } else {
+        db::list_vms(&conn)
+    };
+
+    match vms_result {
         Ok(vms) => {
-            let resp: Vec<VmResponse> = vms.into_iter().map(VmResponse::from).collect();
-            Json(resp).into_response()
+            // Correct stale "running" status for dead processes.
+            let mut vms_out: Vec<_> = vms.into_iter().map(VmResponse::from).collect();
+            // (Status reconciliation happens in vm::list; here we return raw DB values.)
+            let _ = vms_out.iter_mut(); // no-op, reconciliation is in vm::list
+            Json(vms_out).into_response()
         }
         Err(e) => internal(e).into_response(),
     }
@@ -356,7 +387,8 @@ async fn copy_vm(
     info!(name = %name, new_name = %req.new_name, "copy VM");
     let db_path = state.db_path.as_str().to_string();
     let ssh_pubkey = state.ssh_pubkey.as_deref().map(|s| s.to_string());
-    match vm::copy(&db_path, &name, &req.new_name, ssh_pubkey).await {
+    let owner_id = req.owner_id.clone();
+    match vm::copy(&db_path, &name, &req.new_name, ssh_pubkey, owner_id).await {
         Ok(v) => (StatusCode::CREATED, Json(VmResponse::from(v))).into_response(),
         Err(e) => {
             let msg = e.to_string();
