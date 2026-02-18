@@ -11,4 +11,5 @@ path = "src/main.rs"
 minions-proto = { path = "../minions-proto" }
 tokio = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+serde_json = { workspace = true }
 anyhow = { workspace = true }
