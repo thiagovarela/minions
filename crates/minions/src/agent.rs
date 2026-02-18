@@ -52,9 +52,8 @@ pub async fn wait_ready(vsock_socket: &Path, timeout: Duration) -> Result<()> {
     let mut backoff = Duration::from_millis(100);
 
     loop {
-        match send_request(vsock_socket, Request::HealthCheck).await {
-            Ok(_) => return Ok(()),
-            Err(_) => {}
+        if send_request(vsock_socket, Request::HealthCheck).await.is_ok() {
+            return Ok(());
         }
 
         if tokio::time::Instant::now() >= deadline {

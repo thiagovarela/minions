@@ -50,6 +50,12 @@ pub fn generate_mac(cid: u32) -> String {
     format!("52:54:00:00:{high:02x}:{low:02x}")
 }
 
+/// Public alias so callers (e.g. `vm::rename`) can compute the TAP name
+/// without duplicating the truncation logic.
+pub fn tap_name_for(name: &str) -> String {
+    tap_name(name)
+}
+
 /// TAP device name derived from VM name (max 15 chars total).
 fn tap_name(name: &str) -> String {
     let prefix = "tap-";
