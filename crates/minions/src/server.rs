@@ -1,6 +1,6 @@
 //! Daemon mode: startup reconciliation + HTTP server.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -87,11 +87,16 @@ fn cleanup_orphan_sockets(conn: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
-/// Start the HTTP API daemon.
-pub async fn serve(db_path: String, bind: String, ssh_pubkey: Option<String>) -> Result<()> {
+/// Start the HTTP API daemon (and optionally the SSH gateway).
+pub async fn serve(
+    db_path: String,
+    bind: String,
+    ssh_pubkey: Option<String>,
+    ssh_bind: Option<String>,
+) -> Result<()> {
     reconcile(&db_path)?;
 
-    // Load API key from environment variable
+    // ── API key ───────────────────────────────────────────────────────────────
     let api_key = std::env::var("MINIONS_API_KEY").ok();
     if api_key.is_none() {
         warn!("⚠️  MINIONS_API_KEY not set — API authentication DISABLED (INSECURE)");
@@ -100,7 +105,7 @@ pub async fn serve(db_path: String, bind: String, ssh_pubkey: Option<String>) ->
         info!("✓ API authentication enabled");
     }
 
-    let auth = auth::AuthConfig::new(api_key);
+    let auth = auth::AuthConfig::new(api_key.clone());
 
     match &ssh_pubkey {
         Some(key) => info!("✓ SSH public key loaded ({} chars) — will be injected into new VMs", key.len()),
@@ -108,7 +113,7 @@ pub async fn serve(db_path: String, bind: String, ssh_pubkey: Option<String>) ->
     }
 
     let state = AppState {
-        db_path: Arc::new(db_path),
+        db_path: Arc::new(db_path.clone()),
         ssh_pubkey: ssh_pubkey.map(Arc::new),
         auth,
     };
@@ -120,6 +125,39 @@ pub async fn serve(db_path: String, bind: String, ssh_pubkey: Option<String>) ->
         .map_err(|e| anyhow::anyhow!("bind {bind}: {e}"))?;
 
     info!("minions daemon listening on http://{bind}");
+
+    // ── SSH gateway (optional) ─────────────────────────────────────────────────
+    if let Some(ssh_bind_addr) = ssh_bind {
+        let (host_key, proxy_key, proxy_pubkey) =
+            minions_ssh::ensure_keys().context("SSH gateway key setup")?;
+
+        info!("✓ SSH host key loaded");
+        info!("✓ Proxy public key: {}", proxy_pubkey);
+
+        // Derive the HTTP API URL from the bind address (use 127.0.0.1 always).
+        let port = bind.rsplit(':').next().unwrap_or("3000");
+        let api_base_url = format!("http://127.0.0.1:{}", port);
+
+        let gateway_config = minions_ssh::GatewayConfig {
+            db_path: db_path.clone(),
+            command_user: "minions".to_string(),
+            api_base_url,
+            api_key,
+            proxy_key: std::sync::Arc::new(proxy_key),
+        };
+
+        let ssh_bind_clone = ssh_bind_addr.clone();
+        tokio::spawn(async move {
+            if let Err(e) = minions_ssh::serve(host_key, gateway_config, &ssh_bind_clone).await {
+                tracing::error!("SSH gateway error: {:#}", e);
+            }
+        });
+
+        info!("SSH gateway starting on {}", ssh_bind_addr);
+    } else {
+        info!("SSH gateway disabled (use --ssh-bind to enable)");
+    }
+
     axum::serve(listener, app).await?;
     Ok(())
 }
