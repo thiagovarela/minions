@@ -23,6 +23,10 @@ pub struct Vm {
     pub rootfs_path: String,
     pub created_at: String,
     pub stopped_at: Option<String>,
+    /// Port the VM's web server listens on (default 80).
+    pub proxy_port: u16,
+    /// Whether the VM is publicly accessible without auth (default false).
+    pub proxy_public: bool,
 }
 
 /// Open (or create) the state database.
@@ -54,7 +58,9 @@ fn migrate(conn: &Connection) -> Result<()> {
             memory_mb       INTEGER NOT NULL DEFAULT 1024,
             rootfs_path     TEXT NOT NULL,
             created_at      TEXT NOT NULL,
-            stopped_at      TEXT
+            stopped_at      TEXT,
+            proxy_port      INTEGER NOT NULL DEFAULT 80,
+            proxy_public    INTEGER NOT NULL DEFAULT 0
         );
 
         -- Partial unique indexes to prevent IP/CID conflicts for active VMs.
@@ -66,7 +72,13 @@ fn migrate(conn: &Connection) -> Result<()> {
             ON vms(vsock_cid) WHERE status != 'stopped';
         ",
     )
-    .context("run migration")
+    .context("run migration")?;
+
+    // Idempotent column additions for existing databases (errors ignored).
+    let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN proxy_port   INTEGER NOT NULL DEFAULT 80;");
+    let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN proxy_public  INTEGER NOT NULL DEFAULT 0;");
+
+    Ok(())
 }
 
 /// Insert a new VM row (status = "creating").
@@ -74,8 +86,9 @@ pub fn insert_vm(conn: &Connection, vm: &Vm) -> Result<()> {
     conn.execute(
         "INSERT INTO vms
             (name, status, ip, vsock_cid, ch_pid, ch_api_socket, ch_vsock_socket,
-             tap_device, mac_address, vcpus, memory_mb, rootfs_path, created_at, stopped_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+             tap_device, mac_address, vcpus, memory_mb, rootfs_path, created_at, stopped_at,
+             proxy_port, proxy_public)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
         params![
             vm.name,
             vm.status,
@@ -91,6 +104,8 @@ pub fn insert_vm(conn: &Connection, vm: &Vm) -> Result<()> {
             vm.rootfs_path,
             vm.created_at,
             vm.stopped_at,
+            vm.proxy_port as i64,
+            if vm.proxy_public { 1i64 } else { 0i64 },
         ],
     )
     .context("insert vm")?;
@@ -101,7 +116,8 @@ pub fn insert_vm(conn: &Connection, vm: &Vm) -> Result<()> {
 pub fn get_vm(conn: &Connection, name: &str) -> Result<Option<Vm>> {
     let mut stmt = conn.prepare(
         "SELECT name,status,ip,vsock_cid,ch_pid,ch_api_socket,ch_vsock_socket,
-                tap_device,mac_address,vcpus,memory_mb,rootfs_path,created_at,stopped_at
+                tap_device,mac_address,vcpus,memory_mb,rootfs_path,created_at,stopped_at,
+                proxy_port,proxy_public
          FROM vms WHERE name=?1",
     )?;
     let mut rows = stmt.query(params![name])?;
@@ -116,7 +132,8 @@ pub fn get_vm(conn: &Connection, name: &str) -> Result<Option<Vm>> {
 pub fn list_vms(conn: &Connection) -> Result<Vec<Vm>> {
     let mut stmt = conn.prepare(
         "SELECT name,status,ip,vsock_cid,ch_pid,ch_api_socket,ch_vsock_socket,
-                tap_device,mac_address,vcpus,memory_mb,rootfs_path,created_at,stopped_at
+                tap_device,mac_address,vcpus,memory_mb,rootfs_path,created_at,stopped_at,
+                proxy_port,proxy_public
          FROM vms ORDER BY created_at",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -243,6 +260,8 @@ pub fn next_available_cid(conn: &Connection) -> Result<u32> {
 }
 
 fn row_to_vm(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vm> {
+    let proxy_port: i64 = row.get(14).unwrap_or(80);
+    let proxy_public: i64 = row.get(15).unwrap_or(0);
     Ok(Vm {
         name: row.get(0)?,
         status: row.get(1)?,
@@ -258,5 +277,25 @@ fn row_to_vm(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vm> {
         rootfs_path: row.get(11)?,
         created_at: row.get(12)?,
         stopped_at: row.get(13)?,
+        proxy_port: proxy_port as u16,
+        proxy_public: proxy_public != 0,
     })
+}
+
+/// Set the proxy port for a VM.
+pub fn set_proxy_port(conn: &Connection, name: &str, port: u16) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE vms SET proxy_port = ?1 WHERE name = ?2",
+        params![port as i64, name],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Set the public visibility flag for a VM.
+pub fn set_proxy_public(conn: &Connection, name: &str, public: bool) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE vms SET proxy_public = ?1 WHERE name = ?2",
+        params![if public { 1i64 } else { 0i64 }, name],
+    )?;
+    Ok(changed > 0)
 }

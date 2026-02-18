@@ -88,10 +88,15 @@ enum Commands {
         /// Address to bind the HTTP API to
         #[arg(long, default_value = "0.0.0.0:3000")]
         bind: String,
-        /// Address to bind the SSH gateway to (e.g. 0.0.0.0:22)
-        /// When set, the SSH gateway starts alongside the HTTP API.
+        /// Address to bind the SSH gateway to (e.g. 0.0.0.0:2222)
         #[arg(long)]
         ssh_bind: Option<String>,
+        /// Address to bind the HTTP reverse proxy to (e.g. 0.0.0.0:80)
+        #[arg(long)]
+        proxy_bind: Option<String>,
+        /// Base domain for the proxy (e.g. miniclankers.com)
+        #[arg(long)]
+        domain: Option<String>,
     },
     /// One-time host setup: bridge, iptables, directories, systemd unit
     Init {
@@ -239,9 +244,16 @@ async fn main() -> Result<()> {
     // Init and Serve always run directly — they ARE the server side.
     match &cli.command {
         Commands::Init { persist } => return init::run(*persist),
-        Commands::Serve { bind, ssh_bind } => {
+        Commands::Serve { bind, ssh_bind, proxy_bind, domain } => {
             let ssh_pubkey = find_ssh_pubkey();
-            return server::serve(cli.db.clone(), bind.clone(), ssh_pubkey, ssh_bind.clone()).await;
+            return server::serve(
+                cli.db.clone(),
+                bind.clone(),
+                ssh_pubkey,
+                ssh_bind.clone(),
+                proxy_bind.clone(),
+                domain.clone(),
+            ).await;
         }
         // Ssh is always local (interactive terminal).
         Commands::Ssh { name } => return cmd_ssh(&cli.db, name).await,

@@ -37,6 +37,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/vms/{name}/exec", post(exec_vm))
         .route("/api/vms/{name}/status", get(vm_status))
         .route("/api/vms/{name}/logs", get(vm_logs))
+        .route("/api/vms/{name}/expose", post(expose_vm))
+        .route("/api/vms/{name}/set-public", post(set_vm_public))
+        .route("/api/vms/{name}/set-private", post(set_vm_private))
         // Add authentication middleware (checks Bearer token if MINIONS_API_KEY is set)
         .layer(middleware::from_fn_with_state(
             auth_config,
@@ -77,6 +80,8 @@ pub struct VmResponse {
     pub memory_mb: u32,
     pub pid: Option<i64>,
     pub created_at: String,
+    pub proxy_port: u16,
+    pub proxy_public: bool,
 }
 
 impl From<db::Vm> for VmResponse {
@@ -90,6 +95,8 @@ impl From<db::Vm> for VmResponse {
             memory_mb: v.memory_mb,
             pid: v.ch_pid,
             created_at: v.created_at,
+            proxy_port: v.proxy_port,
+            proxy_public: v.proxy_public,
         }
     }
 }
@@ -409,5 +416,76 @@ async fn vm_logs(
             Json(ErrorResponse { error: format!("no logs found for VM '{name}'") }),
         )
             .into_response(),
+    }
+}
+
+// ── Proxy configuration ───────────────────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+struct ExposeParams {
+    port: u16,
+}
+
+/// `POST /api/vms/:name/expose` — Set the proxy port.
+async fn expose_vm(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(params): Json<ExposeParams>,
+) -> impl IntoResponse {
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return internal(e).into_response(),
+    };
+    if !(1..=65535).contains(&params.port) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: "port must be between 1 and 65535".into() }),
+        )
+            .into_response();
+    }
+    match db::set_proxy_port(&conn, &name, params.port) {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "name": name, "proxy_port": params.port })),
+        )
+            .into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse { error: format!("VM '{name}' not found") }),
+        )
+            .into_response(),
+        Err(e) => internal(e).into_response(),
+    }
+}
+
+/// `POST /api/vms/:name/set-public` — Make VM publicly accessible without auth.
+async fn set_vm_public(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return internal(e).into_response(),
+    };
+    match db::set_proxy_public(&conn, &name, true) {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "name": name, "proxy_public": true }))).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("VM '{name}' not found") })).into_response(),
+        Err(e) => internal(e).into_response(),
+    }
+}
+
+/// `POST /api/vms/:name/set-private` — Require auth to access VM proxy.
+async fn set_vm_private(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return internal(e).into_response(),
+    };
+    match db::set_proxy_public(&conn, &name, false) {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "name": name, "proxy_public": false }))).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("VM '{name}' not found") })).into_response(),
+        Err(e) => internal(e).into_response(),
     }
 }

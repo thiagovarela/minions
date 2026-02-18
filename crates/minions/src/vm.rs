@@ -59,6 +59,8 @@ pub async fn create(
             rootfs_path: rootfs.to_string_lossy().to_string(),
             created_at: Utc::now().to_rfc3339(),
             stopped_at: None,
+            proxy_port: 80,
+            proxy_public: false,
         };
         db::insert_vm(&conn, &vm_row).context("insert VM into DB").inspect_err(|_| {
             let _ = network::destroy_tap(name);
@@ -412,6 +414,9 @@ pub async fn copy(
             rootfs_path: rootfs.to_string_lossy().to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
             stopped_at: None,
+            // Inherit proxy settings from source VM.
+            proxy_port: source.proxy_port,
+            proxy_public: source.proxy_public,
         };
         db::insert_vm(&conn, &vm_row).context("insert copied VM into DB").inspect_err(|_| {
             let _ = network::destroy_tap(new_name);

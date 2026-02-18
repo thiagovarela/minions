@@ -10,6 +10,9 @@ path = "src/main.rs"
 [dependencies.minions-ssh]
 path = "../minions-ssh"
 
+[dependencies.minions-proxy]
+path = "../minions-proxy"
+
 [dependencies]
 minions-proto = { path = "../minions-proto" }
 tokio = { workspace = true }

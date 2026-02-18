@@ -138,6 +138,42 @@ impl ApiClient {
             .await?;
         Ok(resp)
     }
+
+    pub async fn expose_vm(&self, name: &str, port: u16) -> Result<()> {
+        #[derive(Serialize)]
+        struct Req { port: u16 }
+        self.auth(
+            self.client
+                .post(format!("{}/api/vms/{}/expose", self.base_url, name))
+                .json(&Req { port }),
+        )
+        .send()
+        .await?
+        .error_for_status()?;
+        Ok(())
+    }
+
+    pub async fn set_vm_public(&self, name: &str) -> Result<()> {
+        self.auth(
+            self.client
+                .post(format!("{}/api/vms/{}/set-public", self.base_url, name)),
+        )
+        .send()
+        .await?
+        .error_for_status()?;
+        Ok(())
+    }
+
+    pub async fn set_vm_private(&self, name: &str) -> Result<()> {
+        self.auth(
+            self.client
+                .post(format!("{}/api/vms/{}/set-private", self.base_url, name)),
+        )
+        .send()
+        .await?
+        .error_for_status()?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,7 +184,13 @@ pub struct VmInfo {
     pub cpus: u32,
     pub memory_mb: u32,
     pub pid: Option<i64>,
+    #[serde(default = "default_proxy_port")]
+    pub proxy_port: u16,
+    #[serde(default)]
+    pub proxy_public: bool,
 }
+
+fn default_proxy_port() -> u16 { 80 }
 
 // ── Command execution ──────────────────────────────────────────────────────────
 
@@ -185,15 +227,17 @@ async fn execute(
                 return Ok("no VMs\r\n".to_string());
             }
             let mut out = format!(
-                "{:<12} {:<10} {:<16} {:>5} {:>10}\r\n",
-                "NAME", "STATUS", "IP", "CPUS", "MEMORY"
+                "{:<12} {:<10} {:<16} {:>5} {:>10}  {:>5}  {:<8}\r\n",
+                "NAME", "STATUS", "IP", "CPUS", "MEMORY", "PORT", "ACCESS"
             );
-            out.push_str(&"-".repeat(60));
+            out.push_str(&"-".repeat(75));
             out.push_str("\r\n");
             for vm in &vms {
+                let access = if vm.proxy_public { "public" } else { "private" };
                 out.push_str(&format!(
-                    "{:<12} {:<10} {:<16} {:>5} {:>8} MiB\r\n",
+                    "{:<12} {:<10} {:<16} {:>5} {:>8} MiB  {:>5}  {:<8}\r\n",
                     vm.name, vm.status, vm.ip, vm.cpus, vm.memory_mb,
+                    vm.proxy_port, access,
                 ));
             }
             Ok(out)
@@ -351,6 +395,45 @@ async fn execute(
             }
         }
 
+        // ── expose ─────────────────────────────────────────────────────────
+        "expose" => {
+            if parts.len() < 2 {
+                return Ok("usage: expose <vm> [--port <n>]\r\n".to_string());
+            }
+            let vm_name = parts[1];
+            let port: u16 = parts.windows(2)
+                .find(|w| w[0] == "--port" || w[0] == "-p")
+                .and_then(|w| w[1].parse().ok())
+                .unwrap_or(80);
+            api.expose_vm(vm_name, port).await?;
+            Ok(format!(
+                "✓ VM '{}' exposed on proxy port {}\r\n  URL: https://{}.miniclankers.com\r\n",
+                vm_name, port, vm_name
+            ))
+        }
+
+        // ── set-public / set-private ────────────────────────────────────────
+        "set-public" => {
+            if parts.len() < 2 {
+                return Ok("usage: set-public <vm>\r\n".to_string());
+            }
+            api.set_vm_public(parts[1]).await?;
+            Ok(format!(
+                "✓ VM '{}' is now publicly accessible (no login required)\r\n",
+                parts[1]
+            ))
+        }
+        "set-private" => {
+            if parts.len() < 2 {
+                return Ok("usage: set-private <vm>\r\n".to_string());
+            }
+            api.set_vm_private(parts[1]).await?;
+            Ok(format!(
+                "✓ VM '{}' is now private (login required to access)\r\n",
+                parts[1]
+            ))
+        }
+
         // ── help ───────────────────────────────────────────────────────────
         "help" | "--help" | "-h" => Ok(help()),
 
@@ -374,13 +457,18 @@ fn help() -> String {
         "  rename <old> <new>              rename a stopped VM",
         "  cp <source> [new-name]          copy a VM",
         "",
+        "  expose <vm> [--port N]          expose VM web server on port N (default 80)",
+        "  set-public <vm>                 make VM web accessible without login",
+        "  set-private <vm>                require login to access VM web (default)",
+        "",
         "  whoami                          show your account info",
         "  ssh-key list                    list your registered SSH keys",
         "  ssh-key remove <prefix>         remove an SSH key",
         "",
         "  help                            show this help",
         "",
-        "  SSH into a VM:  ssh <vmname>@ssh.miniclankers.com",
+        "  SSH into a VM:  ssh -p 2222 <vmname>@ssh.miniclankers.com",
+        "  Web access:     https://<vmname>.miniclankers.com",
         "",
     ]
     .join("\r\n")
