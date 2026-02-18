@@ -115,13 +115,27 @@ impl ConnectionHandler {
         }
     }
 
-    /// Look up a VM by name via the API and return its IP.
+    /// Look up a VM by name via the API, verify ownership, and return its IP.
+    ///
+    /// Ownership is checked when the user is a registered SSH gateway user.
+    /// An unregistered user connecting in proxy mode is caught earlier during
+    /// shell/exec handling (they get the registration prompt).
     async fn resolve_vm(&self, vm_name: &str) -> Result<String> {
-        let vms = self.api().list_vms().await?;
-        let vm = vms
-            .into_iter()
-            .find(|v| v.name == vm_name)
+        let api = self.api();
+        let vm = api
+            .get_vm(vm_name)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", vm_name))?;
+
+        // Enforce ownership: the VM must belong to the authenticated user.
+        // We use a deliberately vague error to avoid leaking VM existence.
+        if let Some(ref user) = self.authed_user {
+            match &vm.owner_id {
+                Some(oid) if oid == &user.id => {} // ✓ owned by this user
+                _ => anyhow::bail!("VM '{}' not found", vm_name),
+            }
+        }
+
         if vm.status != "running" {
             anyhow::bail!("VM '{}' is {} — it must be running to SSH into it", vm_name, vm.status);
         }

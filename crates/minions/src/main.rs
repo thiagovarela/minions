@@ -400,7 +400,7 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
             if ssh_pubkey.is_some() && !json {
                 println!("  (SSH public key found — key-based SSH will work)");
             }
-            let vm = vm::create(db_path, &name, cpus, memory, ssh_pubkey).await?;
+            let vm = vm::create(db_path, &name, cpus, memory, ssh_pubkey, None).await?;
             print_vm(VmJson::from(vm), json);
         }
 
@@ -459,7 +459,7 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
                 println!("Copying VM '{source}' → '{new_name}'…");
             }
             let ssh_pubkey = find_ssh_pubkey();
-            let vm = vm::copy(db_path, &source, &new_name, ssh_pubkey).await?;
+            let vm = vm::copy(db_path, &source, &new_name, ssh_pubkey, None).await?;
             print_vm(VmJson::from(vm), json);
         }
 

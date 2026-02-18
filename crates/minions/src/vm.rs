@@ -13,12 +13,16 @@ use crate::{agent, db, hypervisor, network, storage};
 ///
 /// Takes `db_path` instead of `&Connection` so the connection is never held
 /// across `.await` points (rusqlite::Connection is !Sync).
+///
+/// `owner_id` — the SSH gateway user who owns this VM, or `None` for
+/// admin/system VMs created directly via the HTTP API.
 pub async fn create(
     db_path: &str,
     name: &str,
     vcpus: u32,
     memory_mb: u32,
     ssh_pubkey: Option<String>,
+    owner_id: Option<String>,
 ) -> Result<db::Vm> {
     // ── Sync: validate + allocate resources ──────────────────────────────────
     let (ip, vsock_socket, cfg) = {
@@ -61,6 +65,7 @@ pub async fn create(
             stopped_at: None,
             proxy_port: 80,
             proxy_public: false,
+            owner_id: owner_id.clone(),
         };
         db::insert_vm(&conn, &vm_row).context("insert VM into DB").inspect_err(|_| {
             let _ = network::destroy_tap(name);
@@ -360,11 +365,15 @@ pub async fn rename(db_path: &str, old_name: &str, new_name: &str) -> Result<()>
 /// Creates an independent copy of the source VM's rootfs, allocates fresh
 /// network resources (IP, CID, TAP), and boots it.  The source VM may be
 /// running or stopped.
+///
+/// `owner_id` — the user who will own the new copy (typically the same user
+/// who owns the source, but the caller decides).
 pub async fn copy(
     db_path: &str,
     source_name: &str,
     new_name: &str,
     ssh_pubkey: Option<String>,
+    owner_id: Option<String>,
 ) -> Result<db::Vm> {
     validate_name(new_name)?;
 
@@ -417,6 +426,7 @@ pub async fn copy(
             // Inherit proxy settings from source VM.
             proxy_port: source.proxy_port,
             proxy_public: source.proxy_public,
+            owner_id: owner_id.clone(),
         };
         db::insert_vm(&conn, &vm_row).context("insert copied VM into DB").inspect_err(|_| {
             let _ = network::destroy_tap(new_name);
