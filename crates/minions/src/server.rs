@@ -87,12 +87,14 @@ fn cleanup_orphan_sockets(conn: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
-/// Start the HTTP API daemon (and optionally the SSH gateway).
+/// Start the HTTP API daemon (and optionally the SSH gateway + HTTP proxy).
 pub async fn serve(
     db_path: String,
     bind: String,
     ssh_pubkey: Option<String>,
     ssh_bind: Option<String>,
+    proxy_bind: Option<String>,
+    domain: Option<String>,
 ) -> Result<()> {
     reconcile(&db_path)?;
 
@@ -142,7 +144,7 @@ pub async fn serve(
             db_path: db_path.clone(),
             command_user: "minions".to_string(),
             api_base_url,
-            api_key,
+            api_key: api_key.clone(),
             proxy_key: std::sync::Arc::new(proxy_key),
         };
 
@@ -156,6 +158,29 @@ pub async fn serve(
         info!("SSH gateway starting on {}", ssh_bind_addr);
     } else {
         info!("SSH gateway disabled (use --ssh-bind to enable)");
+    }
+
+    // ── HTTP reverse proxy (optional) ─────────────────────────────────────────
+    if let Some(proxy_addr) = proxy_bind {
+        let base_domain = domain.clone().unwrap_or_else(|| {
+            warn!("⚠️  --proxy-bind set but --domain not provided; defaulting to 'localhost'");
+            "localhost".to_string()
+        });
+
+        let proxy_config = minions_proxy::ProxyConfig {
+            db_path: db_path.clone(),
+            domain: base_domain.clone(),
+            api_key: api_key.clone(),
+        };
+
+        info!("HTTP proxy starting on {} (domain: {})", proxy_addr, base_domain);
+        tokio::spawn(async move {
+            if let Err(e) = minions_proxy::serve(proxy_config, &proxy_addr).await {
+                tracing::error!("HTTP proxy error: {:#}", e);
+            }
+        });
+    } else {
+        info!("HTTP proxy disabled (use --proxy-bind and --domain to enable)");
     }
 
     axum::serve(listener, app).await?;

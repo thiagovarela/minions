@@ -6,6 +6,7 @@ members = [
     "crates/minions-host",
     "crates/minions",
     "crates/minions-ssh",
+    "crates/minions-proxy",
 ]
 
 [workspace.dependencies]
