@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+
+{% block title %}{{ vm_name }}{% endblock %}
+
+{% block content %}
+<!-- Back + header -->
+<div class="mb-6">
+  <a href="/dashboard" class="text-sm text-gray-500 hover:text-gray-300 transition">← All VMs</a>
+  <div class="flex items-center gap-3 mt-2">
+    <h1 class="text-2xl font-bold font-mono text-white">{{ vm_name }}</h1>
+    {% if vm_status == "running" %}
+      <span class="inline-flex items-center gap-1.5 rounded-full bg-green-900/40 px-2.5 py-1 text-xs font-medium text-green-400 border border-green-800">
+        <span class="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse"></span>running
+      </span>
+    {% else if vm_status == "stopped" %}
+      <span class="inline-flex items-center rounded-full bg-gray-800 px-2.5 py-1 text-xs font-medium text-gray-400 border border-gray-700">
+        stopped
+      </span>
+    {% else %}
+      <span class="inline-flex items-center rounded-full bg-yellow-900/40 px-2.5 py-1 text-xs font-medium text-yellow-400 border border-yellow-800">
+        {{ vm_status }}
+      </span>
+    {% endif %}
+  </div>
+  <p class="text-sm text-gray-500 mt-1 font-mono">{{ vm_ip }} · {{ vm_vcpus }} vCPUs · {{ vm_memory_mb }} MiB RAM · owned by {{ vm_owner }}</p>
+</div>
+
+<!-- Action buttons -->
+<div class="flex gap-2 mb-8" id="action-result">
+  {% if vm_status == "running" %}
+  <button
+    hx-post="/dashboard/vms/{{ vm_name }}/stop"
+    hx-target="#action-result"
+    hx-swap="innerHTML"
+    hx-confirm="Stop VM {{ vm_name }}?"
+    class="rounded-lg bg-yellow-700 hover:bg-yellow-600 px-4 py-2 text-sm font-medium text-white transition">
+    ■ Stop
+  </button>
+  <button
+    hx-post="/dashboard/vms/{{ vm_name }}/restart"
+    hx-target="#action-result"
+    hx-swap="innerHTML"
+    hx-confirm="Restart VM {{ vm_name }}?"
+    class="rounded-lg bg-blue-700 hover:bg-blue-600 px-4 py-2 text-sm font-medium text-white transition">
+    ↺ Restart
+  </button>
+  <button
+    hx-post="/dashboard/vms/{{ vm_name }}/snapshot"
+    hx-target="#action-result"
+    hx-swap="innerHTML"
+    class="rounded-lg bg-indigo-700 hover:bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition">
+    📸 Snapshot
+  </button>
+  {% endif %}
+  <button
+    hx-delete="/dashboard/vms/{{ vm_name }}"
+    hx-target="body"
+    hx-push-url="/dashboard"
+    hx-confirm="Permanently destroy {{ vm_name }} and all its data?"
+    class="rounded-lg bg-red-900 hover:bg-red-800 px-4 py-2 text-sm font-medium text-red-300 transition ml-auto">
+    🗑 Destroy
+  </button>
+</div>
+
+<!-- Metrics -->
+<section class="mb-8">
+  <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Live Metrics</h2>
+  <div
+    class="grid grid-cols-2 md:grid-cols-4 gap-3"
+    hx-get="/dashboard/vms/{{ vm_name }}/metrics-fragment"
+    hx-trigger="load, every 30s"
+    hx-swap="outerHTML"
+  >
+    {% include "metrics_fragment.html" %}
+  </div>
+</section>
+
+<!-- Snapshots -->
+<section>
+  <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Snapshots</h2>
+  {% if snapshots.is_empty() %}
+    <p class="text-sm text-gray-600">No snapshots yet.</p>
+  {% else %}
+    <div class="overflow-hidden rounded-xl border border-gray-800">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-900 text-gray-400 text-xs uppercase tracking-wide">
+          <tr>
+            <th class="px-4 py-3 text-left">Name</th>
+            <th class="px-4 py-3 text-left">Created</th>
+            <th class="px-4 py-3 text-left">Size</th>
+            <th class="px-4 py-3 text-left"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-800 bg-gray-950">
+          {% for snap in snapshots %}
+          <tr class="hover:bg-gray-900 transition">
+            <td class="px-4 py-3 font-mono text-white">{{ snap.name }}</td>
+            <td class="px-4 py-3 text-gray-400">{{ snap.created_at }}</td>
+            <td class="px-4 py-3 text-gray-400">{{ snap.size_mb }} MiB</td>
+            <td class="px-4 py-3 text-right flex gap-2 justify-end">
+              <button
+                hx-post="/dashboard/vms/{{ vm_name }}/snapshots/{{ snap.name }}/restore"
+                hx-confirm="Restore from snapshot {{ snap.name }}? VM will be stopped first."
+                hx-target="#action-result"
+                hx-swap="innerHTML"
+                class="text-xs text-indigo-400 hover:text-indigo-300 transition">
+                Restore
+              </button>
+              <button
+                hx-delete="/dashboard/vms/{{ vm_name }}/snapshots/{{ snap.name }}"
+                hx-confirm="Delete snapshot {{ snap.name }}?"
+                hx-target="closest tr"
+                hx-swap="outerHTML"
+                class="text-xs text-red-400 hover:text-red-300 transition">
+                Delete
+              </button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</section>
+{% endblock %}

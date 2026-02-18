@@ -1,0 +1,32 @@
+<div
+  class="grid grid-cols-2 md:grid-cols-4 gap-3"
+  hx-get="/dashboard/vms/{{ vm_name }}/metrics-fragment"
+  hx-trigger="every 30s"
+  hx-swap="outerHTML"
+>
+{% if has_metrics %}
+  <div class="rounded-xl border border-gray-800 bg-gray-900 p-4">
+    <p class="text-xs text-gray-500 uppercase tracking-wide">CPU</p>
+    <p class="text-2xl font-bold text-white mt-1">{{ cpu_str }}%</p>
+    <p class="text-xs text-gray-600 mt-1">load avg {{ load_str }}</p>
+  </div>
+  <div class="rounded-xl border border-gray-800 bg-gray-900 p-4">
+    <p class="text-xs text-gray-500 uppercase tracking-wide">Memory</p>
+    <p class="text-2xl font-bold text-white mt-1">{{ mem_used_mb }} <span class="text-sm font-normal text-gray-400">/ {{ mem_total_mb }} MiB</span></p>
+    <p class="text-xs text-gray-600 mt-1">{{ mem_pct_str }}% used</p>
+  </div>
+  <div class="rounded-xl border border-gray-800 bg-gray-900 p-4">
+    <p class="text-xs text-gray-500 uppercase tracking-wide">Disk</p>
+    <p class="text-2xl font-bold text-white mt-1">{{ disk_used_gb }} <span class="text-sm font-normal text-gray-400">/ {{ disk_total_gb }} GiB</span></p>
+  </div>
+  <div class="rounded-xl border border-gray-800 bg-gray-900 p-4">
+    <p class="text-xs text-gray-500 uppercase tracking-wide">Network</p>
+    <p class="text-sm font-bold text-white mt-1">↓ {{ net_rx_str }} MiB</p>
+    <p class="text-sm font-bold text-white">↑ {{ net_tx_str }} MiB</p>
+  </div>
+{% else %}
+  <div class="col-span-4 rounded-xl border border-gray-800 bg-gray-900 px-6 py-8 text-center text-gray-600 text-sm">
+    No metrics yet — VM may be starting or agent unreachable.
+  </div>
+{% endif %}
+</div>

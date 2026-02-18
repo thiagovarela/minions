@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use crate::{api, auth, db, hypervisor, metrics, network};
+use crate::{api, auth, dashboard, db, hypervisor, metrics, network};
 
 /// Shared state passed to every HTTP handler.
 #[derive(Clone)]
@@ -20,6 +20,8 @@ pub struct AppState {
     pub cors_origins: Vec<String>,
     /// Shared metrics store updated by the background collector.
     pub metrics: metrics::MetricsStore,
+    /// Dashboard session tokens (in-memory, cleared on restart).
+    pub sessions: dashboard::DashboardSessions,
 }
 
 /// Reconcile DB state with reality.
@@ -151,9 +153,13 @@ pub async fn serve(
         auth,
         cors_origins,
         metrics: metrics_store,
+        sessions: dashboard::DashboardSessions::new(),
     };
 
-    let app = api::router(state);
+    let app = api::router(state.clone())
+        .merge(dashboard::router().with_state(state))
+        // Redirect bare root to dashboard
+        .route("/", axum::routing::get(|| async { axum::response::Redirect::to("/dashboard/login") }));
 
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
