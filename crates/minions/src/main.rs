@@ -7,6 +7,7 @@ use tabled::{Table, Tabled};
 
 mod agent;
 mod api;
+mod auth;
 mod client;
 mod db;
 mod hypervisor;

@@ -4,7 +4,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use crate::{api, db, hypervisor, network};
+use crate::{api, auth, db, hypervisor, network};
 
 /// Shared state passed to every HTTP handler.
 #[derive(Clone)]
@@ -13,6 +13,8 @@ pub struct AppState {
     pub db_path: Arc<String>,
     /// SSH public key to inject into new VMs.
     pub ssh_pubkey: Option<Arc<String>>,
+    /// Authentication configuration.
+    pub auth: auth::AuthConfig,
 }
 
 /// Reconcile DB state with reality.
@@ -89,9 +91,21 @@ fn cleanup_orphan_sockets(conn: &rusqlite::Connection) -> Result<()> {
 pub async fn serve(db_path: String, bind: String, ssh_pubkey: Option<String>) -> Result<()> {
     reconcile(&db_path)?;
 
+    // Load API key from environment variable
+    let api_key = std::env::var("MINIONS_API_KEY").ok();
+    if api_key.is_none() {
+        warn!("⚠️  MINIONS_API_KEY not set — API authentication DISABLED (INSECURE)");
+        warn!("   Set MINIONS_API_KEY=<secret> to enable authentication");
+    } else {
+        info!("✓ API authentication enabled");
+    }
+
+    let auth = auth::AuthConfig::new(api_key);
+
     let state = AppState {
         db_path: Arc::new(db_path),
         ssh_pubkey: ssh_pubkey.map(Arc::new),
+        auth,
     };
 
     let app = api::router(state);

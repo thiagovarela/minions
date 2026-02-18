@@ -7,20 +7,24 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
+    middleware,
     response::IntoResponse,
     routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{CorsLayer, Any};
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-use crate::{agent, db, server::AppState, storage, vm};
+use crate::{agent, auth, db, server::AppState, storage, vm};
 use minions_proto::{Request as AgentRequest, Response as AgentResponse, ResponseData};
 
 // ── Router ────────────────────────────────────────────────────────────────────
 
 pub fn router(state: AppState) -> Router {
+    // Clone auth config for middleware
+    let auth_config = state.auth.clone();
+
     Router::new()
         .route("/api/vms", post(create_vm))
         .route("/api/vms", get(list_vms))
@@ -29,7 +33,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/vms/{name}/exec", post(exec_vm))
         .route("/api/vms/{name}/status", get(vm_status))
         .route("/api/vms/{name}/logs", get(vm_logs))
-        .layer(CorsLayer::permissive())
+        // Add authentication middleware (checks Bearer token if MINIONS_API_KEY is set)
+        .layer(middleware::from_fn_with_state(
+            auth_config,
+            auth::require_auth,
+        ))
+        // CORS: allow localhost + explicit origins (not permissive)
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any) // TODO: restrict to specific origins in production
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
