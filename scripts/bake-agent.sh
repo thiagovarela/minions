@@ -47,6 +47,16 @@ trap cleanup EXIT
 [[ -f "$BASE_IMAGE" ]] || fail "base image not found: $BASE_IMAGE
   Build it first with docs/phase-1-setup.md"
 
+# cargo may live in the invoking user's ~/.cargo/bin (sudo strips PATH)
+if ! command -v cargo >/dev/null 2>&1; then
+    SUDO_USER="${SUDO_USER:-}"
+    if [[ -n "$SUDO_USER" ]]; then
+        CARGO_HOME_CANDIDATE="$(getent passwd "$SUDO_USER" | cut -d: -f6)/.cargo/bin"
+        if [[ -x "$CARGO_HOME_CANDIDATE/cargo" ]]; then
+            export PATH="$CARGO_HOME_CANDIDATE:$PATH"
+        fi
+    fi
+fi
 command -v cargo >/dev/null 2>&1 || fail "cargo not found — install Rust: https://rustup.rs"
 
 # ── Step 1: Build ─────────────────────────────────────────────────────────────
@@ -56,7 +66,7 @@ cd "$REPO_ROOT"
 # Run as the repo owner, not root, to avoid polluting root's cargo cache.
 REPO_OWNER="$(stat -c '%U' "$REPO_ROOT")"
 if [[ "$REPO_OWNER" != "root" ]]; then
-    sudo -u "$REPO_OWNER" cargo build --release -p minions-agent -p minions
+    sudo -u "$REPO_OWNER" env PATH="$PATH" cargo build --release -p minions-agent -p minions
 else
     cargo build --release -p minions-agent -p minions
 fi
