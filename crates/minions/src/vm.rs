@@ -133,6 +133,9 @@ pub async fn create(
             .context("inject SSH key")?;
         }
 
+        // Inject the SSH gateway's proxy key so the gateway can SSH into this VM.
+        inject_proxy_key(&vsock_socket).await;
+
         anyhow::Ok(())
     }
     .await;
@@ -474,6 +477,9 @@ pub async fn copy(
             .context("inject SSH key into copied VM")?;
         }
 
+        // Inject the SSH gateway's proxy key.
+        inject_proxy_key(&vsock_socket).await;
+
         anyhow::Ok(())
     }
     .await;
@@ -523,4 +529,44 @@ fn validate_name(name: &str) -> Result<()> {
         anyhow::bail!("VM name must only contain alphanumeric characters and hyphens");
     }
     Ok(())
+}
+
+/// Inject the SSH gateway's proxy public key into the VM's authorized_keys.
+///
+/// This allows the SSH gateway to authenticate as root when proxying SSH
+/// connections (`ssh vmname@ssh.miniclankers.com`).
+///
+/// The proxy key is read from `/var/lib/minions/proxy_key.pub` (created by
+/// `minions serve --ssh-bind` on first run). If the file doesn't exist yet,
+/// this is a no-op with a warning.
+async fn inject_proxy_key(vsock_socket: &std::path::Path) {
+    let pub_path = minions_ssh::PROXY_PUBKEY_PATH;
+    let pubkey = match std::fs::read_to_string(pub_path) {
+        Ok(k) => k.trim().to_string(),
+        Err(_) => {
+            tracing::warn!(
+                "proxy key not found at {} — SSH gateway proxy mode will not work for this VM\n\
+                 Run `minions serve --ssh-bind 0.0.0.0:22` at least once to generate it,\n\
+                 then recreate the VM.",
+                pub_path
+            );
+            return;
+        }
+    };
+
+    let result = agent::send_request(
+        vsock_socket,
+        Request::WriteFile {
+            path: "/root/.ssh/authorized_keys".to_string(),
+            content: format!("{}\n", pubkey),
+            mode: 0o600,
+            append: true,
+        },
+    )
+    .await;
+
+    match result {
+        Ok(_) => tracing::info!("✓ injected proxy key into VM"),
+        Err(e) => tracing::warn!("failed to inject proxy key: {}", e),
+    }
 }

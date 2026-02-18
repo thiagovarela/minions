@@ -7,6 +7,9 @@ edition = "2021"
 name = "minions"
 path = "src/main.rs"
 
+[dependencies.minions-ssh]
+path = "../minions-ssh"
+
 [dependencies]
 minions-proto = { path = "../minions-proto" }
 tokio = { workspace = true }

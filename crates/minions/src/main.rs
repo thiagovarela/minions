@@ -85,9 +85,13 @@ enum Commands {
     Logs { name: String },
     /// Start the HTTP API daemon
     Serve {
-        /// Address to bind to
+        /// Address to bind the HTTP API to
         #[arg(long, default_value = "0.0.0.0:3000")]
         bind: String,
+        /// Address to bind the SSH gateway to (e.g. 0.0.0.0:22)
+        /// When set, the SSH gateway starts alongside the HTTP API.
+        #[arg(long)]
+        ssh_bind: Option<String>,
     },
     /// One-time host setup: bridge, iptables, directories, systemd unit
     Init {
@@ -235,9 +239,9 @@ async fn main() -> Result<()> {
     // Init and Serve always run directly — they ARE the server side.
     match &cli.command {
         Commands::Init { persist } => return init::run(*persist),
-        Commands::Serve { bind } => {
+        Commands::Serve { bind, ssh_bind } => {
             let ssh_pubkey = find_ssh_pubkey();
-            return server::serve(cli.db.clone(), bind.clone(), ssh_pubkey).await;
+            return server::serve(cli.db.clone(), bind.clone(), ssh_pubkey, ssh_bind.clone()).await;
         }
         // Ssh is always local (interactive terminal).
         Commands::Ssh { name } => return cmd_ssh(&cli.db, name).await,

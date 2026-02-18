@@ -5,6 +5,7 @@ members = [
     "crates/minions-agent",
     "crates/minions-host",
     "crates/minions",
+    "crates/minions-ssh",
 ]
 
 [workspace.dependencies]
