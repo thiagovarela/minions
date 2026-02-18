@@ -186,6 +186,32 @@ impl ApiClient {
         Ok(())
     }
 
+    // ── Plan / subscription ───────────────────────────────────────────────────
+
+    pub async fn get_subscription(&self, owner_id: &str) -> Result<SubscriptionInfo> {
+        let url = format!("{}/api/billing/subscription?owner_id={}", self.base_url, owner_id);
+        let raw: serde_json::Value = self
+            .auth(self.client.get(url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        Ok(SubscriptionInfo {
+            plan_name: raw["plan"]["name"].as_str().unwrap_or("Free").to_string(),
+            status: raw["status"].as_str().unwrap_or("active").to_string(),
+            max_vms: raw["plan"]["max_vms"].as_u64().unwrap_or(2) as u32,
+            max_vcpus: raw["plan"]["max_vcpus"].as_u64().unwrap_or(4) as u32,
+            max_memory_mb: raw["plan"]["max_memory_mb"].as_u64().unwrap_or(2048) as u32,
+            max_snapshots: raw["plan"]["max_snapshots"].as_u64().unwrap_or(5) as u32,
+            usage_vms: raw["usage"]["vm_count"].as_u64().unwrap_or(0) as u32,
+            usage_vcpus: raw["usage"]["total_vcpus"].as_u64().unwrap_or(0) as u32,
+            usage_memory_mb: raw["usage"]["total_memory_mb"].as_u64().unwrap_or(0) as u32,
+            usage_snapshots: raw["usage"]["snapshot_count"].as_u64().unwrap_or(0) as u32,
+        })
+    }
+
     // ── Snapshot methods ──────────────────────────────────────────────────────
 
     pub async fn create_snapshot(&self, vm: &str, name: Option<String>) -> Result<SnapshotInfo> {
@@ -256,6 +282,21 @@ pub struct VmInfo {
 }
 
 fn default_proxy_port() -> u16 { 80 }
+
+/// Subscription + usage summary returned by the API.
+#[derive(Debug, Deserialize)]
+pub struct SubscriptionInfo {
+    pub plan_name: String,
+    pub status: String,
+    pub max_vms: u32,
+    pub max_vcpus: u32,
+    pub max_memory_mb: u32,
+    pub max_snapshots: u32,
+    pub usage_vms: u32,
+    pub usage_vcpus: u32,
+    pub usage_memory_mb: u32,
+    pub usage_snapshots: u32,
+}
 
 /// Snapshot metadata returned by the API.
 #[derive(Debug, Deserialize)]
@@ -530,6 +571,30 @@ async fn execute(
             ))
         }
 
+        // ── plan ──────────────────────────────────────────────────────────
+        "plan" => {
+            match api.get_subscription(&user.id).await {
+                Ok(sub) => {
+                    let bar = |used: u32, max: u32| -> String {
+                        let w = 16usize;
+                        let filled = if max == 0 { 0 } else {
+                            ((used as f64 / max as f64) * w as f64) as usize
+                        }.min(w);
+                        format!("[{}{}] {}/{}", "#".repeat(filled), ".".repeat(w - filled), used, max)
+                    };
+                    Ok(format!(
+                        "Plan: {} ({})\r\n\r\n  VMs:     {}\r\n  vCPUs:   {}\r\n  Memory:  {} / {} MiB\r\n  Snaps:   {}\r\n",
+                        sub.plan_name, sub.status,
+                        bar(sub.usage_vms, sub.max_vms),
+                        bar(sub.usage_vcpus, sub.max_vcpus),
+                        sub.usage_memory_mb, sub.max_memory_mb,
+                        bar(sub.usage_snapshots, sub.max_snapshots),
+                    ))
+                }
+                Err(e) => Ok(format!("error fetching plan: {e}\r\n")),
+            }
+        }
+
         // ── snapshot ───────────────────────────────────────────────────────
         "snapshot" => {
             if parts.len() < 2 {
@@ -624,6 +689,8 @@ fn help() -> String {
         "  expose <vm> [--port N]          expose VM web server on port N (default 80)",
         "  set-public <vm>                 make VM web accessible without login",
         "  set-private <vm>                require login to access VM web (default)",
+        "",
+        "  plan                            show your current plan and resource usage",
         "",
         "  snapshot <vm> [--name <n>]      create a snapshot (VM can be running or stopped)",
         "  snapshots <vm>                  list snapshots",

@@ -1,8 +1,10 @@
 //! SQLite state management for VM lifecycle.
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use rusqlite::{Connection, params};
 use std::path::Path;
+use uuid::Uuid;
 
 pub const DB_PATH: &str = "/var/lib/minions/state.db";
 
@@ -94,9 +96,45 @@ fn migrate(conn: &Connection) -> Result<()> {
             created_at  TEXT NOT NULL,
             UNIQUE(vm_name, name)
         );
+
+        -- Resource plans: defines limits per user tier.
+        CREATE TABLE IF NOT EXISTS plans (
+            id              TEXT PRIMARY KEY,
+            name            TEXT UNIQUE NOT NULL,
+            max_vms         INTEGER NOT NULL DEFAULT 2,
+            max_vcpus       INTEGER NOT NULL DEFAULT 4,
+            max_memory_mb   INTEGER NOT NULL DEFAULT 2048,
+            max_disk_gb     INTEGER NOT NULL DEFAULT 20,
+            max_snapshots   INTEGER NOT NULL DEFAULT 5,
+            price_cents     INTEGER NOT NULL DEFAULT 0,
+            created_at      TEXT NOT NULL
+        );
+
+        -- User subscriptions: one row per user, links them to a plan.
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            id                 TEXT PRIMARY KEY,
+            user_id            TEXT NOT NULL,
+            plan_id            TEXT NOT NULL REFERENCES plans(id),
+            status             TEXT NOT NULL DEFAULT 'active',
+            created_at         TEXT NOT NULL,
+            UNIQUE(user_id)
+        );
         ",
     )
     .context("run migration")?;
+
+    // Seed built-in plans (idempotent — INSERT OR IGNORE).
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO plans
+            (id, name, max_vms, max_vcpus, max_memory_mb, max_disk_gb, max_snapshots, price_cents, created_at)
+         VALUES ('free', 'Free', 2, 4, 2048, 20, 5, 0, '2025-01-01T00:00:00Z');
+
+         INSERT OR IGNORE INTO plans
+            (id, name, max_vms, max_vcpus, max_memory_mb, max_disk_gb, max_snapshots, price_cents, created_at)
+         VALUES ('pro', 'Pro', 10, 32, 32768, 200, 20, 1200, '2025-01-01T00:00:00Z');
+        ",
+    )
+    .context("seed plans")?;
 
     // Idempotent column additions for existing databases (errors are ignored
     // because SQLite errors on duplicate ADD COLUMN).
@@ -352,6 +390,178 @@ pub fn set_proxy_public(conn: &Connection, name: &str, public: bool) -> Result<b
     Ok(changed > 0)
 }
 
+// ── Plans & Subscriptions ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct Plan {
+    pub id: String,
+    pub name: String,
+    pub max_vms: u32,
+    pub max_vcpus: u32,
+    pub max_memory_mb: u32,
+    pub max_disk_gb: u32,
+    pub max_snapshots: u32,
+    pub price_cents: u32,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Subscription {
+    pub id: String,
+    pub user_id: String,
+    pub plan_id: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+/// Aggregated live resource usage for a user (non-stopped VMs only).
+#[derive(Debug, Clone, Default)]
+pub struct UserUsage {
+    pub vm_count: u32,
+    pub total_vcpus: u32,
+    pub total_memory_mb: u32,
+    pub snapshot_count: u32,
+}
+
+// ── Plan queries ──────────────────────────────────────────────────────────────
+
+pub fn list_plans(conn: &Connection) -> Result<Vec<Plan>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, max_vms, max_vcpus, max_memory_mb, max_disk_gb,
+                max_snapshots, price_cents, created_at
+         FROM plans ORDER BY price_cents",
+    )?;
+    let rows = stmt.query_map([], |r| Ok(row_to_plan(r).expect("parse plan")))?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+pub fn get_plan(conn: &Connection, plan_id: &str) -> Result<Option<Plan>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, max_vms, max_vcpus, max_memory_mb, max_disk_gb,
+                max_snapshots, price_cents, created_at
+         FROM plans WHERE id=?1",
+    )?;
+    let mut rows = stmt.query(params![plan_id])?;
+    Ok(rows.next()?.map(|r| row_to_plan(r).expect("parse plan")))
+}
+
+fn row_to_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<Plan> {
+    Ok(Plan {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        max_vms: row.get::<_, i64>(2)? as u32,
+        max_vcpus: row.get::<_, i64>(3)? as u32,
+        max_memory_mb: row.get::<_, i64>(4)? as u32,
+        max_disk_gb: row.get::<_, i64>(5)? as u32,
+        max_snapshots: row.get::<_, i64>(6)? as u32,
+        price_cents: row.get::<_, i64>(7)? as u32,
+        created_at: row.get(8)?,
+    })
+}
+
+// ── Subscription queries ──────────────────────────────────────────────────────
+
+/// Get a user's subscription. Returns `None` if not yet assigned.
+pub fn get_subscription(conn: &Connection, user_id: &str) -> Result<Option<Subscription>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, user_id, plan_id, status, created_at
+         FROM subscriptions WHERE user_id=?1",
+    )?;
+    let mut rows = stmt.query(params![user_id])?;
+    Ok(rows.next()?.map(|r| row_to_subscription(r).expect("parse subscription")))
+}
+
+/// Get a user's subscription joined with their plan. Returns the effective plan
+/// (defaulting to 'free' if no subscription is found).
+pub fn get_user_plan(conn: &Connection, user_id: &str) -> Result<(Subscription, Plan)> {
+    let sub = get_subscription(conn, user_id)?.unwrap_or_else(|| Subscription {
+        id: String::new(),
+        user_id: user_id.to_string(),
+        plan_id: "free".to_string(),
+        status: "active".to_string(),
+        created_at: String::new(),
+    });
+    let plan = get_plan(conn, &sub.plan_id)?.unwrap_or_else(free_plan_default);
+    Ok((sub, plan))
+}
+
+/// Create a subscription for a user (called at registration time).
+pub fn create_subscription(conn: &Connection, user_id: &str, plan_id: &str) -> Result<Subscription> {
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR IGNORE INTO subscriptions (id, user_id, plan_id, status, created_at)
+         VALUES (?1, ?2, ?3, 'active', ?4)",
+        params![id, user_id, plan_id, now],
+    )
+    .context("insert subscription")?;
+    Ok(Subscription {
+        id,
+        user_id: user_id.to_string(),
+        plan_id: plan_id.to_string(),
+        status: "active".to_string(),
+        created_at: now,
+    })
+}
+
+/// Upgrade a user to a different plan (also updates status).
+pub fn set_user_plan(conn: &Connection, user_id: &str, plan_id: &str) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE subscriptions SET plan_id=?1, status='active' WHERE user_id=?2",
+        params![plan_id, user_id],
+    )?;
+    Ok(changed > 0)
+}
+
+fn row_to_subscription(row: &rusqlite::Row<'_>) -> rusqlite::Result<Subscription> {
+    Ok(Subscription {
+        id: row.get(0)?,
+        user_id: row.get(1)?,
+        plan_id: row.get(2)?,
+        status: row.get(3)?,
+        created_at: row.get(4)?,
+    })
+}
+
+/// The free plan defaults — used as a fallback when the DB has no plan row.
+fn free_plan_default() -> Plan {
+    Plan {
+        id: "free".to_string(),
+        name: "Free".to_string(),
+        max_vms: 2,
+        max_vcpus: 4,
+        max_memory_mb: 2048,
+        max_disk_gb: 20,
+        max_snapshots: 5,
+        price_cents: 0,
+        created_at: String::new(),
+    }
+}
+
+// ── Usage queries ─────────────────────────────────────────────────────────────
+
+/// Count a user's live resource consumption (running + starting VMs).
+pub fn get_user_usage(conn: &Connection, owner_id: &str) -> Result<UserUsage> {
+    let (vm_count, total_vcpus, total_memory_mb): (i64, i64, i64) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(vcpus),0), COALESCE(SUM(memory_mb),0)
+         FROM vms WHERE owner_id=?1 AND status != 'stopped'",
+        params![owner_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let snapshot_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM snapshots
+         WHERE vm_name IN (SELECT name FROM vms WHERE owner_id=?1)",
+        params![owner_id],
+        |r| r.get(0),
+    )?;
+    Ok(UserUsage {
+        vm_count: vm_count as u32,
+        total_vcpus: total_vcpus as u32,
+        total_memory_mb: total_memory_mb as u32,
+        snapshot_count: snapshot_count as u32,
+    })
+}
+
 // ── Snapshots ─────────────────────────────────────────────────────────────────
 
 /// A snapshot record stored in the database.
@@ -551,6 +761,105 @@ mod tests {
         let conn = test_conn();
         let result = get_vm_owned(&conn, "nonexistent", "user-x").unwrap();
         assert!(result.is_none());
+    }
+
+    // ── Plan / subscription tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_plans_seeded() {
+        let conn = test_conn();
+        let plans = list_plans(&conn).unwrap();
+        assert!(plans.len() >= 2, "free and pro plans should be seeded");
+        assert!(plans.iter().any(|p| p.id == "free"));
+        assert!(plans.iter().any(|p| p.id == "pro"));
+    }
+
+    #[test]
+    fn test_get_plan() {
+        let conn = test_conn();
+        let free = get_plan(&conn, "free").unwrap().unwrap();
+        assert_eq!(free.name, "Free");
+        assert_eq!(free.max_vms, 2);
+        assert_eq!(free.price_cents, 0);
+
+        let pro = get_plan(&conn, "pro").unwrap().unwrap();
+        assert_eq!(pro.max_vms, 10);
+        assert!(pro.price_cents > 0);
+    }
+
+    #[test]
+    fn test_create_and_get_subscription() {
+        let conn = test_conn();
+        let sub = create_subscription(&conn, "user-1", "free").unwrap();
+        assert_eq!(sub.plan_id, "free");
+        assert_eq!(sub.status, "active");
+
+        let fetched = get_subscription(&conn, "user-1").unwrap().unwrap();
+        assert_eq!(fetched.user_id, "user-1");
+        assert_eq!(fetched.plan_id, "free");
+    }
+
+    #[test]
+    fn test_get_user_plan_defaults_to_free() {
+        let conn = test_conn();
+        // No subscription — should default to free plan.
+        let (sub, plan) = get_user_plan(&conn, "nobody").unwrap();
+        assert_eq!(plan.id, "free");
+        assert_eq!(sub.plan_id, "free");
+    }
+
+    #[test]
+    fn test_set_user_plan() {
+        let conn = test_conn();
+        create_subscription(&conn, "user-1", "free").unwrap();
+        let upgraded = set_user_plan(&conn, "user-1", "pro").unwrap();
+        assert!(upgraded);
+
+        let (_, plan) = get_user_plan(&conn, "user-1").unwrap();
+        assert_eq!(plan.id, "pro");
+    }
+
+    #[test]
+    fn test_get_user_usage() {
+        let conn = test_conn();
+
+        // Insert two running VMs owned by user-1.
+        let mut vm1 = sample_vm("vm1", Some("user-1"));
+        vm1.status = "running".to_string();
+        vm1.vcpus = 2;
+        vm1.memory_mb = 512;
+        insert_vm(&conn, &vm1).unwrap();
+
+        let mut vm2 = sample_vm("vm2", Some("user-1"));
+        vm2.status = "running".to_string();
+        vm2.ip = "10.0.0.20".to_string();
+        vm2.vsock_cid = 20;
+        vm2.vcpus = 4;
+        vm2.memory_mb = 1024;
+        insert_vm(&conn, &vm2).unwrap();
+
+        // A stopped VM — should NOT count toward usage.
+        let mut vm3 = sample_vm("vm3", Some("user-1"));
+        vm3.status = "stopped".to_string();
+        vm3.ip = "10.0.0.21".to_string();
+        vm3.vsock_cid = 21;
+        vm3.vcpus = 8;
+        vm3.memory_mb = 8192;
+        insert_vm(&conn, &vm3).unwrap();
+
+        // A VM owned by someone else — should NOT count.
+        let mut vm4 = sample_vm("vm4", Some("user-2"));
+        vm4.status = "running".to_string();
+        vm4.ip = "10.0.0.22".to_string();
+        vm4.vsock_cid = 22;
+        vm4.vcpus = 1;
+        vm4.memory_mb = 256;
+        insert_vm(&conn, &vm4).unwrap();
+
+        let usage = get_user_usage(&conn, "user-1").unwrap();
+        assert_eq!(usage.vm_count, 2);
+        assert_eq!(usage.total_vcpus, 6);       // 2 + 4
+        assert_eq!(usage.total_memory_mb, 1536); // 512 + 1024
     }
 
     // ── Snapshot tests ────────────────────────────────────────────────────────

@@ -45,6 +45,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/vms/{name}/snapshots", get(list_snapshots))
         .route("/api/vms/{name}/snapshots/{snap}/restore", post(restore_snapshot))
         .route("/api/vms/{name}/snapshots/{snap}", delete(delete_snapshot))
+        // Resource / billing routes
+        .route("/api/billing/plans", get(billing_plans))
+        .route("/api/billing/subscription", get(billing_subscription))
+        .route("/api/billing/plan", post(billing_set_plan))
         // Add authentication middleware (checks Bearer token if MINIONS_API_KEY is set)
         .layer(middleware::from_fn_with_state(
             auth_config,
@@ -565,6 +569,128 @@ async fn set_vm_private(
         Ok(false) => (StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("VM '{name}' not found") })).into_response(),
         Err(e) => internal(e).into_response(),
     }
+}
+
+// ── Resource / plan types & handlers ──────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct PlanResponse {
+    id: String,
+    name: String,
+    max_vms: u32,
+    max_vcpus: u32,
+    max_memory_mb: u32,
+    max_disk_gb: u32,
+    max_snapshots: u32,
+    price_cents: u32,
+}
+
+impl From<db::Plan> for PlanResponse {
+    fn from(p: db::Plan) -> Self {
+        PlanResponse {
+            id: p.id, name: p.name,
+            max_vms: p.max_vms, max_vcpus: p.max_vcpus,
+            max_memory_mb: p.max_memory_mb, max_disk_gb: p.max_disk_gb,
+            max_snapshots: p.max_snapshots, price_cents: p.price_cents,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct UsageResponse {
+    vm_count: u32,
+    total_vcpus: u32,
+    total_memory_mb: u32,
+    snapshot_count: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct SubscriptionResponse {
+    plan: PlanResponse,
+    status: String,
+    usage: UsageResponse,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetPlanRequest {
+    owner_id: String,
+    plan_id: String,
+}
+
+/// `GET /api/billing/plans` — List all available plans.
+async fn billing_plans(State(state): State<AppState>) -> impl IntoResponse {
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return internal(e).into_response(),
+    };
+    match db::list_plans(&conn) {
+        Ok(plans) => Json(plans.into_iter().map(PlanResponse::from).collect::<Vec<_>>()).into_response(),
+        Err(e) => internal(e).into_response(),
+    }
+}
+
+/// `GET /api/billing/subscription?owner_id=<id>` — Current plan + live usage.
+async fn billing_subscription(
+    State(state): State<AppState>,
+    Query(query): Query<ListQuery>,
+) -> impl IntoResponse {
+    let owner_id = match &query.owner_id {
+        Some(id) => id.clone(),
+        None => return bad_request("owner_id query parameter required").into_response(),
+    };
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return internal(e).into_response(),
+    };
+    let (sub, plan) = match db::get_user_plan(&conn, &owner_id) {
+        Ok(pair) => pair,
+        Err(e) => return internal(e).into_response(),
+    };
+    let usage = match db::get_user_usage(&conn, &owner_id) {
+        Ok(u) => u,
+        Err(e) => return internal(e).into_response(),
+    };
+    Json(SubscriptionResponse {
+        plan: PlanResponse::from(plan),
+        status: sub.status,
+        usage: UsageResponse {
+            vm_count: usage.vm_count,
+            total_vcpus: usage.total_vcpus,
+            total_memory_mb: usage.total_memory_mb,
+            snapshot_count: usage.snapshot_count,
+        },
+    }).into_response()
+}
+
+/// `POST /api/billing/plan` — Manually set a user's plan (admin use / future billing hook).
+async fn billing_set_plan(
+    State(state): State<AppState>,
+    Json(req): Json<SetPlanRequest>,
+) -> impl IntoResponse {
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return internal(e).into_response(),
+    };
+    // Verify plan exists.
+    match db::get_plan(&conn, &req.plan_id) {
+        Ok(None) => return bad_request(format!("unknown plan '{}'", req.plan_id)).into_response(),
+        Err(e) => return internal(e).into_response(),
+        Ok(Some(_)) => {}
+    }
+    // Ensure user has a subscription row first.
+    if db::get_subscription(&conn, &req.owner_id).ok().flatten().is_none() {
+        let _ = db::create_subscription(&conn, &req.owner_id, &req.plan_id);
+    } else {
+        match db::set_user_plan(&conn, &req.owner_id, &req.plan_id) {
+            Ok(_) => {}
+            Err(e) => return internal(e).into_response(),
+        }
+    }
+    Json(serde_json::json!({
+        "owner_id": req.owner_id,
+        "plan_id": req.plan_id,
+        "message": format!("plan updated to '{}'", req.plan_id)
+    })).into_response()
 }
 
 // ── Snapshot types ─────────────────────────────────────────────────────────────

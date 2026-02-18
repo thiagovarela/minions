@@ -32,6 +32,9 @@ pub async fn create(
         if db::get_vm(&conn, name)?.is_some() {
             anyhow::bail!("VM '{name}' already exists");
         }
+        if let Some(ref oid) = owner_id {
+            check_quota(&conn, oid, vcpus, memory_mb)?;
+        }
         network::check_bridge().context("bridge check")?;
         hypervisor::ensure_run_dir()?;
 
@@ -396,6 +399,9 @@ pub async fn copy(
         if db::get_vm(&conn, new_name)?.is_some() {
             anyhow::bail!("VM '{new_name}' already exists");
         }
+        if let Some(ref oid) = owner_id {
+            check_quota(&conn, oid, source.vcpus, source.memory_mb)?;
+        }
 
         network::check_bridge().context("bridge check")?;
         hypervisor::ensure_run_dir()?;
@@ -697,6 +703,43 @@ pub async fn delete_snapshot(db_path: &str, vm_name: &str, snap_name: &str) -> R
 
     db::delete_snapshot(&conn, vm_name, snap_name)?;
     info!("snapshot '{snap_name}' deleted for VM '{vm_name}'");
+    Ok(())
+}
+
+// ── Quota enforcement ─────────────────────────────────────────────────────────
+
+/// Check whether `owner_id` can create a VM with the given resource request.
+///
+/// Looks up their plan limits and compares against live usage.
+/// Returns `Ok(())` if within limits, or a descriptive error message.
+/// Passes silently for admin VMs (no `owner_id`).
+pub fn check_quota(
+    conn: &rusqlite::Connection,
+    owner_id: &str,
+    requested_vcpus: u32,
+    requested_memory_mb: u32,
+) -> Result<()> {
+    let (_, plan) = db::get_user_plan(conn, owner_id)?;
+    let usage = db::get_user_usage(conn, owner_id)?;
+
+    if usage.vm_count >= plan.max_vms {
+        anyhow::bail!(
+            "VM limit reached ({}/{}). Destroy or stop an existing VM, or upgrade your plan.",
+            usage.vm_count, plan.max_vms
+        );
+    }
+    if usage.total_vcpus + requested_vcpus > plan.max_vcpus {
+        anyhow::bail!(
+            "vCPU limit would be exceeded ({} + {} > {}). Stop a VM or upgrade your plan.",
+            usage.total_vcpus, requested_vcpus, plan.max_vcpus
+        );
+    }
+    if usage.total_memory_mb + requested_memory_mb > plan.max_memory_mb {
+        anyhow::bail!(
+            "Memory limit would be exceeded ({} MiB + {} MiB > {} MiB). Stop a VM or upgrade your plan.",
+            usage.total_memory_mb, requested_memory_mb, plan.max_memory_mb
+        );
+    }
     Ok(())
 }
 
