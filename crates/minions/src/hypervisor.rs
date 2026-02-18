@@ -68,10 +68,12 @@ pub fn spawn(cfg: &VmConfig) -> Result<u32> {
     .stdout(Stdio::null())
     .stderr(Stdio::null());
 
-    // SAFETY: setsid() is async-signal-safe.
+    // SAFETY: setsid() is async-signal-safe and returns -1 on error.
     unsafe {
         cmd.pre_exec(|| {
-            libc::setsid();
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
             Ok(())
         });
     }
@@ -128,22 +130,59 @@ fn curl_put(socket: &str, endpoint: &str) -> Result<()> {
     Ok(())
 }
 
-/// Check if a process is still alive.
+/// Check if a process is still alive and appears to be cloud-hypervisor.
+///
+/// NOTE: This has a small PID reuse window. If the CH process dies and another
+/// process reuses the PID before we check, we could get a false positive.
+/// A more robust approach would store (PID, start_time) in the database and
+/// verify both. For now, we check /proc/{pid}/comm to reduce false positives.
 pub fn is_alive_pid(pid: Option<i64>) -> bool {
     let Some(pid) = pid else { return false };
     if pid <= 0 {
         return false;
     }
-    // kill -0 checks existence without sending a signal.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+
+    // Check if process exists
+    let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+    if !alive {
+        return false;
+    }
+
+    // Verify it looks like cloud-hypervisor
+    is_likely_ch_process(pid)
 }
 
-/// Force-kill a process.
+/// Check if a PID appears to be a cloud-hypervisor process.
+fn is_likely_ch_process(pid: i64) -> bool {
+    let comm_path = format!("/proc/{}/comm", pid);
+    if let Ok(comm) = std::fs::read_to_string(&comm_path) {
+        let comm = comm.trim();
+        // /proc/pid/comm is truncated to 15 chars, so "cloud-hypervisor" becomes "cloud-hypervi"
+        comm.starts_with("cloud-hyper") || comm == "cloud-hypervisor"
+    } else {
+        // Can't read /proc entry — process might have died or we lack permissions.
+        // Conservatively assume it's not a CH process.
+        false
+    }
+}
+
+/// Force-kill a process (with PID reuse mitigation).
 pub fn force_kill(pid: Option<i64>) {
     let Some(pid) = pid else { return };
-    if pid > 0 {
-        unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGKILL);
-        }
+    if pid <= 0 {
+        return;
+    }
+
+    // Safety check: verify it looks like cloud-hypervisor before SIGKILL
+    if !is_likely_ch_process(pid) {
+        tracing::warn!(
+            "refusing to kill PID {} — not a cloud-hypervisor process (possible PID reuse)",
+            pid
+        );
+        return;
+    }
+
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGKILL);
     }
 }

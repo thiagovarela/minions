@@ -4,6 +4,7 @@ use tokio_vsock::{VsockAddr, VsockListener, VMADDR_CID_ANY};
 use tracing::{error, info};
 
 mod exec;
+mod file;
 mod network;
 
 const VSOCK_PORT: u32 = 1024;
@@ -110,6 +111,16 @@ async fn handle_request(request: Request) -> Response {
                 disk_used_gb,
             })
         }
+
+        Request::WriteFile {
+            path,
+            content,
+            mode,
+            append,
+        } => match file::write_file(&path, &content, mode, append) {
+            Ok(_) => Response::ok_with_message(format!("wrote {} bytes to {}", content.len(), path)),
+            Err(e) => Response::error(format!("failed to write file: {:#}", e)),
+        },
     }
 }
 
@@ -157,8 +168,8 @@ fn read_disk() -> Result<(u64, u64)> {
     use nix::sys::statvfs::statvfs;
 
     let stats = statvfs("/")?;
-    let total = (stats.blocks() * stats.block_size()) / (1024 * 1024 * 1024); // bytes -> GB
-    let used = ((stats.blocks() - stats.blocks_available()) * stats.block_size())
+    let total = (stats.blocks() as u64 * stats.block_size() as u64) / (1024 * 1024 * 1024); // bytes -> GB
+    let used = ((stats.blocks() - stats.blocks_available()) as u64 * stats.block_size() as u64)
         / (1024 * 1024 * 1024);
 
     Ok((total, used))

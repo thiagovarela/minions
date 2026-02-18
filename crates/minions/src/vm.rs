@@ -101,16 +101,25 @@ pub async fn create(
 
         if let Some(pubkey) = ssh_pubkey {
             info!("injecting SSH public key into VM");
-            let script = format!(
-                "mkdir -p /root/.ssh && chmod 700 /root/.ssh && \
-                 echo '{pubkey}' >> /root/.ssh/authorized_keys && \
-                 chmod 600 /root/.ssh/authorized_keys"
-            );
+            
+            // Validate SSH key format (basic sanity check)
+            let pubkey = pubkey.trim();
+            if !pubkey.starts_with("ssh-") && !pubkey.starts_with("ecdsa-") {
+                anyhow::bail!("invalid SSH public key format (must start with ssh-* or ecdsa-*)");
+            }
+            if pubkey.contains('\n') || pubkey.contains('\r') {
+                anyhow::bail!("SSH public key contains invalid newline characters");
+            }
+
+            // Use WriteFile request instead of shell interpolation to prevent injection
+            let key_content = format!("{}\n", pubkey);
             agent::send_request(
                 &vsock_socket,
-                Request::Exec {
-                    command: "sh".to_string(),
-                    args: vec!["-c".to_string(), script],
+                Request::WriteFile {
+                    path: "/root/.ssh/authorized_keys".to_string(),
+                    content: key_content,
+                    mode: 0o600,
+                    append: true,
                 },
             )
             .await

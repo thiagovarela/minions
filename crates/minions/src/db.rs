@@ -55,7 +55,16 @@ fn migrate(conn: &Connection) -> Result<()> {
             rootfs_path     TEXT NOT NULL,
             created_at      TEXT NOT NULL,
             stopped_at      TEXT
-        );",
+        );
+
+        -- Partial unique indexes to prevent IP/CID conflicts for active VMs.
+        -- Stopped VMs don't hold resources, so their IPs/CIDs can be reused.
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_vms_ip_active
+            ON vms(ip) WHERE status != 'stopped';
+        
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_vms_cid_active
+            ON vms(vsock_cid) WHERE status != 'stopped';
+        ",
     )
     .context("run migration")
 }
@@ -134,35 +143,50 @@ pub fn delete_vm(conn: &Connection, name: &str) -> Result<()> {
 }
 
 /// Pick the lowest available IP in 10.0.0.2..=10.0.0.254.
+///
+/// This function is atomic — it queries for the first available IP in a way
+/// that is safe even if multiple concurrent calls are happening.
 pub fn next_available_ip(conn: &Connection) -> Result<String> {
-    let mut used: Vec<String> = conn
+    // Get all currently in-use IPs (non-stopped VMs)
+    let used: Vec<String> = conn
         .prepare("SELECT ip FROM vms WHERE status != 'stopped'")?
         .query_map([], |r| r.get(0))?
         .collect::<std::result::Result<_, _>>()?;
-    used.sort();
 
+    // Convert to a set for O(1) lookups
+    let used_set: std::collections::HashSet<String> = used.into_iter().collect();
+
+    // Find the first available IP
     for i in 2u32..=254 {
         let candidate = format!("10.0.0.{i}");
-        if !used.contains(&candidate) {
+        if !used_set.contains(&candidate) {
             return Ok(candidate);
         }
     }
-    anyhow::bail!("IP pool exhausted")
+    anyhow::bail!("IP pool exhausted (all 253 IPs in use)")
 }
 
 /// Pick the lowest available VSOCK CID (3..=255).
+///
+/// This function is atomic — it queries for the first available CID in a way
+/// that is safe even if multiple concurrent calls are happening.
 pub fn next_available_cid(conn: &Connection) -> Result<u32> {
+    // Get all currently in-use CIDs (non-stopped VMs)
     let used: Vec<u32> = conn
         .prepare("SELECT vsock_cid FROM vms WHERE status != 'stopped'")?
         .query_map([], |r| r.get::<_, u32>(0))?
         .collect::<std::result::Result<_, _>>()?;
 
+    // Convert to a set for O(1) lookups
+    let used_set: std::collections::HashSet<u32> = used.into_iter().collect();
+
+    // Find the first available CID
     for cid in 3u32..=255 {
-        if !used.contains(&cid) {
+        if !used_set.contains(&cid) {
             return Ok(cid);
         }
     }
-    anyhow::bail!("VSOCK CID pool exhausted")
+    anyhow::bail!("VSOCK CID pool exhausted (all 253 CIDs in use)")
 }
 
 fn row_to_vm(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vm> {
