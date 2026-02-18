@@ -6,13 +6,13 @@
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
     middleware,
     response::IntoResponse,
     routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
-use tower_http::cors::{CorsLayer, Any};
+use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
@@ -25,7 +25,7 @@ pub fn router(state: AppState) -> Router {
     // Clone auth config for middleware
     let auth_config = state.auth.clone();
 
-    Router::new()
+    let mut router = Router::new()
         .route("/api/vms", post(create_vm))
         .route("/api/vms", get(list_vms))
         .route("/api/vms/{name}", get(get_vm))
@@ -44,14 +44,29 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn_with_state(
             auth_config,
             auth::require_auth,
-        ))
-        // CORS: allow localhost + explicit origins (not permissive)
-        .layer(
+        ));
+
+    // CORS: only enable if explicit origins are configured via MINIONS_CORS_ORIGINS.
+    // Default is no CORS to prevent cross-site API access.
+    if !state.cors_origins.is_empty() {
+        let origins: Vec<HeaderValue> = state
+            .cors_origins
+            .iter()
+            .filter_map(|o| HeaderValue::from_str(o).ok())
+            .collect();
+        router = router.layer(
             CorsLayer::new()
-                .allow_origin(Any) // TODO: restrict to specific origins in production
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
+                .allow_origin(origins)
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::DELETE,
+                ])
+                .allow_headers([axum::http::header::AUTHORIZATION, axum::http::header::CONTENT_TYPE]),
+        );
+    }
+
+    router
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -128,6 +143,27 @@ pub struct ExecResponse {
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub error: String,
+}
+
+// ── Name validation ───────────────────────────────────────────────────────────
+
+/// Validate that a VM name from a URL path parameter is safe to use in
+/// filesystem operations. This mirrors the `validate_name` check in `vm.rs`
+/// and prevents path traversal attacks (e.g. `../../../etc`).
+fn validate_name_param(name: &str) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if name.is_empty()
+        || name.len() > 11
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("invalid VM name '{name}'"),
+            }),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 // ── Error helpers ─────────────────────────────────────────────────────────────
@@ -403,6 +439,10 @@ async fn vm_logs(
     State(_state): State<AppState>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    // Validate the name to prevent path traversal before filesystem access.
+    if let Err(e) = validate_name_param(&name) {
+        return e.into_response();
+    }
     let log_path = storage::serial_log_path(&name);
     match std::fs::read_to_string(&log_path) {
         Ok(content) => (

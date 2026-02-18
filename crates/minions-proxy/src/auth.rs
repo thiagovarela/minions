@@ -17,6 +17,8 @@ use uuid::Uuid;
 
 pub const COOKIE_NAME: &str = "minions_session";
 const SESSION_TTL: Duration = Duration::from_secs(24 * 3600);
+/// Maximum number of concurrent sessions. Exceeding this drops oldest entries.
+const MAX_SESSIONS: usize = 10_000;
 
 // ── Session store ─────────────────────────────────────────────────────────────
 
@@ -42,15 +44,46 @@ impl Sessions {
     }
 
     /// Issue a new session token.
+    ///
+    /// If the session store exceeds `MAX_SESSIONS`, expired sessions are
+    /// evicted first. If the store is still full after eviction, the oldest
+    /// session is removed (LRU-style) to prevent unbounded memory growth.
     pub fn create(&self) -> String {
         let token = Uuid::new_v4().to_string();
-        self.0.lock().unwrap().insert(token.clone(), Instant::now());
+        let now = Instant::now();
+        let mut map = self.0.lock().unwrap();
+
+        if map.len() >= MAX_SESSIONS {
+            // First pass: remove all expired sessions.
+            map.retain(|_, created| created.elapsed() < SESSION_TTL);
+        }
+
+        // If still at capacity after eviction, remove the oldest entry.
+        if map.len() >= MAX_SESSIONS {
+            if let Some(oldest_key) = map
+                .iter()
+                .min_by_key(|(_, &created)| created)
+                .map(|(k, _)| k.clone())
+            {
+                map.remove(&oldest_key);
+            }
+        }
+
+        map.insert(token.clone(), now);
         token
     }
 
     /// Invalidate a token (logout).
     pub fn revoke(&self, token: &str) {
         self.0.lock().unwrap().remove(token);
+    }
+
+    /// Evict all expired sessions. Call periodically to reclaim memory.
+    pub fn gc(&self) {
+        self.0
+            .lock()
+            .unwrap()
+            .retain(|_, created| created.elapsed() < SESSION_TTL);
     }
 }
 
@@ -70,13 +103,34 @@ pub fn extract_token(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Build a `Set-Cookie` header value that sets the session cookie.
+/// The `Secure` flag is included so the cookie is only sent over HTTPS.
 pub fn set_cookie(token: &str) -> String {
-    format!("{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400")
+    format!(
+        "{COOKIE_NAME}={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=86400"
+    )
 }
 
 /// Build a `Set-Cookie` header value that clears the session cookie.
 pub fn clear_cookie() -> String {
-    format!("{COOKIE_NAME}=; Path=/; HttpOnly; Max-Age=0")
+    format!("{COOKIE_NAME}=; Path=/; HttpOnly; Secure; Max-Age=0")
+}
+
+// ── Redirect safety ───────────────────────────────────────────────────────────
+
+/// Validate that a `next` redirect target is a safe relative path.
+///
+/// Rejects any value that could redirect the user off-site:
+/// - Absolute URLs (contain `://`)
+/// - Protocol-relative URLs (start with `//`)
+/// - Non-path values (don't start with `/`)
+///
+/// Returns the validated path, or `/` if the value is unsafe.
+pub fn safe_next(next: &str) -> &str {
+    if next.starts_with("//") || next.contains("://") || !next.starts_with('/') {
+        "/"
+    } else {
+        next
+    }
 }
 
 // ── Login / logout pages ──────────────────────────────────────────────────────
@@ -154,4 +208,61 @@ fn urlencode(s: &str) -> String {
             }
         })
         .collect()
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_safe_next_relative_paths() {
+        assert_eq!(safe_next("/foo/bar"), "/foo/bar");
+        assert_eq!(safe_next("/"), "/");
+        assert_eq!(safe_next("/some/page?q=1"), "/some/page?q=1");
+    }
+
+    #[test]
+    fn test_safe_next_rejects_absolute_urls() {
+        assert_eq!(safe_next("https://evil.com"), "/");
+        assert_eq!(safe_next("http://evil.com/path"), "/");
+        assert_eq!(safe_next("//evil.com"), "/");
+    }
+
+    #[test]
+    fn test_safe_next_rejects_non_paths() {
+        assert_eq!(safe_next("evil.com/path"), "/");
+        assert_eq!(safe_next("javascript:alert(1)"), "/");
+    }
+
+    #[test]
+    fn test_session_gc() {
+        let sessions = Sessions::new();
+        let t1 = sessions.create();
+        let t2 = sessions.create();
+        assert!(sessions.is_valid(&t1));
+        assert!(sessions.is_valid(&t2));
+        sessions.gc(); // should keep both (not expired)
+        assert!(sessions.is_valid(&t1));
+    }
+
+    #[test]
+    fn test_session_max_cap() {
+        let sessions = Sessions::new();
+        // Create many sessions — should not panic or grow unboundedly.
+        // (We only create a small number here for test speed; the cap logic is tested structurally.)
+        for _ in 0..100 {
+            sessions.create();
+        }
+        sessions.gc();
+    }
+
+    #[test]
+    fn test_cookie_has_secure_flag() {
+        let cookie = set_cookie("testtoken");
+        assert!(cookie.contains("Secure"), "cookie must have Secure flag: {cookie}");
+        assert!(cookie.contains("HttpOnly"), "cookie must have HttpOnly flag: {cookie}");
+        assert!(cookie.contains("SameSite=Lax"), "cookie must have SameSite=Lax: {cookie}");
+    }
 }

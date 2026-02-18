@@ -15,6 +15,9 @@ pub struct AppState {
     pub ssh_pubkey: Option<Arc<String>>,
     /// Authentication configuration.
     pub auth: auth::AuthConfig,
+    /// Allowed CORS origins (e.g. `["https://app.example.com"]`).
+    /// Empty means CORS is disabled. Set via `MINIONS_CORS_ORIGINS` env var.
+    pub cors_origins: Vec<String>,
 }
 
 /// Reconcile DB state with reality.
@@ -109,6 +112,19 @@ pub async fn serve(
 
     let auth = auth::AuthConfig::new(api_key.clone());
 
+    // ── CORS origins ──────────────────────────────────────────────────────────
+    let cors_origins: Vec<String> = std::env::var("MINIONS_CORS_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if cors_origins.is_empty() {
+        info!("CORS disabled (set MINIONS_CORS_ORIGINS=https://example.com to enable)");
+    } else {
+        info!("✓ CORS allowed origins: {:?}", cors_origins);
+    }
+
     match &ssh_pubkey {
         Some(key) => info!("✓ SSH public key loaded ({} chars) — will be injected into new VMs", key.len()),
         None => warn!("⚠️  No SSH public key found — VMs will require manual key setup\n   Set MINIONS_SSH_PUBKEY_PATH=/path/to/key.pub or run 'minions init' to auto-detect"),
@@ -118,6 +134,7 @@ pub async fn serve(
         db_path: Arc::new(db_path.clone()),
         ssh_pubkey: ssh_pubkey.map(Arc::new),
         auth,
+        cors_origins,
     };
 
     let app = api::router(state);

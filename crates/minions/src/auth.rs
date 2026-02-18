@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::Serialize;
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 
 #[derive(Clone)]
 pub struct AuthConfig {
@@ -34,6 +35,11 @@ struct ErrorResponse {
     error: String,
 }
 
+/// Compare two strings in constant time to prevent timing side-channel attacks.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    a.as_bytes().ct_eq(b.as_bytes()).into()
+}
+
 /// Middleware that checks for a valid bearer token.
 pub async fn require_auth(
     State(auth): State<AuthConfig>,
@@ -56,7 +62,8 @@ pub async fn require_auth(
     match auth_header {
         Some(header) if header.starts_with("Bearer ") => {
             let token = &header[7..]; // Skip "Bearer "
-            if token == expected_key.as_str() {
+            // Use constant-time comparison to prevent timing attacks
+            if constant_time_eq(token, expected_key.as_str()) {
                 // Valid token - proceed
                 next.run(request).await
             } else {
@@ -81,5 +88,31 @@ pub async fn require_auth(
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_constant_time_eq_matches() {
+        assert!(constant_time_eq("secret-key-abc", "secret-key-abc"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_differs() {
+        assert!(!constant_time_eq("secret-key-abc", "secret-key-xyz"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_different_lengths() {
+        assert!(!constant_time_eq("short", "much-longer-key"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_empty() {
+        assert!(constant_time_eq("", ""));
+        assert!(!constant_time_eq("", "nonempty"));
     }
 }

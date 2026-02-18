@@ -24,3 +24,4 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 http = "1"
 serde_urlencoded = "0.7"
+subtle = { workspace = true }
