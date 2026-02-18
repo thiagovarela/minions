@@ -30,6 +30,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/vms", get(list_vms))
         .route("/api/vms/{name}", get(get_vm))
         .route("/api/vms/{name}", delete(destroy_vm))
+        .route("/api/vms/{name}/stop", post(stop_vm))
         .route("/api/vms/{name}/restart", post(restart_vm))
         .route("/api/vms/{name}/rename", post(rename_vm))
         .route("/api/vms/{name}/copy", post(copy_vm))
@@ -228,6 +229,28 @@ async fn destroy_vm(
         Ok(()) => Json(serde_json::json!({ "message": format!("VM '{name}' destroyed") }))
             .into_response(),
         Err(e) => internal(e).into_response(),
+    }
+}
+
+/// `POST /api/vms/:name/stop` — Halt a VM (CH process + TAP), keep rootfs + DB record.
+async fn stop_vm(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    info!(name = %name, "stop VM");
+    let db_path = state.db_path.as_str().to_string();
+    match vm::stop(&db_path, &name).await {
+        Ok(v) => Json(VmResponse::from(v)).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                not_found(&name).into_response()
+            } else if msg.contains("already stopped") {
+                bad_request(msg).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
     }
 }
 

@@ -54,8 +54,10 @@ enum Commands {
         #[arg(long, default_value_t = 1024)]
         memory: u32,
     },
-    /// Destroy a running VM
+    /// Destroy a running VM (halt + remove rootfs + remove from DB)
     Destroy { name: String },
+    /// Stop a VM (halt CH process, keep rootfs + DB record)
+    Stop { name: String },
     /// List all VMs
     List,
     /// Restart a running VM (ACPI reboot signal)
@@ -290,6 +292,14 @@ async fn run_remote(host: &str, command: Commands, json: bool) -> Result<()> {
             print_vm_list(vms.into_iter().map(VmJson::from), json);
         }
 
+        Commands::Stop { name } => {
+            if !json {
+                println!("Stopping VM '{name}' via {host}…");
+            }
+            let vm = c.stop_vm(&name).await?;
+            print_vm(VmJson::from(vm), json);
+        }
+
         Commands::Restart { name } => {
             if !json {
                 println!("Restarting VM '{name}' via {host}…");
@@ -388,6 +398,14 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
             let conn = db::open(db_path).context("open state database")?;
             let vms = vm::list(&conn)?;
             print_vm_list(vms.into_iter().map(VmJson::from), json);
+        }
+
+        Commands::Stop { name } => {
+            if !json {
+                println!("Stopping VM '{name}'…");
+            }
+            let vm = vm::stop(db_path, &name).await?;
+            print_vm(VmJson::from(vm), json);
         }
 
         Commands::Restart { name } => {

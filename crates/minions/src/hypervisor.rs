@@ -98,17 +98,20 @@ pub fn reboot(name: &str) -> Result<()> {
 }
 
 /// Gracefully shut down a VM via the CH API, falling back to SIGKILL.
-pub fn shutdown(name: &str, pid: Option<i64>) -> Result<()> {
-    let api_socket = api_socket_path(name);
+///
+/// Uses the **stored** `api_socket` and `vsock_socket` paths from the DB
+/// record so it works correctly even after a rename.
+pub fn shutdown_vm(api_socket: &str, vsock_socket: &str, pid: Option<i64>) -> Result<()> {
+    let api_path = std::path::Path::new(api_socket);
 
-    if api_socket.exists() {
+    if api_path.exists() {
         // Try graceful power button press.
-        let _ = curl_put(&api_socket.to_string_lossy(), "vm.power-button");
+        let _ = curl_put(api_socket, "vm.power-button");
         std::thread::sleep(Duration::from_secs(5));
 
         // If still alive, force-shutdown VMM.
         if is_alive_pid(pid) {
-            let _ = curl_put(&api_socket.to_string_lossy(), "vmm.shutdown");
+            let _ = curl_put(api_socket, "vmm.shutdown");
             std::thread::sleep(Duration::from_secs(2));
         }
     }
@@ -119,11 +122,22 @@ pub fn shutdown(name: &str, pid: Option<i64>) -> Result<()> {
     }
 
     // Clean up socket files.
-    let _ = std::fs::remove_file(&api_socket);
-    let vsock_socket = vsock_socket_path(name);
-    let _ = std::fs::remove_file(&vsock_socket);
+    let _ = std::fs::remove_file(api_socket);
+    let _ = std::fs::remove_file(vsock_socket);
 
     Ok(())
+}
+
+/// Convenience wrapper that derives socket paths from the VM name.
+/// Only use this for cases where the VM has never been renamed.
+pub fn shutdown(name: &str, pid: Option<i64>) -> Result<()> {
+    let api_socket = api_socket_path(name);
+    let vsock_socket = vsock_socket_path(name);
+    shutdown_vm(
+        &api_socket.to_string_lossy(),
+        &vsock_socket.to_string_lossy(),
+        pid,
+    )
 }
 
 /// Send a PUT request to the CH API via the Unix socket using curl.
