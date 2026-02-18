@@ -32,6 +32,15 @@ pub enum Request {
 
     /// Report system status (uptime, memory, disk).
     ReportStatus,
+
+    /// Write content to a file (for injecting SSH keys, etc.).
+    /// Creates parent directories and sets appropriate permissions.
+    WriteFile {
+        path: String,
+        content: String,
+        mode: u32,      // Unix file permissions (e.g., 0o600)
+        append: bool,   // If true, append; if false, overwrite
+    },
 }
 
 /// Response from guest agent to host.
