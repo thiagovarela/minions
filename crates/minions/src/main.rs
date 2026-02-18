@@ -1,19 +1,22 @@
-//! `minions` — VM lifecycle CLI for cloud-hypervisor guests.
-//!
-//! Must be run as root.
+//! `minions` — VM lifecycle CLI + daemon for cloud-hypervisor guests.
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use minions_proto::{Request, Response, ResponseData};
 use std::process::Command;
 use tabled::{Table, Tabled};
 
 mod agent;
+mod api;
+mod client;
 mod db;
 mod hypervisor;
+mod init;
 mod network;
+mod server;
 mod storage;
 mod vm;
+
+use minions_proto::{Request, Response, ResponseData};
 
 #[derive(Parser)]
 #[command(
@@ -22,9 +25,14 @@ mod vm;
     version
 )]
 struct Cli {
-    /// SQLite database path
-    #[arg(long, default_value = db::DB_PATH)]
+    /// SQLite database path (direct mode only)
+    #[arg(long, default_value = db::DB_PATH, global = true)]
     db: String,
+
+    /// Connect to a remote minions daemon (e.g. http://minipc:3000)
+    /// When set, the CLI is a thin HTTP client — no sudo required.
+    #[arg(long, global = true)]
+    host: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -34,53 +42,39 @@ struct Cli {
 enum Commands {
     /// Create and start a new VM
     Create {
-        /// VM name (alphanumeric + hyphens, max 11 chars)
         name: String,
-
-        /// Number of vCPUs
         #[arg(long, default_value_t = 2)]
         cpus: u32,
-
-        /// Memory in MiB
         #[arg(long, default_value_t = 1024)]
         memory: u32,
     },
-
     /// Destroy a running VM
-    Destroy {
-        /// VM name
-        name: String,
-    },
-
+    Destroy { name: String },
     /// List all VMs
     List,
-
     /// Run a command inside a VM
     Exec {
-        /// VM name
         name: String,
-
-        /// Command and arguments (after --)
         #[arg(last = true)]
         cmd: Vec<String>,
     },
-
     /// Open an interactive SSH session into a VM
-    Ssh {
-        /// VM name
-        name: String,
-    },
-
+    Ssh { name: String },
     /// Show VM status (from agent)
-    Status {
-        /// VM name
-        name: String,
+    Status { name: String },
+    /// Print serial console log
+    Logs { name: String },
+    /// Start the HTTP API daemon
+    Serve {
+        /// Address to bind to
+        #[arg(long, default_value = "0.0.0.0:3000")]
+        bind: String,
     },
-
-    /// Print serial console log of a VM
-    Logs {
-        /// VM name
-        name: String,
+    /// One-time host setup: bridge, iptables, directories, systemd unit
+    Init {
+        /// Also persist networking across reboots (sysctl + iptables-persistent)
+        #[arg(long)]
+        persist: bool,
     },
 }
 
@@ -108,34 +102,130 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let conn = db::open(&cli.db).context("open state database")?;
 
-    match cli.command {
+    // Init and Serve always run directly — they ARE the server side.
+    match &cli.command {
+        Commands::Init { persist } => return init::run(*persist),
+        Commands::Serve { bind } => {
+            let ssh_pubkey = find_ssh_pubkey();
+            return server::serve(cli.db.clone(), bind.clone(), ssh_pubkey).await;
+        }
+        // Ssh is always local (interactive terminal).
+        Commands::Ssh { name } => return cmd_ssh(&cli.db, name).await,
+        _ => {}
+    }
+
+    // Determine whether to use HTTP client or direct mode.
+    let host = if let Some(h) = &cli.host {
+        Some(h.clone())
+    } else {
+        // Auto-detect: if local daemon is reachable, use it.
+        client::local_daemon_url().await
+    };
+
+    if let Some(host) = host {
+        run_remote(&host, cli.command).await
+    } else {
+        run_direct(&cli.db, cli.command).await
+    }
+}
+
+// ── Remote mode (HTTP client) ─────────────────────────────────────────────────
+
+async fn run_remote(host: &str, command: Commands) -> Result<()> {
+    let c = client::Client::new(host);
+
+    match command {
+        Commands::Create { name, cpus, memory } => {
+            println!("Creating VM '{name}' via {host}…");
+            let vm = c
+                .create_vm(client::CreateRequest { name: name.clone(), cpus, memory_mb: memory })
+                .await?;
+            print_vm_created(&vm.name, &vm.ip, vm.vsock_cid, vm.cpus, vm.memory_mb, vm.pid);
+        }
+
+        Commands::Destroy { name } => {
+            println!("Destroying VM '{name}' via {host}…");
+            c.destroy_vm(&name).await?;
+            println!("✓ VM '{name}' destroyed");
+        }
+
+        Commands::List => {
+            let vms = c.list_vms().await?;
+            if vms.is_empty() {
+                println!("No VMs found.");
+            } else {
+                let rows: Vec<VmRow> = vms
+                    .into_iter()
+                    .map(|v| VmRow {
+                        name: v.name,
+                        status: v.status,
+                        ip: v.ip,
+                        cpus: v.cpus,
+                        memory: format!("{} MiB", v.memory_mb),
+                        pid: v.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
+                    })
+                    .collect();
+                println!("{}", Table::new(rows));
+            }
+        }
+
+        Commands::Exec { name, cmd } => {
+            if cmd.is_empty() {
+                anyhow::bail!("provide a command after --");
+            }
+            let resp = c
+                .exec_vm(
+                    &name,
+                    client::ExecRequest { command: cmd[0].clone(), args: cmd[1..].to_vec() },
+                )
+                .await?;
+            if !resp.stdout.is_empty() { print!("{}", resp.stdout); }
+            if !resp.stderr.is_empty() { eprint!("{}", resp.stderr); }
+            if resp.exit_code != 0 {
+                std::process::exit(resp.exit_code);
+            }
+        }
+
+        Commands::Status { name } => {
+            let status = c.vm_status(&name).await?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+        }
+
+        Commands::Logs { name } => {
+            let logs = c.vm_logs(&name).await?;
+            print!("{logs}");
+        }
+
+        // Already handled above or unreachable in remote mode.
+        _ => unreachable!(),
+    }
+
+    Ok(())
+}
+
+// ── Direct mode (local orchestration) ────────────────────────────────────────
+
+async fn run_direct(db_path: &str, command: Commands) -> Result<()> {
+    match command {
         Commands::Create { name, cpus, memory } => {
             println!("Creating VM '{name}'…");
             let ssh_pubkey = find_ssh_pubkey();
             if ssh_pubkey.is_some() {
                 println!("  (SSH public key found — key-based SSH will work)");
             }
-            let vm = vm::create(&conn, &name, cpus, memory, ssh_pubkey).await?;
-            println!();
-            println!("✓ VM '{name}' is running");
-            println!("  IP:     {}", vm.ip);
-            println!("  CID:    {}", vm.vsock_cid);
-            println!("  CPUs:   {}", vm.vcpus);
-            println!("  Memory: {} MiB", vm.memory_mb);
-            println!("  PID:    {}", vm.ch_pid.unwrap_or(0));
-            println!();
-            println!("  SSH:    ssh root@{}", vm.ip);
+            let vm = vm::create(db_path, &name, cpus, memory, ssh_pubkey).await?;
+            print_vm_created(&vm.name, &vm.ip, vm.vsock_cid, vm.vcpus, vm.memory_mb, vm.ch_pid);
         }
 
         Commands::Destroy { name } => {
             println!("Destroying VM '{name}'…");
-            vm::destroy(&conn, &name).await?;
+            vm::destroy(db_path, &name).await?;
             println!("✓ VM '{name}' destroyed");
         }
 
         Commands::List => {
+            let conn = db::open(db_path).context("open state database")?;
             let vms = vm::list(&conn)?;
             if vms.is_empty() {
                 println!("No VMs found.");
@@ -148,10 +238,7 @@ async fn main() -> Result<()> {
                         ip: v.ip,
                         cpus: v.vcpus,
                         memory: format!("{} MiB", v.memory_mb),
-                        pid: v
-                            .ch_pid
-                            .map(|p| p.to_string())
-                            .unwrap_or_else(|| "-".to_string()),
+                        pid: v.ch_pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
                     })
                     .collect();
                 println!("{}", Table::new(rows));
@@ -162,16 +249,17 @@ async fn main() -> Result<()> {
             if cmd.is_empty() {
                 anyhow::bail!("provide a command after --");
             }
-            let vm_rec = db::get_vm(&conn, &name)?
-                .with_context(|| format!("VM '{name}' not found"))?;
+            // Drop conn before await.
+            let vsock_socket = {
+                let conn = db::open(db_path).context("open state database")?;
+                let vm_rec = db::get_vm(&conn, &name)?
+                    .with_context(|| format!("VM '{name}' not found"))?;
+                std::path::PathBuf::from(vm_rec.ch_vsock_socket)
+            };
 
-            let vsock_socket = std::path::PathBuf::from(&vm_rec.ch_vsock_socket);
             let response = agent::send_request(
                 &vsock_socket,
-                Request::Exec {
-                    command: cmd[0].clone(),
-                    args: cmd[1..].to_vec(),
-                },
+                Request::Exec { command: cmd[0].clone(), args: cmd[1..].to_vec() },
             )
             .await?;
 
@@ -180,51 +268,24 @@ async fn main() -> Result<()> {
                     data: Some(ResponseData::Exec { exit_code, stdout, stderr }),
                     ..
                 } => {
-                    if !stdout.is_empty() {
-                        print!("{stdout}");
-                    }
-                    if !stderr.is_empty() {
-                        eprint!("{stderr}");
-                    }
-                    if exit_code != 0 {
-                        std::process::exit(exit_code);
-                    }
+                    if !stdout.is_empty() { print!("{stdout}"); }
+                    if !stderr.is_empty() { eprint!("{stderr}"); }
+                    if exit_code != 0 { std::process::exit(exit_code); }
                 }
                 Response::Error { message } => anyhow::bail!("exec error: {message}"),
-                other => anyhow::bail!("unexpected response: {:?}", other),
+                other => anyhow::bail!("unexpected response: {other:?}"),
             }
-        }
-
-        Commands::Ssh { name } => {
-            let vm_rec = db::get_vm(&conn, &name)?
-                .with_context(|| format!("VM '{name}' not found"))?;
-
-            // Build ssh args; if SUDO_USER has a key, point at it explicitly.
-            let mut ssh_args: Vec<String> = vec![
-                "-o".into(),
-                "StrictHostKeyChecking=no".into(),
-                "-o".into(),
-                "UserKnownHostsFile=/dev/null".into(),
-            ];
-            if let Some(key_path) = find_ssh_identity_path() {
-                ssh_args.push("-i".into());
-                ssh_args.push(key_path);
-            }
-            ssh_args.push(format!("root@{}", vm_rec.ip));
-
-            let status = Command::new("ssh")
-                .args(&ssh_args)
-                .status()
-                .context("exec ssh")?;
-            std::process::exit(status.code().unwrap_or(1));
         }
 
         Commands::Status { name } => {
-            let vm_rec = db::get_vm(&conn, &name)?
-                .with_context(|| format!("VM '{name}' not found"))?;
-            let vsock_socket = std::path::PathBuf::from(&vm_rec.ch_vsock_socket);
-            let response =
-                agent::send_request(&vsock_socket, Request::ReportStatus).await?;
+            // Drop conn before await.
+            let vsock_socket = {
+                let conn = db::open(db_path).context("open state database")?;
+                let vm_rec = db::get_vm(&conn, &name)?
+                    .with_context(|| format!("VM '{name}' not found"))?;
+                std::path::PathBuf::from(vm_rec.ch_vsock_socket)
+            };
+            let response = agent::send_request(&vsock_socket, Request::ReportStatus).await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
 
@@ -233,16 +294,52 @@ async fn main() -> Result<()> {
             if !log_path.exists() {
                 anyhow::bail!("no serial log found at {}", log_path.display());
             }
-            let content = std::fs::read_to_string(&log_path)?;
-            print!("{content}");
+            print!("{}", std::fs::read_to_string(&log_path)?);
         }
+
+        _ => unreachable!(),
     }
 
     Ok(())
 }
 
-/// Find the SSH public key of the invoking user (works under sudo).
-/// Tries common key file names in the user's ~/.ssh directory.
+// ── SSH (always local) ────────────────────────────────────────────────────────
+
+async fn cmd_ssh(db_path: &str, name: &str) -> Result<()> {
+    let conn = db::open(db_path).context("open state database")?;
+    let vm_rec = db::get_vm(&conn, name)?
+        .with_context(|| format!("VM '{name}' not found"))?;
+
+    let mut ssh_args: Vec<String> = vec![
+        "-o".into(), "StrictHostKeyChecking=no".into(),
+        "-o".into(), "UserKnownHostsFile=/dev/null".into(),
+    ];
+    if let Some(key_path) = find_ssh_identity_path() {
+        ssh_args.push("-i".into());
+        ssh_args.push(key_path);
+    }
+    ssh_args.push(format!("root@{}", vm_rec.ip));
+
+    let status = Command::new("ssh").args(&ssh_args).status().context("exec ssh")?;
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+// ── Output helpers ────────────────────────────────────────────────────────────
+
+fn print_vm_created(name: &str, ip: &str, cid: u32, cpus: u32, memory_mb: u32, pid: Option<i64>) {
+    println!();
+    println!("✓ VM '{name}' is running");
+    println!("  IP:     {ip}");
+    println!("  CID:    {cid}");
+    println!("  CPUs:   {cpus}");
+    println!("  Memory: {memory_mb} MiB");
+    println!("  PID:    {}", pid.unwrap_or(0));
+    println!();
+    println!("  SSH:    ssh root@{ip}");
+}
+
+// ── SSH key discovery ─────────────────────────────────────────────────────────
+
 fn find_ssh_pubkey() -> Option<String> {
     let ssh_dir = ssh_dir_for_invoking_user()?;
     for name in &["id_ed25519.pub", "id_rsa.pub", "id_ecdsa.pub"] {
@@ -257,7 +354,6 @@ fn find_ssh_pubkey() -> Option<String> {
     None
 }
 
-/// Return the path to the private key identity file for the invoking user.
 fn find_ssh_identity_path() -> Option<String> {
     let ssh_dir = ssh_dir_for_invoking_user()?;
     for name in &["id_ed25519", "id_rsa", "id_ecdsa"] {
@@ -269,12 +365,9 @@ fn find_ssh_identity_path() -> Option<String> {
     None
 }
 
-/// Return the ~/.ssh directory of the user who invoked sudo (or current user).
 fn ssh_dir_for_invoking_user() -> Option<std::path::PathBuf> {
-    // When running under sudo, SUDO_USER is the original user.
     let user = std::env::var("SUDO_USER").ok().filter(|s| !s.is_empty());
     if let Some(ref u) = user {
-        // Look up home directory via /etc/passwd.
         if let Ok(content) = std::fs::read_to_string("/etc/passwd") {
             for line in content.lines() {
                 let fields: Vec<&str> = line.splitn(7, ':').collect();
@@ -284,7 +377,6 @@ fn ssh_dir_for_invoking_user() -> Option<std::path::PathBuf> {
             }
         }
     }
-    // Fallback: current user's home.
     std::env::var("HOME")
         .ok()
         .map(|h| std::path::PathBuf::from(h).join(".ssh"))
