@@ -24,8 +24,16 @@ pub struct AppState {
     pub domain: Arc<String>,
     /// Optional API key used as the proxy password.
     pub api_key: Option<Arc<String>>,
+    /// Host public IP (for custom domain DNS verification).
+    pub public_ip: Option<Arc<String>>,
     pub sessions: Sessions,
     pub http_client: reqwest::Client,
+    /// ACME HTTP-01 challenge response map.
+    pub acme_challenges: crate::ChallengeMap,
+    /// ACME client (for provisioning custom domain certs).
+    pub acme_client: Arc<crate::tls::AcmeClient>,
+    /// SNI resolver (for loading custom domain certs after provision).
+    pub sni_resolver: Arc<crate::tls::SniResolver>,
 }
 
 // ── Main handler ──────────────────────────────────────────────────────────────
@@ -47,46 +55,51 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
         return handle_internal(req, &state).await;
     }
 
-    // ── Extract subdomain ─────────────────────────────────────────────────────
+    // ── Try custom domain lookup first ────────────────────────────────────────
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("db open error: {}", e);
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
+        }
+    };
+
+    if let Ok(Some(vm)) = db::get_vm_by_custom_domain(&conn, host) {
+        debug!(domain = host, vm = %vm.name, "custom domain match");
+        return forward_to_vm(req, &vm, host, &state).await;
+    }
+
+    // ── Extract subdomain (*.miniclankers.com) ────────────────────────────────
     let subdomain = match extract_subdomain(host, &state.domain) {
         Some(s) => s,
         None => return error_response(StatusCode::NOT_FOUND, "Not found"),
     };
 
-    debug!(subdomain, "proxy request");
+    debug!(subdomain, "proxy request (subdomain)");
 
-    // ── VM lookup ─────────────────────────────────────────────────────────────
-    let vm = {
-        let conn = match db::open(&state.db_path) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("db open error: {}", e);
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
-            }
-        };
-        match db::get_vm_proxy(&conn, &subdomain) {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                return error_response(
-                    StatusCode::NOT_FOUND,
-                    &format!("No VM named '{subdomain}'"),
-                )
-            }
-            Err(e) => {
-                warn!("db query error: {}", e);
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
-            }
+    // ── VM lookup by subdomain ────────────────────────────────────────────────
+    match db::get_vm_proxy(&conn, &subdomain) {
+        Ok(Some(vm)) => forward_to_vm(req, &vm, host, &state).await,
+        Ok(None) => error_response(StatusCode::NOT_FOUND, &format!("No VM named '{subdomain}'")),
+        Err(e) => {
+            warn!("db query error: {}", e);
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
         }
-    };
+    }
+}
 
+// ── Forward to VM (auth + status check + proxy) ───────────────────────────────
+
+async fn forward_to_vm(req: Request, vm: &db::VmProxy, host: &str, state: &AppState) -> Response {
+    // Check VM status.
     if vm.status != "running" {
         return error_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            &format!("VM '{subdomain}' is {}", vm.status),
+            &format!("VM '{}' is {}", vm.name, vm.status),
         );
     }
 
-    // ── Auth (private VMs) ────────────────────────────────────────────────────
+    // Auth check for private VMs.
     if !vm.proxy_public && state.api_key.is_some() {
         let token = extract_token(req.headers());
         let valid = token.as_deref().map(|t| state.sessions.is_valid(t)).unwrap_or(false);
@@ -95,7 +108,7 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
         }
     }
 
-    // ── Forward request ───────────────────────────────────────────────────────
+    // Forward request to VM.
     let origin = format!("http://{}:{}", vm.ip, vm.proxy_port);
     forward(req, &origin, host, &state.http_client).await
 }
@@ -316,5 +329,48 @@ pub fn error_response(status: StatusCode, message: &str) -> Response {
         .status(status)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .body(Body::from(html))
+        .unwrap()
+}
+
+// ── ACME HTTP-01 Challenge Handler ────────────────────────────────────────────
+
+use axum::extract::Path;
+
+pub async fn acme_challenge(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+) -> Response {
+    debug!(token, "ACME HTTP-01 challenge request");
+    if let Some(key_auth) = state.acme_challenges.get(&token) {
+        let response_text = key_auth.value().clone();
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(Body::from(response_text))
+            .unwrap()
+    } else {
+        Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from("challenge not found"))
+            .unwrap()
+    }
+}
+
+// ── HTTP → HTTPS Redirect ─────────────────────────────────────────────────────
+
+pub async fn http_redirect(req: Request) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost");
+
+    let path_and_query = req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let location = format!("https://{}{}", host, path_and_query);
+
+    Response::builder()
+        .status(StatusCode::MOVED_PERMANENTLY)
+        .header(header::LOCATION, location)
+        .body(Body::from("Redirecting to HTTPS"))
         .unwrap()
 }

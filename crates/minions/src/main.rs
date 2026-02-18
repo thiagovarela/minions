@@ -96,12 +96,24 @@ enum Commands {
         /// Address to bind the SSH gateway to (e.g. 0.0.0.0:2222)
         #[arg(long)]
         ssh_bind: Option<String>,
-        /// Address to bind the HTTP reverse proxy to (e.g. 0.0.0.0:80)
+        /// Address to bind the HTTPS proxy to (e.g. 0.0.0.0:443)
         #[arg(long)]
         proxy_bind: Option<String>,
+        /// Address to bind HTTP listener (ACME challenges + redirect, e.g. 0.0.0.0:80)
+        #[arg(long)]
+        http_bind: Option<String>,
         /// Base domain for the proxy (e.g. miniclankers.com)
         #[arg(long)]
         domain: Option<String>,
+        /// Public IP address of this host (for custom domain verification)
+        #[arg(long)]
+        public_ip: Option<String>,
+        /// Email address for Let's Encrypt account
+        #[arg(long)]
+        acme_email: Option<String>,
+        /// Use Let's Encrypt staging environment (for testing)
+        #[arg(long)]
+        acme_staging: bool,
     },
     /// One-time host setup: bridge, iptables, directories, systemd unit
     Init {
@@ -250,7 +262,7 @@ async fn main() -> Result<()> {
     // Init and Serve always run directly — they ARE the server side.
     match &cli.command {
         Commands::Init { persist } => return init::run(*persist),
-        Commands::Serve { bind, ssh_bind, proxy_bind, domain } => {
+        Commands::Serve { bind, ssh_bind, proxy_bind, http_bind, domain, public_ip, acme_email, acme_staging } => {
             let ssh_pubkey = find_ssh_pubkey();
             return server::serve(
                 cli.db.clone(),
@@ -258,7 +270,11 @@ async fn main() -> Result<()> {
                 ssh_pubkey,
                 ssh_bind.clone(),
                 proxy_bind.clone(),
+                http_bind.clone(),
                 domain.clone(),
+                public_ip.clone(),
+                acme_email.clone(),
+                *acme_staging,
             ).await;
         }
         // Ssh is always local (interactive terminal).

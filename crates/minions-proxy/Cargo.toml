@@ -25,3 +25,14 @@ chrono = "0.4"
 http = "1"
 serde_urlencoded = "0.7"
 subtle = { workspace = true }
+
+# TLS and ACME support
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
+instant-acme = "0.8"
+rcgen = "0.13"
+rustls-pemfile = "2"
+hickory-resolver = "0.24"
+dashmap = "6"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+x509-parser = "0.16"
