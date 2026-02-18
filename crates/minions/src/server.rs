@@ -97,7 +97,11 @@ pub async fn serve(
     ssh_pubkey: Option<String>,
     ssh_bind: Option<String>,
     proxy_bind: Option<String>,
+    http_bind: Option<String>,
     domain: Option<String>,
+    public_ip: Option<String>,
+    acme_email: Option<String>,
+    acme_staging: bool,
 ) -> Result<()> {
     reconcile(&db_path)?;
 
@@ -177,27 +181,44 @@ pub async fn serve(
         info!("SSH gateway disabled (use --ssh-bind to enable)");
     }
 
-    // ── HTTP reverse proxy (optional) ─────────────────────────────────────────
-    if let Some(proxy_addr) = proxy_bind {
+    // ── HTTPS reverse proxy (optional) ────────────────────────────────────────
+    if let Some(https_addr) = proxy_bind {
         let base_domain = domain.clone().unwrap_or_else(|| {
             warn!("⚠️  --proxy-bind set but --domain not provided; defaulting to 'localhost'");
             "localhost".to_string()
         });
 
+        let http_addr = http_bind.clone().unwrap_or_else(|| "0.0.0.0:80".to_string());
+        let email = acme_email.clone().unwrap_or_else(|| {
+            warn!("⚠️  --acme-email not set; using noreply@{}", base_domain);
+            format!("noreply@{}", base_domain)
+        });
+
+        let cf_dns_token = std::env::var("MINIONS_CF_DNS_TOKEN").ok();
+        if cf_dns_token.is_none() {
+            warn!("⚠️  MINIONS_CF_DNS_TOKEN not set — wildcard cert provisioning will fail");
+            warn!("   Set MINIONS_CF_DNS_TOKEN=<cloudflare-dns-api-token> for DNS-01 challenges");
+        }
+
         let proxy_config = minions_proxy::ProxyConfig {
             db_path: db_path.clone(),
             domain: base_domain.clone(),
             api_key: api_key.clone(),
+            certs_dir: "/var/lib/minions/certs".to_string(),
+            cf_dns_token,
+            acme_email: email,
+            acme_staging,
+            public_ip: public_ip.clone(),
         };
 
-        info!("HTTP proxy starting on {} (domain: {})", proxy_addr, base_domain);
+        info!("HTTPS proxy starting on https://{} + http://{} (domain: {})", https_addr, http_addr, base_domain);
         tokio::spawn(async move {
-            if let Err(e) = minions_proxy::serve(proxy_config, &proxy_addr).await {
-                tracing::error!("HTTP proxy error: {:#}", e);
+            if let Err(e) = minions_proxy::serve(proxy_config, &https_addr, &http_addr).await {
+                tracing::error!("Proxy error: {:#}", e);
             }
         });
     } else {
-        info!("HTTP proxy disabled (use --proxy-bind and --domain to enable)");
+        info!("HTTPS proxy disabled (use --proxy-bind, --http-bind, and --domain to enable)");
     }
 
     axum::serve(listener, app).await?;

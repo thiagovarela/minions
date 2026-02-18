@@ -78,6 +78,15 @@ fn migrate(conn: &Connection) -> Result<()> {
         -- Index for efficient per-owner VM lookups.
         CREATE INDEX IF NOT EXISTS idx_vms_owner
             ON vms(owner_id) WHERE owner_id IS NOT NULL;
+
+        -- Custom domains table (for user-provided domains).
+        CREATE TABLE IF NOT EXISTS custom_domains (
+            id          TEXT PRIMARY KEY,
+            vm_name     TEXT NOT NULL,
+            domain      TEXT UNIQUE NOT NULL,
+            verified    INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL
+        );
         ",
     )
     .context("run migration")?;

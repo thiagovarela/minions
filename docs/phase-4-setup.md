@@ -3,7 +3,7 @@
 Phase 4 turns `minions` from a local-only CLI into a daemon with an HTTP REST API,
 accessible remotely over Tailscale from any device.
 
-**Tested on:** minipc — AMD Ryzen 5 4500U, Ubuntu 24.04.4 LTS
+**Tested on:** vps-2b1e18f2 (OVH KVM VPS) — Ubuntu 25.04
 
 ---
 
@@ -15,7 +15,7 @@ accessible remotely over Tailscale from any device.
 | `minions serve` | HTTP API daemon on port 3000 |
 | Startup reconciliation | Detects crashed VMs, cleans orphans on daemon start |
 | Create rollback | Partial-create failures clean up TAP + rootfs + DB automatically |
-| Remote CLI | `minions --host http://minipc:3000 list` from your Mac |
+| Remote CLI | `minions --host http://vps-2b1e18f2:3000 list` from your Mac |
 | HTTP API | Full REST API for VMs — create, destroy, list, exec, status, logs |
 
 ---
@@ -53,19 +53,19 @@ sudo systemctl status minions
 sudo minions list
 
 # Remote (from Mac over Tailscale)
-curl http://minipc:3000/api/vms
+curl http://vps-2b1e18f2:3000/api/vms
 ```
 
 ---
 
 ## HTTP API Reference
 
-Base URL: `http://minipc:3000`
+Base URL: `http://vps-2b1e18f2:3000`
 
 ### Create a VM
 
 ```bash
-curl -X POST http://minipc:3000/api/vms \
+curl -X POST http://vps-2b1e18f2:3000/api/vms \
   -H 'Content-Type: application/json' \
   -d '{"name":"myvm","cpus":2,"memory_mb":1024}'
 ```
@@ -86,19 +86,19 @@ curl -X POST http://minipc:3000/api/vms \
 ### List VMs
 
 ```bash
-curl http://minipc:3000/api/vms
+curl http://vps-2b1e18f2:3000/api/vms
 ```
 
 ### Get VM details
 
 ```bash
-curl http://minipc:3000/api/vms/myvm
+curl http://vps-2b1e18f2:3000/api/vms/myvm
 ```
 
 ### Execute a command
 
 ```bash
-curl -X POST http://minipc:3000/api/vms/myvm/exec \
+curl -X POST http://vps-2b1e18f2:3000/api/vms/myvm/exec \
   -H 'Content-Type: application/json' \
   -d '{"command":"uname","args":["-a"]}'
 ```
@@ -110,33 +110,33 @@ curl -X POST http://minipc:3000/api/vms/myvm/exec \
 ### Agent status
 
 ```bash
-curl http://minipc:3000/api/vms/myvm/status
+curl http://vps-2b1e18f2:3000/api/vms/myvm/status
 ```
 
 ### Serial console log
 
 ```bash
-curl http://minipc:3000/api/vms/myvm/logs
+curl http://vps-2b1e18f2:3000/api/vms/myvm/logs
 ```
 
 ### Destroy a VM
 
 ```bash
-curl -X DELETE http://minipc:3000/api/vms/myvm
+curl -X DELETE http://vps-2b1e18f2:3000/api/vms/myvm
 ```
 
 ---
 
 ## Remote CLI
 
-When `--host` is set, the CLI is a thin HTTP client — no sudo, no SSH into minipc:
+When `--host` is set, the CLI is a thin HTTP client — no sudo, no SSH into vps-2b1e18f2:
 
 ```bash
 # From Mac
-minions --host http://minipc:3000 list
-minions --host http://minipc:3000 create myvm --cpus 4
-minions --host http://minipc:3000 exec myvm -- uname -a
-minions --host http://minipc:3000 destroy myvm
+minions --host http://vps-2b1e18f2:3000 list
+minions --host http://vps-2b1e18f2:3000 create myvm --cpus 4
+minions --host http://vps-2b1e18f2:3000 exec myvm -- uname -a
+minions --host http://vps-2b1e18f2:3000 destroy myvm
 ```
 
 Auto-detect: if `--host` is omitted and a local daemon is running on

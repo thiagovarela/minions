@@ -2,7 +2,7 @@
 
 Reproduce the full setup from a fresh Ubuntu 24.04 host with KVM support.
 
-**Tested on:** minipc — AMD Ryzen 5 4500U, 30GB RAM, 465GB NVMe, Ubuntu 24.04.4 LTS
+**Tested on:** vps-2b1e18f2 (OVH KVM VPS) — Intel Core 6-core, 11GiB RAM, 96GB SSD, Ubuntu 25.04
 
 ---
 

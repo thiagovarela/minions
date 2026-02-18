@@ -11,7 +11,7 @@ Two modes run on a single port (default: **2222**):
 | **Proxy** | `ssh -p 2222 vmname@ssh.miniclankers.com` | SSH directly into VM |
 
 The port is fully configurable via `--ssh-bind`. Use 2222 to avoid needing root
-or `CAP_NET_BIND_SERVICE`. Port-forward 2222 on your router to 192.168.1.x:2222.
+or `CAP_NET_BIND_SERVICE`. On a VPS, port 2222 is directly reachable — no NAT needed.
 
 First-time users are prompted for an email address to register.
 
@@ -21,26 +21,29 @@ First-time users are prompted for an email address to register.
 
 Add these records in the Cloudflare dashboard for MINICLANKERS.COM:
 
-| Type | Name | Value | Proxy |
-|------|------|-------|-------|
-| A | `ssh` | `<your host IP>` | **DNS only** (grey cloud) |
-| A | `@` | `<your host IP>` | DNS only |
+| Type | Name  | Value           | Proxy                  |
+|------|-------|-----------------|------------------------|
+| A    | `ssh` | `54.37.17.133`  | **DNS only** (⚪ grey) |
+| A    | `@`   | `54.37.17.133`  | Proxied (🟠 orange)    |
+| A    | `*`   | `54.37.17.133`  | Proxied (🟠 orange)    |
 
-> **Note**: keep the proxy **off** (grey cloud) — Cloudflare does not proxy
-> raw TCP/SSH traffic on port 2222.
+> **`ssh` must be grey-cloud** — Cloudflare does not proxy raw TCP/SSH on port 2222.
+> `@` and `*` stay orange-cloud for DDoS protection and CDN.
 
 ---
 
 ## 2. Host Setup
 
-### 2a. Router port forward
+### 2a. VPS firewall
 
-Forward **external TCP 2222 → 192.168.1.x:2222** on your home router.
-No special Linux permissions needed to bind port 2222.
+On a VPS, ports are directly reachable — no NAT or port-forwarding needed.
+Ensure port 2222 is open:
 
-If you need standard port 22 externally, forward **external 22 → internal 2222**
-and keep the `--ssh-bind` at 2222. Document that users need `-p 22` (or nothing,
-since it's the default).
+```bash
+ufw allow 2222/tcp   # SSH gateway
+ufw allow 80/tcp     # HTTP (ACME challenges + redirect) — added in Phase 7
+ufw allow 443/tcp    # HTTPS proxy — added in Phase 7
+```
 
 ### 2b. First run — key generation
 
@@ -206,8 +209,7 @@ minions serve --ssh-bind 0.0.0.0:2222
 ```
 ssh -p 2222 minions@ssh.miniclankers.com ls
 │
-├── DNS: ssh.miniclankers.com → host IP (Cloudflare, grey cloud)
-├── Router: external 2222 → 192.168.1.x:2222
+├── DNS: ssh.miniclankers.com → 54.37.17.133 (grey cloud, direct)
 ├── TCP connect to minions gateway on port 2222
 ├── Authenticate by SSH public key fingerprint → users/ssh_keys DB table
 │   ├── Known key → authenticated user
@@ -268,7 +270,7 @@ sudo minions exec oldvm -- bash -c "echo '<key>' >> /root/.ssh/authorized_keys"
 Start the VM first via the HTTP API or CLI:
 
 ```bash
-minions --host http://minipc:3000 create xyz
+minions --host http://vps-2b1e18f2:3000 create xyz
 ```
 
 ### Host key changed warning
@@ -281,8 +283,8 @@ ssh-keygen -R '[ssh.miniclankers.com]:2222'
 
 ### Port 2222 not reachable
 
-Check your router's port forwarding rules and ensure the firewall allows TCP 2222 inbound.
-On the minipc:
+Ensure `ufw allow 2222/tcp` has been applied on the VPS.
+On vps-2b1e18f2:
 
 ```bash
 ss -tlnp | grep 2222   # should show minions listening
