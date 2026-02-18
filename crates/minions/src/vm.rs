@@ -153,24 +153,57 @@ pub async fn create(
     db::get_vm(&conn, name)?.context("VM vanished after create")
 }
 
-/// Destroy a VM: shutdown CH, delete TAP, delete rootfs, remove DB row.
-pub async fn destroy(db_path: &str, name: &str) -> Result<()> {
+/// Stop a running VM: shutdown CH process, remove TAP — but keep the rootfs
+/// and DB record (status → "stopped").  The VM can later be destroyed.
+///
+/// This is useful before a rename or when you want to preserve the disk state.
+pub async fn stop(db_path: &str, name: &str) -> Result<db::Vm> {
     // ── Sync: look up VM ─────────────────────────────────────────────────────
-    let ch_pid = {
+    let (ch_pid, api_socket, vsock_socket, tap_device) = {
+        let conn = db::open(db_path)?;
+        let vm = db::get_vm(&conn, name)?
+            .with_context(|| format!("VM '{name}' not found"))?;
+        if vm.status == "stopped" {
+            anyhow::bail!("VM '{name}' is already stopped");
+        }
+        db::update_vm_status(&conn, name, "stopping", None)?;
+        (vm.ch_pid, vm.ch_api_socket, vm.ch_vsock_socket, vm.tap_device)
+        // conn dropped here
+    };
+
+    // ── Shutdown CH process using stored socket paths ─────────────────────────
+    hypervisor::shutdown_vm(&api_socket, &vsock_socket, ch_pid)
+        .context("shutdown hypervisor")?;
+    network::destroy_tap_device(&tap_device).context("destroy TAP")?;
+
+    // ── Mark stopped (keep DB record and rootfs) ──────────────────────────────
+    let conn = db::open(db_path)?;
+    db::update_vm_status(&conn, name, "stopped", None)?;
+    db::get_vm(&conn, name)?.with_context(|| format!("VM '{name}' vanished after stop"))
+}
+
+/// Destroy a VM: shutdown CH, delete TAP, delete rootfs, remove DB row.
+///
+/// Uses stored socket and TAP paths from the DB so it works correctly even
+/// after a rename.
+pub async fn destroy(db_path: &str, name: &str) -> Result<()> {
+    // ── Sync: look up VM, collect stored paths ────────────────────────────────
+    let (ch_pid, api_socket, vsock_socket, tap_device) = {
         let conn = db::open(db_path)?;
         let vm = db::get_vm(&conn, name)?
             .with_context(|| format!("VM '{name}' not found"))?;
         db::update_vm_status(&conn, name, "stopping", None)?;
-        vm.ch_pid
+        (vm.ch_pid, vm.ch_api_socket, vm.ch_vsock_socket, vm.tap_device)
         // conn dropped here
     };
 
-    // ── Sync (blocking but not holding connection): shutdown CH ──────────────
-    hypervisor::shutdown(name, ch_pid).context("shutdown hypervisor")?;
-    network::destroy_tap(name).context("destroy TAP")?;
+    // ── Shutdown CH using stored socket paths ─────────────────────────────────
+    hypervisor::shutdown_vm(&api_socket, &vsock_socket, ch_pid)
+        .context("shutdown hypervisor")?;
+    network::destroy_tap_device(&tap_device).context("destroy TAP")?;
     storage::destroy_rootfs(name).context("destroy rootfs")?;
 
-    // ── Sync: remove DB record ───────────────────────────────────────────────
+    // ── Remove DB record ──────────────────────────────────────────────────────
     let conn = db::open(db_path)?;
     db::delete_vm(&conn, name)?;
     Ok(())
@@ -207,64 +240,74 @@ pub async fn restart(db_path: &str, name: &str) -> Result<db::Vm> {
     db::get_vm(&conn, name)?.with_context(|| format!("VM '{name}' vanished after restart"))
 }
 
-/// Rename a stopped VM.
+/// Rename a VM.
 ///
-/// The VM **must** be stopped; renaming a running VM would leave socket paths
-/// and TAP device names out of sync with the new name.
+/// Works on VMs in **any** state (running or stopped).
+///
+/// All resource paths (sockets, TAP, rootfs) are stored in the DB, so
+/// subsequent operations (destroy, exec, stop) always use those stored paths
+/// and are unaffected by a name-only rename of a running VM.
+///
+/// For stopped VMs we also opportunistically rename the rootfs directory and
+/// TAP device to keep paths consistent with the new name, and update the
+/// stored paths in the DB accordingly.
 pub async fn rename(db_path: &str, old_name: &str, new_name: &str) -> Result<()> {
     validate_name(new_name)?;
 
-    let (old_rootfs, old_tap) = {
+    let (status, old_rootfs, old_tap) = {
         let conn = db::open(db_path)?;
 
         // Source must exist.
         let vm = db::get_vm(&conn, old_name)?
             .with_context(|| format!("VM '{old_name}' not found"))?;
 
-        if vm.status != "stopped" {
-            anyhow::bail!(
-                "VM '{old_name}' must be stopped before renaming (status: {})",
-                vm.status
-            );
-        }
-
         // Destination name must not exist.
         if db::get_vm(&conn, new_name)?.is_some() {
             anyhow::bail!("VM '{new_name}' already exists");
         }
 
-        (vm.rootfs_path, vm.tap_device)
+        (vm.status, vm.rootfs_path, vm.tap_device)
     };
 
-    // Rename filesystem directory (rootfs lives at VMS_DIR/{name}/).
-    let old_vm_dir = std::path::PathBuf::from(storage::VMS_DIR).join(old_name);
-    let new_vm_dir = std::path::PathBuf::from(storage::VMS_DIR).join(new_name);
-    if old_vm_dir.exists() {
-        std::fs::rename(&old_vm_dir, &new_vm_dir)
-            .with_context(|| format!("rename VM dir {:?} → {:?}", old_vm_dir, new_vm_dir))?;
-    }
+    // For stopped VMs: also rename the rootfs directory and TAP device so
+    // stored paths stay consistent with the new name.
+    let (new_tap, new_api_socket, new_vsock_socket, new_rootfs) = if status == "stopped" {
+        let old_vm_dir = std::path::PathBuf::from(storage::VMS_DIR).join(old_name);
+        let new_vm_dir = std::path::PathBuf::from(storage::VMS_DIR).join(new_name);
+        if old_vm_dir.exists() {
+            std::fs::rename(&old_vm_dir, &new_vm_dir)
+                .with_context(|| format!("rename VM dir {:?} → {:?}", old_vm_dir, new_vm_dir))?;
+        }
 
-    // Rename TAP device (best-effort; may not exist if VM was already cleaned up).
-    let new_tap = network::tap_name_for(new_name);
-    let _ = std::process::Command::new("ip")
-        .args(["link", "set", &old_tap, "name", &new_tap])
-        .status();
+        let new_tap = network::tap_name_for(new_name);
+        let _ = std::process::Command::new("ip")
+            .args(["link", "set", &old_tap, "name", &new_tap])
+            .status();
 
-    // Derive new path strings.
-    let new_rootfs = old_rootfs.replace(old_name, new_name);
-    let new_api_socket = hypervisor::api_socket_path(new_name);
-    let new_vsock_socket = hypervisor::vsock_socket_path(new_name);
+        let new_rootfs = old_rootfs.replace(old_name, new_name);
+        let new_api = hypervisor::api_socket_path(new_name).to_string_lossy().to_string();
+        let new_vsock = hypervisor::vsock_socket_path(new_name).to_string_lossy().to_string();
+        (new_tap, new_api, new_vsock, new_rootfs)
+    } else {
+        // Running VM: keep all stored paths unchanged; only the name changes.
+        (old_tap, String::new(), String::new(), old_rootfs)
+    };
 
     let conn = db::open(db_path)?;
-    db::rename_vm(
-        &conn,
-        old_name,
-        new_name,
-        &new_tap,
-        &new_api_socket.to_string_lossy(),
-        &new_vsock_socket.to_string_lossy(),
-        &new_rootfs,
-    )?;
+    if status == "stopped" {
+        db::rename_vm(
+            &conn,
+            old_name,
+            new_name,
+            &new_tap,
+            &new_api_socket,
+            &new_vsock_socket,
+            &new_rootfs,
+        )?;
+    } else {
+        // Only update the name; leave all path columns intact.
+        db::rename_vm_name_only(&conn, old_name, new_name)?;
+    }
 
     Ok(())
 }

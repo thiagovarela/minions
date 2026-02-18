@@ -90,6 +90,19 @@ impl Client {
         Ok(())
     }
 
+    pub async fn stop_vm(&self, name: &str) -> Result<VmResponse> {
+        self.http
+            .post(format!("{}/api/vms/{name}/stop", self.base))
+            .send()
+            .await
+            .context("send stop request")?
+            .error_for_status()
+            .context("stop VM")?
+            .json()
+            .await
+            .context("decode stop response")
+    }
+
     pub async fn restart_vm(&self, name: &str) -> Result<VmResponse> {
         self.http
             .post(format!("{}/api/vms/{name}/restart", self.base))

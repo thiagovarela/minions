@@ -19,11 +19,16 @@ pub fn create_tap(name: &str) -> Result<String> {
     Ok(tap)
 }
 
-/// Delete a TAP device.
+/// Delete a TAP device by VM name (derives the tap device name).
 pub fn destroy_tap(name: &str) -> Result<()> {
-    let tap = tap_name(name);
+    destroy_tap_device(&tap_name(name))
+}
+
+/// Delete a TAP device by its exact device name.
+/// Use this when you have the stored tap name from the DB (e.g. after rename).
+pub fn destroy_tap_device(tap: &str) -> Result<()> {
     // Best-effort: ignore errors if device doesn't exist.
-    let _ = run("ip", &["link", "del", &tap]);
+    let _ = run("ip", &["link", "del", tap]);
     Ok(())
 }
 

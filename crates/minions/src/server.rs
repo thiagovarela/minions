@@ -35,8 +35,8 @@ pub fn reconcile(db_path: &str) -> Result<()> {
                         status = %vm.status,
                         "CH process dead — marking stopped and cleaning up"
                     );
-                    // Best-effort cleanup.
-                    let _ = network::destroy_tap(&vm.name);
+                    // Best-effort cleanup — use stored paths, not derived from name.
+                    let _ = network::destroy_tap_device(&vm.tap_device);
                     for sock in [&vm.ch_api_socket, &vm.ch_vsock_socket] {
                         let _ = std::fs::remove_file(sock);
                     }

@@ -173,6 +173,21 @@ pub fn rename_vm(
     Ok(())
 }
 
+/// Rename a running VM: only update the `name` column.
+/// All stored paths (sockets, TAP, rootfs) remain unchanged.
+pub fn rename_vm_name_only(conn: &Connection, old_name: &str, new_name: &str) -> Result<()> {
+    let updated = conn
+        .execute(
+            "UPDATE vms SET name = ?1 WHERE name = ?2",
+            rusqlite::params![new_name, old_name],
+        )
+        .context("rename vm name in db")?;
+    if updated == 0 {
+        anyhow::bail!("VM '{}' not found", old_name);
+    }
+    Ok(())
+}
+
 /// Delete a VM record.
 pub fn delete_vm(conn: &Connection, name: &str) -> Result<()> {
     conn.execute("DELETE FROM vms WHERE name=?1", params![name])
