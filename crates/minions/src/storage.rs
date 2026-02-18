@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 pub const BASE_IMAGE: &str = "/var/lib/minions/images/base-ubuntu.ext4";
 pub const VMS_DIR: &str = "/var/lib/minions/vms";
+pub const SNAPSHOTS_DIR: &str = "/var/lib/minions/snapshots";
 
 /// Return the rootfs path for a given VM name.
 #[allow(dead_code)]
@@ -89,4 +90,107 @@ pub fn destroy_rootfs(name: &str) -> Result<()> {
 /// Path to the serial log for a VM.
 pub fn serial_log_path(name: &str) -> PathBuf {
     PathBuf::from(VMS_DIR).join(name).join("serial.log")
+}
+
+// ── Snapshot storage ──────────────────────────────────────────────────────────
+
+/// Directory for a specific VM snapshot.
+/// Layout: /var/lib/minions/snapshots/{vm_name}/{snap_name}/
+pub fn snapshot_dir(vm_name: &str, snap_name: &str) -> PathBuf {
+    PathBuf::from(SNAPSHOTS_DIR).join(vm_name).join(snap_name)
+}
+
+/// Rootfs path within a snapshot directory.
+pub fn snapshot_rootfs_path(vm_name: &str, snap_name: &str) -> PathBuf {
+    snapshot_dir(vm_name, snap_name).join("rootfs.ext4")
+}
+
+/// Copy a VM's rootfs into a snapshot directory using `cp --sparse=always`.
+///
+/// Returns `(snapshot_rootfs_path, size_bytes)`.
+/// The source `vm_rootfs_path` is the stored path from the DB record.
+pub fn create_snapshot(vm_rootfs_path: &str, vm_name: &str, snap_name: &str) -> Result<(PathBuf, u64)> {
+    let src = Path::new(vm_rootfs_path);
+    if !src.exists() {
+        anyhow::bail!(
+            "VM rootfs not found at '{}' — cannot create snapshot",
+            src.display()
+        );
+    }
+
+    let dir = snapshot_dir(vm_name, snap_name);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("create snapshot dir {:?}", dir))?;
+
+    let dst = dir.join("rootfs.ext4");
+
+    let status = std::process::Command::new("cp")
+        .args(["--sparse=always", vm_rootfs_path, dst.to_str().unwrap()])
+        .status()
+        .context("spawn cp for snapshot")?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "cp failed when creating snapshot '{}' for VM '{}'",
+            snap_name, vm_name
+        );
+    }
+
+    let size_bytes = std::fs::metadata(&dst)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    Ok((dst, size_bytes))
+}
+
+/// Restore a snapshot by overwriting the VM's rootfs with the snapshot copy.
+///
+/// The VM **must be stopped** before calling this. The caller is responsible
+/// for enforcing that.
+pub fn restore_snapshot(vm_rootfs_path: &str, vm_name: &str, snap_name: &str) -> Result<()> {
+    let snap_rootfs = snapshot_rootfs_path(vm_name, snap_name);
+    if !snap_rootfs.exists() {
+        anyhow::bail!(
+            "snapshot rootfs not found at '{}' — was it deleted?",
+            snap_rootfs.display()
+        );
+    }
+
+    let status = std::process::Command::new("cp")
+        .args([
+            "--sparse=always",
+            snap_rootfs.to_str().unwrap(),
+            vm_rootfs_path,
+        ])
+        .status()
+        .context("spawn cp for snapshot restore")?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "cp failed when restoring snapshot '{}' for VM '{}'",
+            snap_name, vm_name
+        );
+    }
+
+    Ok(())
+}
+
+/// Delete the files for a specific snapshot.
+pub fn delete_snapshot_files(vm_name: &str, snap_name: &str) -> Result<()> {
+    let dir = snapshot_dir(vm_name, snap_name);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)
+            .with_context(|| format!("remove snapshot dir {:?}", dir))?;
+    }
+    Ok(())
+}
+
+/// Delete all snapshot files for a VM (called when the VM is destroyed).
+pub fn delete_all_snapshot_files(vm_name: &str) -> Result<()> {
+    let vm_snap_dir = PathBuf::from(SNAPSHOTS_DIR).join(vm_name);
+    if vm_snap_dir.exists() {
+        std::fs::remove_dir_all(&vm_snap_dir)
+            .with_context(|| format!("remove all snapshots for VM '{}'", vm_name))?;
+    }
+    Ok(())
 }

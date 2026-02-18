@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block nav %}{% endblock %}
+
+{% block title %}Login{% endblock %}
+
+{% block content %}
+<div class="min-h-screen flex items-center justify-center -mt-8">
+  <div class="w-full max-w-sm">
+    <div class="text-center mb-8">
+      <p class="text-4xl mb-2">⚡</p>
+      <h1 class="text-2xl font-bold text-white">Minions Dashboard</h1>
+      <p class="text-gray-400 text-sm mt-1">Enter your API key to continue</p>
+    </div>
+
+    {% if error.is_empty() == false %}
+    <div class="mb-4 rounded-lg bg-red-900/40 border border-red-700 px-4 py-3 text-sm text-red-300">
+      {{ error }}
+    </div>
+    {% endif %}
+
+    <form method="POST" action="/dashboard/login" class="space-y-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-300 mb-1">API Key</label>
+        <input
+          type="password"
+          name="api_key"
+          required
+          autofocus
+          placeholder="••••••••••••••••"
+          class="w-full rounded-lg bg-gray-800 border border-gray-700 px-4 py-2.5
+                 text-white placeholder-gray-500 focus:outline-none focus:ring-2
+                 focus:ring-indigo-500 focus:border-transparent text-sm"
+        />
+      </div>
+      <button
+        type="submit"
+        class="w-full rounded-lg bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700
+               px-4 py-2.5 text-sm font-semibold text-white transition"
+      >
+        Sign in
+      </button>
+    </form>
+  </div>
+</div>
+{% endblock %}

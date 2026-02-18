@@ -62,7 +62,7 @@ impl Sessions {
         if map.len() >= MAX_SESSIONS {
             if let Some(oldest_key) = map
                 .iter()
-                .min_by_key(|(_, &created)| created)
+                .min_by_key(|(_, created)| *created)
                 .map(|(k, _)| k.clone())
             {
                 map.remove(&oldest_key);

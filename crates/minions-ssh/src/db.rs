@@ -86,6 +86,7 @@ pub fn get_user_by_fingerprint(conn: &Connection, fingerprint: &str) -> Result<O
 }
 
 /// Create a new user, associating their SSH public key.
+/// Also assigns the free plan subscription automatically.
 pub fn create_user(
     conn: &Connection,
     email: &str,
@@ -94,6 +95,7 @@ pub fn create_user(
 ) -> Result<User> {
     let user_id = uuid::Uuid::new_v4().to_string();
     let key_id = uuid::Uuid::new_v4().to_string();
+    let sub_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
     conn.execute(
@@ -108,6 +110,14 @@ pub fn create_user(
         params![key_id, user_id, public_key, fingerprint, now],
     )
     .context("insert ssh key")?;
+
+    // Auto-assign the free plan. Best-effort: if the plans table isn't
+    // seeded yet (very early startup race), skip silently.
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO subscriptions (id, user_id, plan_id, status, created_at)
+         VALUES (?1, ?2, 'free', 'active', ?3)",
+        params![sub_id, user_id, now],
+    );
 
     Ok(User { id: user_id, email: email.to_string(), created_at: now })
 }

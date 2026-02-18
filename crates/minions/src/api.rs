@@ -16,7 +16,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-use crate::{agent, auth, db, server::AppState, storage, vm};
+use crate::{agent, auth, db, metrics, server::AppState, storage, vm};
 use minions_proto::{Request as AgentRequest, Response as AgentResponse, ResponseData};
 
 // ── Router ────────────────────────────────────────────────────────────────────
@@ -40,6 +40,17 @@ pub fn router(state: AppState) -> Router {
         .route("/api/vms/{name}/expose", post(expose_vm))
         .route("/api/vms/{name}/set-public", post(set_vm_public))
         .route("/api/vms/{name}/set-private", post(set_vm_private))
+        // Snapshot routes
+        .route("/api/vms/{name}/snapshots", post(create_snapshot))
+        .route("/api/vms/{name}/snapshots", get(list_snapshots))
+        .route("/api/vms/{name}/snapshots/{snap}/restore", post(restore_snapshot))
+        .route("/api/vms/{name}/snapshots/{snap}", delete(delete_snapshot))
+        // Resource / billing routes
+        .route("/api/billing/plans", get(billing_plans))
+        .route("/api/billing/subscription", get(billing_subscription))
+        .route("/api/billing/plan", post(billing_set_plan))
+        // Per-VM metrics (authenticated)
+        .route("/api/vms/{name}/metrics", get(vm_metrics))
         // Add authentication middleware (checks Bearer token if MINIONS_API_KEY is set)
         .layer(middleware::from_fn_with_state(
             auth_config,
@@ -66,7 +77,12 @@ pub fn router(state: AppState) -> Router {
         );
     }
 
+    // `/metrics` is intentionally unauthenticated — standard Prometheus practice.
+    // It contains only operational data (counts, percentages), not user content.
+    let public = Router::new().route("/metrics", get(prometheus_metrics));
+
     router
+        .merge(public)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -559,5 +575,270 @@ async fn set_vm_private(
         Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "name": name, "proxy_public": false }))).into_response(),
         Ok(false) => (StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("VM '{name}' not found") })).into_response(),
         Err(e) => internal(e).into_response(),
+    }
+}
+
+// ── Resource / plan types & handlers ──────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct PlanResponse {
+    id: String,
+    name: String,
+    max_vms: u32,
+    max_vcpus: u32,
+    max_memory_mb: u32,
+    max_disk_gb: u32,
+    max_snapshots: u32,
+    price_cents: u32,
+}
+
+impl From<db::Plan> for PlanResponse {
+    fn from(p: db::Plan) -> Self {
+        PlanResponse {
+            id: p.id, name: p.name,
+            max_vms: p.max_vms, max_vcpus: p.max_vcpus,
+            max_memory_mb: p.max_memory_mb, max_disk_gb: p.max_disk_gb,
+            max_snapshots: p.max_snapshots, price_cents: p.price_cents,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct UsageResponse {
+    vm_count: u32,
+    total_vcpus: u32,
+    total_memory_mb: u32,
+    snapshot_count: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct SubscriptionResponse {
+    plan: PlanResponse,
+    status: String,
+    usage: UsageResponse,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetPlanRequest {
+    owner_id: String,
+    plan_id: String,
+}
+
+/// `GET /api/billing/plans` — List all available plans.
+async fn billing_plans(State(state): State<AppState>) -> impl IntoResponse {
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return internal(e).into_response(),
+    };
+    match db::list_plans(&conn) {
+        Ok(plans) => Json(plans.into_iter().map(PlanResponse::from).collect::<Vec<_>>()).into_response(),
+        Err(e) => internal(e).into_response(),
+    }
+}
+
+/// `GET /api/billing/subscription?owner_id=<id>` — Current plan + live usage.
+async fn billing_subscription(
+    State(state): State<AppState>,
+    Query(query): Query<ListQuery>,
+) -> impl IntoResponse {
+    let owner_id = match &query.owner_id {
+        Some(id) => id.clone(),
+        None => return bad_request("owner_id query parameter required").into_response(),
+    };
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return internal(e).into_response(),
+    };
+    let (sub, plan) = match db::get_user_plan(&conn, &owner_id) {
+        Ok(pair) => pair,
+        Err(e) => return internal(e).into_response(),
+    };
+    let usage = match db::get_user_usage(&conn, &owner_id) {
+        Ok(u) => u,
+        Err(e) => return internal(e).into_response(),
+    };
+    Json(SubscriptionResponse {
+        plan: PlanResponse::from(plan),
+        status: sub.status,
+        usage: UsageResponse {
+            vm_count: usage.vm_count,
+            total_vcpus: usage.total_vcpus,
+            total_memory_mb: usage.total_memory_mb,
+            snapshot_count: usage.snapshot_count,
+        },
+    }).into_response()
+}
+
+/// `POST /api/billing/plan` — Manually set a user's plan (admin use / future billing hook).
+async fn billing_set_plan(
+    State(state): State<AppState>,
+    Json(req): Json<SetPlanRequest>,
+) -> impl IntoResponse {
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return internal(e).into_response(),
+    };
+    // Verify plan exists.
+    match db::get_plan(&conn, &req.plan_id) {
+        Ok(None) => return bad_request(format!("unknown plan '{}'", req.plan_id)).into_response(),
+        Err(e) => return internal(e).into_response(),
+        Ok(Some(_)) => {}
+    }
+    // Ensure user has a subscription row first.
+    if db::get_subscription(&conn, &req.owner_id).ok().flatten().is_none() {
+        let _ = db::create_subscription(&conn, &req.owner_id, &req.plan_id);
+    } else {
+        match db::set_user_plan(&conn, &req.owner_id, &req.plan_id) {
+            Ok(_) => {}
+            Err(e) => return internal(e).into_response(),
+        }
+    }
+    Json(serde_json::json!({
+        "owner_id": req.owner_id,
+        "plan_id": req.plan_id,
+        "message": format!("plan updated to '{}'", req.plan_id)
+    })).into_response()
+}
+
+// ── Snapshot types ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CreateSnapshotRequest {
+    /// Snapshot name (optional — defaults to UTC timestamp).
+    name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotResponse {
+    id: String,
+    vm_name: String,
+    name: String,
+    size_bytes: Option<u64>,
+    created_at: String,
+}
+
+impl From<db::Snapshot> for SnapshotResponse {
+    fn from(s: db::Snapshot) -> Self {
+        SnapshotResponse {
+            id: s.id,
+            vm_name: s.vm_name,
+            name: s.name,
+            size_bytes: s.size_bytes,
+            created_at: s.created_at,
+        }
+    }
+}
+
+// ── Snapshot handlers ──────────────────────────────────────────────────────────
+
+/// `POST /api/vms/:name/snapshots` — Create a snapshot.
+async fn create_snapshot(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<CreateSnapshotRequest>,
+) -> impl IntoResponse {
+    info!(vm = %name, snap_name = ?req.name, "create snapshot");
+    let db_path = state.db_path.as_str().to_string();
+    match vm::snapshot(&db_path, &name, req.name).await {
+        Ok(snap) => (StatusCode::CREATED, Json(SnapshotResponse::from(snap))).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                not_found(&name).into_response()
+            } else if msg.contains("already exists") || msg.contains("limit reached") || msg.contains("must be") || msg.contains("still starting") {
+                bad_request(msg).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
+    }
+}
+
+/// `GET /api/vms/:name/snapshots` — List snapshots.
+async fn list_snapshots(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let db_path = state.db_path.as_str().to_string();
+    match vm::list_snapshots(&db_path, &name) {
+        Ok(snaps) => Json(snaps.into_iter().map(SnapshotResponse::from).collect::<Vec<_>>()).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") { not_found(&name).into_response() } else { internal(msg).into_response() }
+        }
+    }
+}
+
+/// `POST /api/vms/:name/snapshots/:snap/restore` — Restore from a snapshot.
+async fn restore_snapshot(
+    State(state): State<AppState>,
+    Path((name, snap)): Path<(String, String)>,
+) -> impl IntoResponse {
+    info!(vm = %name, snap = %snap, "restore snapshot");
+    let db_path = state.db_path.as_str().to_string();
+    match vm::restore_snapshot(&db_path, &name, &snap).await {
+        Ok(()) => Json(serde_json::json!({
+            "message": format!("VM '{name}' restored from snapshot '{snap}'")
+        })).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg })).into_response()
+            } else if msg.contains("must be stopped") {
+                bad_request(msg).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
+    }
+}
+
+/// `DELETE /api/vms/:name/snapshots/:snap` — Delete a snapshot.
+async fn delete_snapshot(
+    State(state): State<AppState>,
+    Path((name, snap)): Path<(String, String)>,
+) -> impl IntoResponse {
+    info!(vm = %name, snap = %snap, "delete snapshot");
+    let db_path = state.db_path.as_str().to_string();
+    match vm::delete_snapshot(&db_path, &name, &snap).await {
+        Ok(()) => Json(serde_json::json!({
+            "message": format!("snapshot '{snap}' deleted for VM '{name}'")
+        })).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg })).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
+    }
+}
+
+// ── Metrics handlers ───────────────────────────────────────────────────────────
+
+/// `GET /metrics` — Prometheus text format scrape endpoint (unauthenticated).
+async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let body = metrics::prometheus_text(&state.metrics);
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
+}
+
+/// `GET /api/vms/:name/metrics` — Per-VM metrics snapshot as JSON.
+async fn vm_metrics(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match state.metrics.get_vm(&name) {
+        Some(m) => Json(m).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("no metrics collected yet for VM '{name}' (is it running?)"),
+            }),
+        ).into_response(),
     }
 }

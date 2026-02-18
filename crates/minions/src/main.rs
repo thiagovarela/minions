@@ -10,9 +10,11 @@ mod agent;
 mod api;
 mod auth;
 mod client;
+mod dashboard;
 mod db;
 mod hypervisor;
 mod init;
+mod metrics;
 mod network;
 mod server;
 mod storage;
@@ -115,11 +117,47 @@ enum Commands {
         #[arg(long)]
         acme_staging: bool,
     },
+    /// Manage VM snapshots
+    Snapshot {
+        #[command(subcommand)]
+        action: SnapshotCommands,
+    },
     /// One-time host setup: bridge, iptables, directories, systemd unit
     Init {
         /// Also persist networking across reboots (sysctl + iptables-persistent)
         #[arg(long)]
         persist: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SnapshotCommands {
+    /// Create a snapshot of a VM (VM may be running or stopped)
+    Create {
+        /// VM name
+        vm: String,
+        /// Snapshot name (default: UTC timestamp)
+        #[arg(long, short)]
+        name: Option<String>,
+    },
+    /// List snapshots for a VM
+    List {
+        /// VM name
+        vm: String,
+    },
+    /// Restore a VM from a snapshot (VM must be stopped first)
+    Restore {
+        /// VM name
+        vm: String,
+        /// Snapshot name
+        snapshot: String,
+    },
+    /// Delete a snapshot
+    Delete {
+        /// VM name
+        vm: String,
+        /// Snapshot name
+        snapshot: String,
     },
 }
 
@@ -219,6 +257,57 @@ fn print_vm(vm: VmJson, json: bool) {
         println!("  PID:    {}", vm.pid.unwrap_or(0));
         println!();
         println!("  SSH:    ssh root@{}", vm.ip);
+    }
+}
+
+// ── Snapshot output helpers ───────────────────────────────────────────────────
+
+#[derive(Tabled)]
+struct SnapshotRow {
+    #[tabled(rename = "NAME")]
+    name: String,
+    #[tabled(rename = "SIZE")]
+    size: String,
+    #[tabled(rename = "CREATED")]
+    created_at: String,
+}
+
+fn fmt_bytes(bytes: Option<u64>) -> String {
+    match bytes {
+        None => "-".to_string(),
+        Some(b) if b < 1024 * 1024 => format!("{} B", b),
+        Some(b) if b < 1024 * 1024 * 1024 => format!("{:.1} MiB", b as f64 / (1024.0 * 1024.0)),
+        Some(b) => format!("{:.1} GiB", b as f64 / (1024.0 * 1024.0 * 1024.0)),
+    }
+}
+
+fn print_snapshot(snap: &client::SnapshotResponse, json: bool) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(snap).unwrap());
+    } else {
+        println!();
+        println!("✓ Snapshot '{}'", snap.name);
+        println!("  VM:      {}", snap.vm_name);
+        println!("  Size:    {}", fmt_bytes(snap.size_bytes));
+        println!("  Created: {}", snap.created_at);
+        println!();
+    }
+}
+
+fn print_snapshot_list(vm_name: &str, snaps: &[client::SnapshotResponse], json: bool) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(snaps).unwrap());
+    } else {
+        if snaps.is_empty() {
+            println!("No snapshots for VM '{vm_name}'.");
+            return;
+        }
+        let rows: Vec<SnapshotRow> = snaps.iter().map(|s| SnapshotRow {
+            name: s.name.clone(),
+            size: fmt_bytes(s.size_bytes),
+            created_at: s.created_at.clone(),
+        }).collect();
+        println!("{}", Table::new(rows));
     }
 }
 
@@ -397,6 +486,38 @@ async fn run_remote(host: &str, command: Commands, json: bool, api_key: Option<S
             print!("{logs}");
         }
 
+        Commands::Snapshot { action } => {
+            match action {
+                SnapshotCommands::Create { vm, name } => {
+                    if !json { println!("Creating snapshot for VM '{vm}'…"); }
+                    let snap = c.create_snapshot(&vm, name).await?;
+                    print_snapshot(&snap, json);
+                }
+                SnapshotCommands::List { vm } => {
+                    let snaps = c.list_snapshots(&vm).await?;
+                    print_snapshot_list(&vm, &snaps, json);
+                }
+                SnapshotCommands::Restore { vm, snapshot } => {
+                    if !json { println!("Restoring VM '{vm}' from snapshot '{snapshot}'…"); }
+                    c.restore_snapshot(&vm, &snapshot).await?;
+                    if json {
+                        println!("{}", serde_json::json!({ "message": format!("VM '{vm}' restored from '{snapshot}'") }));
+                    } else {
+                        println!("✓ VM '{vm}' restored from snapshot '{snapshot}'");
+                    }
+                }
+                SnapshotCommands::Delete { vm, snapshot } => {
+                    if !json { println!("Deleting snapshot '{snapshot}' for VM '{vm}'…"); }
+                    c.delete_snapshot(&vm, &snapshot).await?;
+                    if json {
+                        println!("{}", serde_json::json!({ "message": format!("Snapshot '{snapshot}' deleted") }));
+                    } else {
+                        println!("✓ Snapshot '{snapshot}' deleted");
+                    }
+                }
+            }
+        }
+
         // Already handled above or unreachable in remote mode.
         _ => unreachable!(),
     }
@@ -529,6 +650,54 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
                 anyhow::bail!("no serial log found at {}", log_path.display());
             }
             print!("{}", std::fs::read_to_string(&log_path)?);
+        }
+
+        Commands::Snapshot { action } => {
+            match action {
+                SnapshotCommands::Create { vm, name } => {
+                    if !json { println!("Creating snapshot for VM '{vm}'…"); }
+                    let snap = vm::snapshot(db_path, &vm, name).await?;
+                    let client_snap = client::SnapshotResponse {
+                        id: snap.id,
+                        vm_name: snap.vm_name,
+                        name: snap.name,
+                        size_bytes: snap.size_bytes,
+                        created_at: snap.created_at,
+                    };
+                    print_snapshot(&client_snap, json);
+                }
+                SnapshotCommands::List { vm } => {
+                    let snaps = vm::list_snapshots(db_path, &vm)?
+                        .into_iter()
+                        .map(|s| client::SnapshotResponse {
+                            id: s.id,
+                            vm_name: s.vm_name,
+                            name: s.name,
+                            size_bytes: s.size_bytes,
+                            created_at: s.created_at,
+                        })
+                        .collect::<Vec<_>>();
+                    print_snapshot_list(&vm, &snaps, json);
+                }
+                SnapshotCommands::Restore { vm, snapshot } => {
+                    if !json { println!("Restoring VM '{vm}' from snapshot '{snapshot}'…"); }
+                    vm::restore_snapshot(db_path, &vm, &snapshot).await?;
+                    if json {
+                        println!("{}", serde_json::json!({ "message": format!("VM '{vm}' restored from '{snapshot}'") }));
+                    } else {
+                        println!("✓ VM '{vm}' restored from snapshot '{snapshot}'");
+                    }
+                }
+                SnapshotCommands::Delete { vm, snapshot } => {
+                    if !json { println!("Deleting snapshot '{snapshot}' for VM '{vm}'…"); }
+                    vm::delete_snapshot(db_path, &vm, &snapshot).await?;
+                    if json {
+                        println!("{}", serde_json::json!({ "message": format!("Snapshot '{snapshot}' deleted") }));
+                    } else {
+                        println!("✓ Snapshot '{snapshot}' deleted");
+                    }
+                }
+            }
         }
 
         _ => unreachable!(),

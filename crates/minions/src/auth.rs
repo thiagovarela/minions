@@ -36,7 +36,7 @@ struct ErrorResponse {
 }
 
 /// Compare two strings in constant time to prevent timing side-channel attacks.
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
     a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 

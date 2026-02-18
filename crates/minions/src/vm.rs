@@ -8,6 +8,7 @@ use tracing::info;
 use minions_proto::Request;
 
 use crate::{agent, db, hypervisor, network, storage};
+use uuid::Uuid;
 
 /// Create a fully networked VM.
 ///
@@ -30,6 +31,9 @@ pub async fn create(
         validate_name(name)?;
         if db::get_vm(&conn, name)?.is_some() {
             anyhow::bail!("VM '{name}' already exists");
+        }
+        if let Some(ref oid) = owner_id {
+            check_quota(&conn, oid, vcpus, memory_mb)?;
         }
         network::check_bridge().context("bridge check")?;
         hypervisor::ensure_run_dir()?;
@@ -220,8 +224,15 @@ pub async fn destroy(db_path: &str, name: &str) -> Result<()> {
     network::destroy_tap_device(&tap_device).context("destroy TAP")?;
     storage::destroy_rootfs(name).context("destroy rootfs")?;
 
+    // ── Delete all snapshots (files + DB records) ─────────────────────────────
+    // Best-effort: log errors but don't fail the destroy.
+    if let Err(e) = storage::delete_all_snapshot_files(name) {
+        tracing::warn!("failed to delete snapshot files for VM '{}': {:#}", name, e);
+    }
+
     // ── Remove DB record ──────────────────────────────────────────────────────
     let conn = db::open(db_path)?;
+    db::delete_all_snapshots(&conn, name)?;
     db::delete_vm(&conn, name)?;
     Ok(())
 }
@@ -388,6 +399,9 @@ pub async fn copy(
         if db::get_vm(&conn, new_name)?.is_some() {
             anyhow::bail!("VM '{new_name}' already exists");
         }
+        if let Some(ref oid) = owner_id {
+            check_quota(&conn, oid, source.vcpus, source.memory_mb)?;
+        }
 
         network::check_bridge().context("bridge check")?;
         hypervisor::ensure_run_dir()?;
@@ -531,6 +545,215 @@ pub fn list(conn: &rusqlite::Connection) -> Result<Vec<db::Vm>> {
         }
     }
     Ok(vms)
+}
+
+// ── Snapshots ─────────────────────────────────────────────────────────────────
+
+/// Maximum number of snapshots per VM. Attempting to create more returns an error.
+pub const MAX_SNAPSHOTS_PER_VM: u32 = 10;
+
+/// Create a disk-only snapshot of a VM.
+///
+/// If the VM is running, it is briefly paused (vCPUs + I/O suspended) while
+/// the rootfs is copied, then resumed. If the VM is stopped, the copy happens
+/// without pausing.
+///
+/// `snap_name` — user-provided name, or a timestamp if None.
+pub async fn snapshot(db_path: &str, vm_name: &str, snap_name: Option<String>) -> Result<db::Snapshot> {
+    // ── Resolve snapshot name ─────────────────────────────────────────────────
+    let snap_name = snap_name.unwrap_or_else(|| {
+        chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string()
+    });
+    validate_snapshot_name(&snap_name)?;
+
+    // ── Look up VM and check limits ───────────────────────────────────────────
+    let (status, api_socket, rootfs_path) = {
+        let conn = db::open(db_path)?;
+        let vm = db::get_vm(&conn, vm_name)?
+            .with_context(|| format!("VM '{vm_name}' not found"))?;
+        if vm.status == "creating" || vm.status == "starting" {
+            anyhow::bail!("VM '{vm_name}' is still starting — wait until it is running or stopped");
+        }
+        if db::get_snapshot(&conn, vm_name, &snap_name)?.is_some() {
+            anyhow::bail!("snapshot '{snap_name}' already exists for VM '{vm_name}'");
+        }
+        let count = db::count_snapshots(&conn, vm_name)?;
+        if count >= MAX_SNAPSHOTS_PER_VM {
+            anyhow::bail!(
+                "snapshot limit reached ({count}/{MAX_SNAPSHOTS_PER_VM}) for VM '{vm_name}'. \
+                 Delete an existing snapshot first."
+            );
+        }
+        (vm.status, vm.ch_api_socket, vm.rootfs_path)
+    };
+
+    // ── Pause running VM, copy rootfs, resume ────────────────────────────────
+    let was_running = status == "running";
+    if was_running {
+        // Flush guest page cache before pausing.
+        let vsock_socket = {
+            let conn = db::open(db_path)?;
+            let vm = db::get_vm(&conn, vm_name)?.unwrap();
+            std::path::PathBuf::from(vm.ch_vsock_socket)
+        };
+        let _ = agent::send_request(
+            &vsock_socket,
+            minions_proto::Request::Exec { command: "sync".to_string(), args: vec![] },
+        )
+        .await;
+
+        hypervisor::pause_vm(&api_socket)
+            .with_context(|| format!("pause VM '{vm_name}' before snapshot"))?;
+        info!("VM '{vm_name}' paused for snapshot");
+    }
+
+    let copy_result = tokio::task::spawn_blocking({
+        let rootfs_path = rootfs_path.clone();
+        let vm_name = vm_name.to_string();
+        let snap_name = snap_name.clone();
+        move || storage::create_snapshot(&rootfs_path, &vm_name, &snap_name)
+    })
+    .await
+    .context("snapshot copy task panicked")?;
+
+    if was_running {
+        // Always resume, even if the copy failed.
+        if let Err(e) = hypervisor::resume_vm(&api_socket) {
+            tracing::error!("failed to resume VM '{vm_name}' after snapshot: {:#}", e);
+        } else {
+            info!("VM '{vm_name}' resumed after snapshot");
+        }
+    }
+
+    let (_snap_path, size_bytes) = copy_result.context("create snapshot files")?;
+
+    // ── Record snapshot in DB ─────────────────────────────────────────────────
+    let snap = db::Snapshot {
+        id: Uuid::new_v4().to_string(),
+        vm_name: vm_name.to_string(),
+        name: snap_name,
+        size_bytes: Some(size_bytes),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let conn = db::open(db_path)?;
+    db::insert_snapshot(&conn, &snap)?;
+    Ok(snap)
+}
+
+/// List all snapshots for a VM.
+pub fn list_snapshots(db_path: &str, vm_name: &str) -> Result<Vec<db::Snapshot>> {
+    let conn = db::open(db_path)?;
+    // Verify VM exists.
+    db::get_vm(&conn, vm_name)?
+        .with_context(|| format!("VM '{vm_name}' not found"))?;
+    db::list_snapshots(&conn, vm_name)
+}
+
+/// Restore a VM from a snapshot.
+///
+/// The VM **must be stopped** before restoring. This overwrites the VM's
+/// current rootfs with the snapshot copy.
+pub async fn restore_snapshot(db_path: &str, vm_name: &str, snap_name: &str) -> Result<()> {
+    // ── Validate state ────────────────────────────────────────────────────────
+    let rootfs_path = {
+        let conn = db::open(db_path)?;
+        let vm = db::get_vm(&conn, vm_name)?
+            .with_context(|| format!("VM '{vm_name}' not found"))?;
+        if vm.status != "stopped" {
+            anyhow::bail!(
+                "VM '{vm_name}' must be stopped before restoring a snapshot (status: {}). \
+                 Run: minions stop {vm_name}",
+                vm.status
+            );
+        }
+        // Verify snapshot exists.
+        db::get_snapshot(&conn, vm_name, snap_name)?
+            .with_context(|| format!("snapshot '{snap_name}' not found for VM '{vm_name}'"))?;
+        vm.rootfs_path
+    };
+
+    // ── Copy snapshot rootfs over VM rootfs ───────────────────────────────────
+    let rootfs = rootfs_path.clone();
+    let vn = vm_name.to_string();
+    let sn = snap_name.to_string();
+    tokio::task::spawn_blocking(move || storage::restore_snapshot(&rootfs, &vn, &sn))
+        .await
+        .context("restore snapshot task panicked")?
+        .context("restore snapshot files")?;
+
+    info!("VM '{vm_name}' restored from snapshot '{snap_name}'");
+    Ok(())
+}
+
+/// Delete a snapshot (files + DB record).
+pub async fn delete_snapshot(db_path: &str, vm_name: &str, snap_name: &str) -> Result<()> {
+    let conn = db::open(db_path)?;
+    db::get_vm(&conn, vm_name)?
+        .with_context(|| format!("VM '{vm_name}' not found"))?;
+    db::get_snapshot(&conn, vm_name, snap_name)?
+        .with_context(|| format!("snapshot '{snap_name}' not found for VM '{vm_name}'"))?;
+
+    // Delete files first, then DB record.
+    let vn = vm_name.to_string();
+    let sn = snap_name.to_string();
+    tokio::task::spawn_blocking(move || storage::delete_snapshot_files(&vn, &sn))
+        .await
+        .context("delete snapshot task panicked")?
+        .context("delete snapshot files")?;
+
+    db::delete_snapshot(&conn, vm_name, snap_name)?;
+    info!("snapshot '{snap_name}' deleted for VM '{vm_name}'");
+    Ok(())
+}
+
+// ── Quota enforcement ─────────────────────────────────────────────────────────
+
+/// Check whether `owner_id` can create a VM with the given resource request.
+///
+/// Looks up their plan limits and compares against live usage.
+/// Returns `Ok(())` if within limits, or a descriptive error message.
+/// Passes silently for admin VMs (no `owner_id`).
+pub fn check_quota(
+    conn: &rusqlite::Connection,
+    owner_id: &str,
+    requested_vcpus: u32,
+    requested_memory_mb: u32,
+) -> Result<()> {
+    let (_, plan) = db::get_user_plan(conn, owner_id)?;
+    let usage = db::get_user_usage(conn, owner_id)?;
+
+    if usage.vm_count >= plan.max_vms {
+        anyhow::bail!(
+            "VM limit reached ({}/{}). Destroy or stop an existing VM, or upgrade your plan.",
+            usage.vm_count, plan.max_vms
+        );
+    }
+    if usage.total_vcpus + requested_vcpus > plan.max_vcpus {
+        anyhow::bail!(
+            "vCPU limit would be exceeded ({} + {} > {}). Stop a VM or upgrade your plan.",
+            usage.total_vcpus, requested_vcpus, plan.max_vcpus
+        );
+    }
+    if usage.total_memory_mb + requested_memory_mb > plan.max_memory_mb {
+        anyhow::bail!(
+            "Memory limit would be exceeded ({} MiB + {} MiB > {} MiB). Stop a VM or upgrade your plan.",
+            usage.total_memory_mb, requested_memory_mb, plan.max_memory_mb
+        );
+    }
+    Ok(())
+}
+
+fn validate_snapshot_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("snapshot name cannot be empty");
+    }
+    if name.len() > 64 {
+        anyhow::bail!("snapshot name must be 64 characters or fewer");
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        anyhow::bail!("snapshot name must only contain alphanumeric characters, hyphens, underscores, and dots");
+    }
+    Ok(())
 }
 
 fn validate_name(name: &str) -> Result<()> {

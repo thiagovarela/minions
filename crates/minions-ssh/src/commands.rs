@@ -185,6 +185,95 @@ impl ApiClient {
             .error_for_status()?;
         Ok(())
     }
+
+    // ── Metrics ───────────────────────────────────────────────────────────────
+
+    pub async fn get_vm_metrics(&self, vm: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .auth(self.client.get(format!("{}/api/vms/{}/metrics", self.base_url, vm)))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?;
+        Ok(resp)
+    }
+
+    // ── Plan / subscription ───────────────────────────────────────────────────
+
+    pub async fn get_subscription(&self, owner_id: &str) -> Result<SubscriptionInfo> {
+        let url = format!("{}/api/billing/subscription?owner_id={}", self.base_url, owner_id);
+        let raw: serde_json::Value = self
+            .auth(self.client.get(url))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        Ok(SubscriptionInfo {
+            plan_name: raw["plan"]["name"].as_str().unwrap_or("Free").to_string(),
+            status: raw["status"].as_str().unwrap_or("active").to_string(),
+            max_vms: raw["plan"]["max_vms"].as_u64().unwrap_or(2) as u32,
+            max_vcpus: raw["plan"]["max_vcpus"].as_u64().unwrap_or(4) as u32,
+            max_memory_mb: raw["plan"]["max_memory_mb"].as_u64().unwrap_or(2048) as u32,
+            max_snapshots: raw["plan"]["max_snapshots"].as_u64().unwrap_or(5) as u32,
+            usage_vms: raw["usage"]["vm_count"].as_u64().unwrap_or(0) as u32,
+            usage_vcpus: raw["usage"]["total_vcpus"].as_u64().unwrap_or(0) as u32,
+            usage_memory_mb: raw["usage"]["total_memory_mb"].as_u64().unwrap_or(0) as u32,
+            usage_snapshots: raw["usage"]["snapshot_count"].as_u64().unwrap_or(0) as u32,
+        })
+    }
+
+    // ── Snapshot methods ──────────────────────────────────────────────────────
+
+    pub async fn create_snapshot(&self, vm: &str, name: Option<String>) -> Result<SnapshotInfo> {
+        let resp = self
+            .auth(
+                self.client
+                    .post(format!("{}/api/vms/{}/snapshots", self.base_url, vm))
+                    .json(&serde_json::json!({ "name": name })),
+            )
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<SnapshotInfo>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn list_snapshots(&self, vm: &str) -> Result<Vec<SnapshotInfo>> {
+        let resp = self
+            .auth(self.client.get(format!("{}/api/vms/{}/snapshots", self.base_url, vm)))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Vec<SnapshotInfo>>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn restore_snapshot(&self, vm: &str, snapshot: &str) -> Result<()> {
+        self.auth(
+            self.client
+                .post(format!("{}/api/vms/{}/snapshots/{}/restore", self.base_url, vm, snapshot)),
+        )
+        .send()
+        .await?
+        .error_for_status()?;
+        Ok(())
+    }
+
+    pub async fn delete_snapshot(&self, vm: &str, snapshot: &str) -> Result<()> {
+        self.auth(
+            self.client
+                .delete(format!("{}/api/vms/{}/snapshots/{}", self.base_url, vm, snapshot)),
+        )
+        .send()
+        .await?
+        .error_for_status()?;
+        Ok(())
+    }
 }
 
 // ── VmInfo ────────────────────────────────────────────────────────────────────
@@ -206,6 +295,31 @@ pub struct VmInfo {
 }
 
 fn default_proxy_port() -> u16 { 80 }
+
+/// Subscription + usage summary returned by the API.
+#[derive(Debug, Deserialize)]
+pub struct SubscriptionInfo {
+    pub plan_name: String,
+    pub status: String,
+    pub max_vms: u32,
+    pub max_vcpus: u32,
+    pub max_memory_mb: u32,
+    pub max_snapshots: u32,
+    pub usage_vms: u32,
+    pub usage_vcpus: u32,
+    pub usage_memory_mb: u32,
+    pub usage_snapshots: u32,
+}
+
+/// Snapshot metadata returned by the API.
+#[derive(Debug, Deserialize)]
+pub struct SnapshotInfo {
+    pub id: String,
+    pub vm_name: String,
+    pub name: String,
+    pub size_bytes: Option<u64>,
+    pub created_at: String,
+}
 
 // ── Ownership enforcement ─────────────────────────────────────────────────────
 
@@ -470,6 +584,135 @@ async fn execute(
             ))
         }
 
+        // ── metrics ────────────────────────────────────────────────────────
+        "metrics" => {
+            if parts.len() < 2 {
+                return Ok("usage: metrics <vm>\r\n".to_string());
+            }
+            let vm_name = parts[1];
+            check_owns(api, vm_name, user).await?;
+            match api.get_vm_metrics(vm_name).await {
+                Ok(m) => {
+                    let get_f64 = |key: &str| m[key].as_f64().unwrap_or(0.0);
+                    let get_u64 = |key: &str| m[key].as_u64().unwrap_or(0);
+                    Ok(format!(
+                        "VM '{}' metrics\r\n\r\n\
+                         CPU:     {:.1}%\r\n\
+                         Memory:  {} / {} MiB ({:.1}%)\r\n\
+                         Disk:    {} / {} GiB\r\n\
+                         Net RX:  {:.2} MiB\r\n\
+                         Net TX:  {:.2} MiB\r\n\
+                         Load:    {:.2}\r\n\
+                         Uptime:  {}s\r\n",
+                        vm_name,
+                        get_f64("cpu_usage_percent"),
+                        get_u64("memory_used_mb"), get_u64("memory_total_mb"),
+                        if get_u64("memory_total_mb") > 0 {
+                            get_u64("memory_used_mb") as f64 / get_u64("memory_total_mb") as f64 * 100.0
+                        } else { 0.0 },
+                        get_u64("disk_used_gb"), get_u64("disk_total_gb"),
+                        get_u64("network_rx_bytes") as f64 / (1024.0 * 1024.0),
+                        get_u64("network_tx_bytes") as f64 / (1024.0 * 1024.0),
+                        get_f64("load_avg_1m"),
+                        get_u64("uptime_secs"),
+                    ))
+                }
+                Err(e) => Ok(format!("error fetching metrics: {e}\r\n")),
+            }
+        }
+
+        // ── plan ──────────────────────────────────────────────────────────
+        "plan" => {
+            match api.get_subscription(&user.id).await {
+                Ok(sub) => {
+                    let bar = |used: u32, max: u32| -> String {
+                        let w = 16usize;
+                        let filled = if max == 0 { 0 } else {
+                            ((used as f64 / max as f64) * w as f64) as usize
+                        }.min(w);
+                        format!("[{}{}] {}/{}", "#".repeat(filled), ".".repeat(w - filled), used, max)
+                    };
+                    Ok(format!(
+                        "Plan: {} ({})\r\n\r\n  VMs:     {}\r\n  vCPUs:   {}\r\n  Memory:  {} / {} MiB\r\n  Snaps:   {}\r\n",
+                        sub.plan_name, sub.status,
+                        bar(sub.usage_vms, sub.max_vms),
+                        bar(sub.usage_vcpus, sub.max_vcpus),
+                        sub.usage_memory_mb, sub.max_memory_mb,
+                        bar(sub.usage_snapshots, sub.max_snapshots),
+                    ))
+                }
+                Err(e) => Ok(format!("error fetching plan: {e}\r\n")),
+            }
+        }
+
+        // ── snapshot ───────────────────────────────────────────────────────
+        "snapshot" => {
+            if parts.len() < 2 {
+                return Ok("usage: snapshot <vm> [--name <n>]\r\n".to_string());
+            }
+            let vm_name = parts[1];
+            let snap_name = parts.windows(2)
+                .find(|w| w[0] == "--name" || w[0] == "-n")
+                .map(|w| w[1].to_string());
+            check_owns(api, vm_name, user).await?;
+            let snap = api.create_snapshot(vm_name, snap_name).await?;
+            Ok(format!(
+                "✓ Snapshot '{}' created for VM '{}' ({} bytes)\r\n  Created: {}\r\n",
+                snap.name, snap.vm_name,
+                snap.size_bytes.map(|s| s.to_string()).unwrap_or_else(|| "-".to_string()),
+                snap.created_at,
+            ))
+        }
+
+        // ── snapshots ──────────────────────────────────────────────────────
+        "snapshots" => {
+            if parts.len() < 2 {
+                return Ok("usage: snapshots <vm>\r\n".to_string());
+            }
+            check_owns(api, parts[1], user).await?;
+            let snaps = api.list_snapshots(parts[1]).await?;
+            if snaps.is_empty() {
+                return Ok(format!("no snapshots for VM '{}'\r\n", parts[1]));
+            }
+            let mut out = format!("{:<30} {:>12}  {}\r\n", "NAME", "SIZE", "CREATED");
+            out.push_str(&"-".repeat(65));
+            out.push_str("\r\n");
+            for s in &snaps {
+                let size = s.size_bytes
+                    .map(|b| format!("{:.1} MiB", b as f64 / (1024.0 * 1024.0)))
+                    .unwrap_or_else(|| "-".to_string());
+                out.push_str(&format!("{:<30} {:>12}  {}\r\n", s.name, size, s.created_at));
+            }
+            Ok(out)
+        }
+
+        // ── restore ────────────────────────────────────────────────────────
+        "restore" => {
+            if parts.len() < 3 {
+                return Ok("usage: restore <vm> <snapshot>  (VM must be stopped first)\r\n".to_string());
+            }
+            let vm_name = parts[1];
+            let snap_name = parts[2];
+            check_owns(api, vm_name, user).await?;
+            api.restore_snapshot(vm_name, snap_name).await?;
+            Ok(format!(
+                "✓ VM '{}' restored from snapshot '{}'\r\n  Start it with: restart {}\r\n",
+                vm_name, snap_name, vm_name
+            ))
+        }
+
+        // ── rm-snapshot ────────────────────────────────────────────────────
+        "rm-snapshot" => {
+            if parts.len() < 3 {
+                return Ok("usage: rm-snapshot <vm> <snapshot>\r\n".to_string());
+            }
+            let vm_name = parts[1];
+            let snap_name = parts[2];
+            check_owns(api, vm_name, user).await?;
+            api.delete_snapshot(vm_name, snap_name).await?;
+            Ok(format!("✓ Snapshot '{}' deleted\r\n", snap_name))
+        }
+
         // ── help ───────────────────────────────────────────────────────────
         "help" | "--help" | "-h" => Ok(help()),
 
@@ -496,6 +739,14 @@ fn help() -> String {
         "  expose <vm> [--port N]          expose VM web server on port N (default 80)",
         "  set-public <vm>                 make VM web accessible without login",
         "  set-private <vm>                require login to access VM web (default)",
+        "",
+        "  metrics <vm>                    show live CPU, memory, disk, network metrics",
+        "  plan                            show your current plan and resource usage",
+        "",
+        "  snapshot <vm> [--name <n>]      create a snapshot (VM can be running or stopped)",
+        "  snapshots <vm>                  list snapshots",
+        "  restore <vm> <snap>             restore from snapshot (VM must be stopped)",
+        "  rm-snapshot <vm> <snap>         delete a snapshot",
         "",
         "  whoami                          show your account info",
         "  ssh-key list                    list your registered SSH keys",

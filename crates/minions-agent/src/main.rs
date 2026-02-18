@@ -102,6 +102,9 @@ async fn handle_request(request: Request) -> Response {
             let uptime_secs = read_uptime().unwrap_or(0);
             let (memory_total_mb, memory_used_mb) = read_memory().unwrap_or((0, 0));
             let (disk_total_gb, disk_used_gb) = read_disk().unwrap_or((0, 0));
+            let cpu_usage_percent = read_cpu_usage().await.unwrap_or(0.0);
+            let (network_rx_bytes, network_tx_bytes) = read_network().unwrap_or((0, 0));
+            let load_avg_1m = read_loadavg().unwrap_or(0.0);
 
             Response::ok_with_data(ResponseData::Status {
                 uptime_secs,
@@ -109,6 +112,10 @@ async fn handle_request(request: Request) -> Response {
                 memory_used_mb,
                 disk_total_gb,
                 disk_used_gb,
+                cpu_usage_percent,
+                network_rx_bytes,
+                network_tx_bytes,
+                load_avg_1m,
             })
         }
 
@@ -173,4 +180,69 @@ fn read_disk() -> Result<(u64, u64)> {
         / (1024 * 1024 * 1024);
 
     Ok((total, used))
+}
+
+/// Measure CPU usage by sampling /proc/stat twice with a 150ms gap.
+/// Returns a percentage across all CPUs (0.0–100.0).
+async fn read_cpu_usage() -> Result<f64> {
+    fn read_cpu_ticks() -> Result<(u64, u64)> {
+        let content = std::fs::read_to_string("/proc/stat")?;
+        let line = content.lines().next().unwrap_or("");
+        // cpu  user nice system idle iowait irq softirq steal guest guest_nice
+        let fields: Vec<u64> = line
+            .split_whitespace()
+            .skip(1)
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if fields.len() < 4 {
+            anyhow::bail!("unexpected /proc/stat format");
+        }
+        let idle = fields[3];
+        let total: u64 = fields.iter().sum();
+        Ok((idle, total))
+    }
+
+    let (idle1, total1) = read_cpu_ticks()?;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let (idle2, total2) = read_cpu_ticks()?;
+
+    let d_total = total2.saturating_sub(total1) as f64;
+    let d_idle = idle2.saturating_sub(idle1) as f64;
+    if d_total == 0.0 {
+        return Ok(0.0);
+    }
+    Ok(((d_total - d_idle) / d_total * 100.0).clamp(0.0, 100.0))
+}
+
+/// Read network bytes from /proc/net/dev for the first non-loopback interface.
+fn read_network() -> Result<(u64, u64)> {
+    let content = std::fs::read_to_string("/proc/net/dev")?;
+    for line in content.lines().skip(2) {
+        let line = line.trim();
+        if line.starts_with("lo:") {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 10 {
+            continue;
+        }
+        // Format: iface: rx_bytes packets errs drop fifo frame compressed multicast
+        //         tx_bytes tx_packets ...
+        // Column indices (0-based): 0=iface 1=rx_bytes 9=tx_bytes
+        let rx: u64 = parts[1].parse().unwrap_or(0);
+        let tx: u64 = parts[9].parse().unwrap_or(0);
+        return Ok((rx, tx));
+    }
+    Ok((0, 0))
+}
+
+/// Read 1-minute load average from /proc/loadavg.
+fn read_loadavg() -> Result<f64> {
+    let content = std::fs::read_to_string("/proc/loadavg")?;
+    let load: f64 = content
+        .split_whitespace()
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    Ok(load)
 }
