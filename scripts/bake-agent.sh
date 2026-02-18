@@ -135,6 +135,28 @@ rm -f "$MOUNT_DIR/etc/systemd/system/vm-network.service"
 rm -f "$MOUNT_DIR/etc/systemd/system/multi-user.target.wants/vm-network.service"
 ok "static network config cleaned up"
 
+# ── Step 8: Disable unnecessary services ──────────────────────────────────────
+info "disabling getty services (tty1-6, ttyS0) to reduce memory…"
+# Remove getty symlinks from multi-user.target.wants
+rm -f "$MOUNT_DIR/etc/systemd/system/getty.target.wants/getty@tty"[1-6]".service"
+rm -f "$MOUNT_DIR/etc/systemd/system/serial-getty@ttyS0.service"
+# Mask them so they never start
+for tty in tty{1..6}; do
+    ln -sf /dev/null "$MOUNT_DIR/etc/systemd/system/getty@${tty}.service"
+done
+ln -sf /dev/null "$MOUNT_DIR/etc/systemd/system/serial-getty@ttyS0.service"
+ok "getty services disabled (saves ~13 MB RAM)"
+
+info "removing nginx (save ~7 MB RAM)…"
+# Use chroot to run apt-get inside the mounted image
+if chroot "$MOUNT_DIR" dpkg -l | grep -q nginx; then
+    chroot "$MOUNT_DIR" apt-get remove -y --purge nginx nginx-common 2>/dev/null || true
+    chroot "$MOUNT_DIR" apt-get autoremove -y 2>/dev/null || true
+    ok "nginx removed"
+else
+    info "nginx not installed, skipping"
+fi
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo "────────────────────────────────────────────"
@@ -143,6 +165,7 @@ echo ""
 echo "  Agent binary : /usr/local/bin/minions-agent (inside image)"
 echo "  Systemd unit : /etc/systemd/system/minions-agent.service (inside image)"
 echo "  Host CLI     : /usr/local/bin/minions"
+echo "  Optimizations: getty services disabled, nginx removed (~20 MB RAM saved per VM)"
 echo ""
 echo "  You can now run:  sudo minions create myvm"
 echo "────────────────────────────────────────────"
