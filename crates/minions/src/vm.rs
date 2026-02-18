@@ -34,7 +34,11 @@ pub async fn create(
         let cid = db::next_available_cid(&conn)?;
         let mac = network::generate_mac(cid);
         let tap = network::create_tap(name).context("create TAP device")?;
-        let rootfs = storage::create_rootfs(name).context("copy base rootfs")?;
+
+        // Any failure after TAP creation must remove the TAP device.
+        let rootfs = storage::create_rootfs(name).context("copy base rootfs").inspect_err(|_| {
+            let _ = network::destroy_tap(name);
+        })?;
 
         let api_socket = hypervisor::api_socket_path(name);
         let vsock_socket = hypervisor::vsock_socket_path(name);
@@ -56,7 +60,10 @@ pub async fn create(
             created_at: Utc::now().to_rfc3339(),
             stopped_at: None,
         };
-        db::insert_vm(&conn, &vm_row).context("insert VM into DB")?;
+        db::insert_vm(&conn, &vm_row).context("insert VM into DB").inspect_err(|_| {
+            let _ = network::destroy_tap(name);
+            let _ = storage::destroy_rootfs(name);
+        })?;
 
         let cfg = hypervisor::VmConfig {
             name: name.to_string(),
@@ -375,8 +382,13 @@ pub async fn copy(
         let cid = db::next_available_cid(&conn)?;
         let mac = network::generate_mac(cid);
         let tap = network::create_tap(new_name).context("create TAP device")?;
+
+        // Any failure after TAP creation must remove the TAP device.
         let rootfs = storage::copy_rootfs(&source.rootfs_path, new_name)
-            .context("copy source rootfs")?;
+            .context("copy source rootfs")
+            .inspect_err(|_| {
+                let _ = network::destroy_tap(new_name);
+            })?;
 
         let api_socket = hypervisor::api_socket_path(new_name);
         let vsock_socket = hypervisor::vsock_socket_path(new_name);
@@ -398,7 +410,10 @@ pub async fn copy(
             created_at: chrono::Utc::now().to_rfc3339(),
             stopped_at: None,
         };
-        db::insert_vm(&conn, &vm_row).context("insert copied VM into DB")?;
+        db::insert_vm(&conn, &vm_row).context("insert copied VM into DB").inspect_err(|_| {
+            let _ = network::destroy_tap(new_name);
+            let _ = storage::destroy_rootfs(new_name);
+        })?;
 
         let cfg = hypervisor::VmConfig {
             name: new_name.to_string(),
