@@ -144,7 +144,7 @@ pub async fn serve(config: ProxyConfig, https_bind: &str, http_bind: &str) -> Re
 
     // HTTP app (port 80) — ACME challenges + redirect to HTTPS.
     let http_app = Router::new()
-        .route("/.well-known/acme-challenge/:token", get(proxy::acme_challenge))
+        .route("/.well-known/acme-challenge/{token}", get(proxy::acme_challenge))
         .fallback(any(proxy::http_redirect))
         .with_state(state);
 
