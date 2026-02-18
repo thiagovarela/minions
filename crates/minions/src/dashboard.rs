@@ -163,6 +163,9 @@ struct VmDetailTemplate {
     net_rx_str: String,
     net_tx_str: String,
     snapshots: Vec<SnapRow>,
+    proxy_port: u16,
+    proxy_public: bool,
+    domain: String,
 }
 
 #[derive(Template)]
@@ -195,6 +198,9 @@ pub fn router() -> Router<AppState> {
         .route("/dashboard/vms/{name}/restart", post(vm_restart))
         .route("/dashboard/vms/{name}/stop", post(vm_stop))
         .route("/dashboard/vms/{name}/snapshot", post(vm_snapshot))
+        .route("/dashboard/vms/{name}/expose", post(vm_expose))
+        .route("/dashboard/vms/{name}/set-public", post(vm_set_public))
+        .route("/dashboard/vms/{name}/set-private", post(vm_set_private))
         .route("/dashboard/vms/{name}", delete(vm_destroy))
         .route(
             "/dashboard/vms/{name}/snapshots/{snap}/restore",
@@ -305,6 +311,9 @@ async fn vm_detail(
         net_rx_str: mf.net_rx_str,
         net_tx_str: mf.net_tx_str,
         snapshots,
+        proxy_port: vm.proxy_port,
+        proxy_public: vm.proxy_public,
+        domain: state.domain.as_deref().map_or(String::new(), |d| d.to_string()),
     })
 }
 
@@ -411,6 +420,81 @@ async fn vm_snapshot(
             "<span class='text-green-400 text-sm'>✓ Snapshot '{}' created</span>",
             snap.name
         )).into_response(),
+        Err(e) => Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ExposeForm {
+    port: u16,
+}
+
+async fn vm_expose(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Form(form): Form<ExposeForm>,
+) -> Response {
+    if check_session(&headers, &state.sessions).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
+    };
+    if !(1..=65535).contains(&form.port) {
+        return Html("<span class='text-red-400 text-sm'>✗ Port must be between 1 and 65535</span>").into_response();
+    }
+    match db::set_proxy_port(&conn, &name, form.port) {
+        Ok(true) => Html(format!(
+            "<span class='text-green-400 text-sm'>✓ Proxy port set to {}</span>",
+            form.port
+        )).into_response(),
+        Ok(false) => Html("<span class='text-red-400 text-sm'>✗ VM not found</span>").into_response(),
+        Err(e) => Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
+    }
+}
+
+async fn vm_set_public(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Response {
+    if check_session(&headers, &state.sessions).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
+    };
+    match db::set_proxy_public(&conn, &name, true) {
+        Ok(true) => {
+            // Redirect back to the VM detail page so the access toggle updates.
+            Redirect::to(&format!("/dashboard/vms/{name}")).into_response()
+        }
+        Ok(false) => Html("<span class='text-red-400 text-sm'>✗ VM not found</span>").into_response(),
+        Err(e) => Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
+    }
+}
+
+async fn vm_set_private(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Response {
+    if check_session(&headers, &state.sessions).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
+    };
+    match db::set_proxy_public(&conn, &name, false) {
+        Ok(true) => {
+            // Redirect back to the VM detail page so the access toggle updates.
+            Redirect::to(&format!("/dashboard/vms/{name}")).into_response()
+        }
+        Ok(false) => Html("<span class='text-red-400 text-sm'>✗ VM not found</span>").into_response(),
         Err(e) => Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
     }
 }
