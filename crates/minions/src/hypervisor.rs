@@ -84,16 +84,14 @@ pub fn spawn(cfg: &VmConfig) -> Result<u32> {
 
 /// Reboot a VM via the CH API (`vm.reboot`).
 ///
-/// Cloud Hypervisor sends an ACPI reset signal to the guest; the guest OS
-/// performs a clean reboot without the VMM process restarting.
-/// Returns `Ok(())` on success, error if the CH API call fails.
-pub fn reboot(name: &str) -> Result<()> {
-    let api_socket = api_socket_path(name);
-    if !api_socket.exists() {
-        anyhow::bail!("API socket not found for VM '{name}' — is it running?");
+/// Takes the stored `api_socket` path from the DB record so it works correctly
+/// even after a rename.  Cloud Hypervisor sends an ACPI reset to the guest;
+/// the VMM process stays alive.
+pub fn reboot(api_socket: &str) -> Result<()> {
+    if !std::path::Path::new(api_socket).exists() {
+        anyhow::bail!("CH API socket not found at '{api_socket}' — is the VM running?");
     }
-    curl_put(&api_socket.to_string_lossy(), "vm.reboot")
-        .with_context(|| format!("reboot VM '{name}'"))?;
+    curl_put(api_socket, "vm.reboot").context("vm.reboot API call failed")?;
     Ok(())
 }
 
