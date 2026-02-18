@@ -236,7 +236,20 @@ pub async fn restart(db_path: &str, name: &str) -> Result<db::Vm> {
         return Err(e);
     }
 
-    // Mark running again — the VM stays alive, we just signalled a guest reboot.
+    // Wait for the agent to come back up after the guest reboot.
+    // The guest OS takes a few seconds to reboot; without this wait, any
+    // operation immediately after restart (exec, status) would fail.
+    let vsock_socket = {
+        let conn = db::open(db_path)?;
+        let vm = db::get_vm(&conn, name)?
+            .with_context(|| format!("VM '{name}' vanished after reboot signal"))?;
+        std::path::PathBuf::from(vm.ch_vsock_socket)
+    };
+    agent::wait_ready(&vsock_socket, Duration::from_secs(60))
+        .await
+        .context("agent did not come back after restart")?;
+
+    // Mark running again.
     let conn = db::open(db_path)?;
     db::update_vm_status(&conn, name, "running", None)?;
     db::get_vm(&conn, name)?.with_context(|| format!("VM '{name}' vanished after restart"))
