@@ -203,6 +203,72 @@ impl Client {
     }
 }
 
+/// Response type for snapshot API calls.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SnapshotResponse {
+    pub id: String,
+    pub vm_name: String,
+    pub name: String,
+    pub size_bytes: Option<u64>,
+    pub created_at: String,
+}
+
+impl Client {
+    pub async fn create_snapshot(&self, vm: &str, name: Option<String>) -> Result<SnapshotResponse> {
+        self.auth(
+            self.http
+                .post(format!("{}/api/vms/{vm}/snapshots", self.base))
+                .json(&serde_json::json!({ "name": name })),
+        )
+        .send()
+        .await
+        .context("send create snapshot request")?
+        .error_for_status()
+        .context("create snapshot")?
+        .json()
+        .await
+        .context("decode snapshot response")
+    }
+
+    pub async fn list_snapshots(&self, vm: &str) -> Result<Vec<SnapshotResponse>> {
+        self.auth(self.http.get(format!("{}/api/vms/{vm}/snapshots", self.base)))
+            .send()
+            .await
+            .context("send list snapshots request")?
+            .error_for_status()
+            .context("list snapshots")?
+            .json()
+            .await
+            .context("decode snapshots response")
+    }
+
+    pub async fn restore_snapshot(&self, vm: &str, snapshot: &str) -> Result<()> {
+        self.auth(
+            self.http
+                .post(format!("{}/api/vms/{vm}/snapshots/{snapshot}/restore", self.base)),
+        )
+        .send()
+        .await
+        .context("send restore snapshot request")?
+        .error_for_status()
+        .context("restore snapshot")?;
+        Ok(())
+    }
+
+    pub async fn delete_snapshot(&self, vm: &str, snapshot: &str) -> Result<()> {
+        self.auth(
+            self.http
+                .delete(format!("{}/api/vms/{vm}/snapshots/{snapshot}", self.base)),
+        )
+        .send()
+        .await
+        .context("send delete snapshot request")?
+        .error_for_status()
+        .context("delete snapshot")?;
+        Ok(())
+    }
+}
+
 /// Check if the local daemon is reachable on port 3000.
 pub async fn local_daemon_url() -> Option<String> {
     let url = "http://127.0.0.1:3000";

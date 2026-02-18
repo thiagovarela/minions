@@ -40,6 +40,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/vms/{name}/expose", post(expose_vm))
         .route("/api/vms/{name}/set-public", post(set_vm_public))
         .route("/api/vms/{name}/set-private", post(set_vm_private))
+        // Snapshot routes
+        .route("/api/vms/{name}/snapshots", post(create_snapshot))
+        .route("/api/vms/{name}/snapshots", get(list_snapshots))
+        .route("/api/vms/{name}/snapshots/{snap}/restore", post(restore_snapshot))
+        .route("/api/vms/{name}/snapshots/{snap}", delete(delete_snapshot))
         // Add authentication middleware (checks Bearer token if MINIONS_API_KEY is set)
         .layer(middleware::from_fn_with_state(
             auth_config,
@@ -559,5 +564,120 @@ async fn set_vm_private(
         Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "name": name, "proxy_public": false }))).into_response(),
         Ok(false) => (StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("VM '{name}' not found") })).into_response(),
         Err(e) => internal(e).into_response(),
+    }
+}
+
+// ── Snapshot types ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CreateSnapshotRequest {
+    /// Snapshot name (optional — defaults to UTC timestamp).
+    name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotResponse {
+    id: String,
+    vm_name: String,
+    name: String,
+    size_bytes: Option<u64>,
+    created_at: String,
+}
+
+impl From<db::Snapshot> for SnapshotResponse {
+    fn from(s: db::Snapshot) -> Self {
+        SnapshotResponse {
+            id: s.id,
+            vm_name: s.vm_name,
+            name: s.name,
+            size_bytes: s.size_bytes,
+            created_at: s.created_at,
+        }
+    }
+}
+
+// ── Snapshot handlers ──────────────────────────────────────────────────────────
+
+/// `POST /api/vms/:name/snapshots` — Create a snapshot.
+async fn create_snapshot(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<CreateSnapshotRequest>,
+) -> impl IntoResponse {
+    info!(vm = %name, snap_name = ?req.name, "create snapshot");
+    let db_path = state.db_path.as_str().to_string();
+    match vm::snapshot(&db_path, &name, req.name).await {
+        Ok(snap) => (StatusCode::CREATED, Json(SnapshotResponse::from(snap))).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                not_found(&name).into_response()
+            } else if msg.contains("already exists") || msg.contains("limit reached") || msg.contains("must be") || msg.contains("still starting") {
+                bad_request(msg).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
+    }
+}
+
+/// `GET /api/vms/:name/snapshots` — List snapshots.
+async fn list_snapshots(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let db_path = state.db_path.as_str().to_string();
+    match vm::list_snapshots(&db_path, &name) {
+        Ok(snaps) => Json(snaps.into_iter().map(SnapshotResponse::from).collect::<Vec<_>>()).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") { not_found(&name).into_response() } else { internal(msg).into_response() }
+        }
+    }
+}
+
+/// `POST /api/vms/:name/snapshots/:snap/restore` — Restore from a snapshot.
+async fn restore_snapshot(
+    State(state): State<AppState>,
+    Path((name, snap)): Path<(String, String)>,
+) -> impl IntoResponse {
+    info!(vm = %name, snap = %snap, "restore snapshot");
+    let db_path = state.db_path.as_str().to_string();
+    match vm::restore_snapshot(&db_path, &name, &snap).await {
+        Ok(()) => Json(serde_json::json!({
+            "message": format!("VM '{name}' restored from snapshot '{snap}'")
+        })).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg })).into_response()
+            } else if msg.contains("must be stopped") {
+                bad_request(msg).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
+    }
+}
+
+/// `DELETE /api/vms/:name/snapshots/:snap` — Delete a snapshot.
+async fn delete_snapshot(
+    State(state): State<AppState>,
+    Path((name, snap)): Path<(String, String)>,
+) -> impl IntoResponse {
+    info!(vm = %name, snap = %snap, "delete snapshot");
+    let db_path = state.db_path.as_str().to_string();
+    match vm::delete_snapshot(&db_path, &name, &snap).await {
+        Ok(()) => Json(serde_json::json!({
+            "message": format!("snapshot '{snap}' deleted for VM '{name}'")
+        })).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg })).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
     }
 }

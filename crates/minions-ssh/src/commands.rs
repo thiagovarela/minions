@@ -185,6 +185,56 @@ impl ApiClient {
             .error_for_status()?;
         Ok(())
     }
+
+    // ── Snapshot methods ──────────────────────────────────────────────────────
+
+    pub async fn create_snapshot(&self, vm: &str, name: Option<String>) -> Result<SnapshotInfo> {
+        let resp = self
+            .auth(
+                self.client
+                    .post(format!("{}/api/vms/{}/snapshots", self.base_url, vm))
+                    .json(&serde_json::json!({ "name": name })),
+            )
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<SnapshotInfo>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn list_snapshots(&self, vm: &str) -> Result<Vec<SnapshotInfo>> {
+        let resp = self
+            .auth(self.client.get(format!("{}/api/vms/{}/snapshots", self.base_url, vm)))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Vec<SnapshotInfo>>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn restore_snapshot(&self, vm: &str, snapshot: &str) -> Result<()> {
+        self.auth(
+            self.client
+                .post(format!("{}/api/vms/{}/snapshots/{}/restore", self.base_url, vm, snapshot)),
+        )
+        .send()
+        .await?
+        .error_for_status()?;
+        Ok(())
+    }
+
+    pub async fn delete_snapshot(&self, vm: &str, snapshot: &str) -> Result<()> {
+        self.auth(
+            self.client
+                .delete(format!("{}/api/vms/{}/snapshots/{}", self.base_url, vm, snapshot)),
+        )
+        .send()
+        .await?
+        .error_for_status()?;
+        Ok(())
+    }
 }
 
 // ── VmInfo ────────────────────────────────────────────────────────────────────
@@ -206,6 +256,16 @@ pub struct VmInfo {
 }
 
 fn default_proxy_port() -> u16 { 80 }
+
+/// Snapshot metadata returned by the API.
+#[derive(Debug, Deserialize)]
+pub struct SnapshotInfo {
+    pub id: String,
+    pub vm_name: String,
+    pub name: String,
+    pub size_bytes: Option<u64>,
+    pub created_at: String,
+}
 
 // ── Ownership enforcement ─────────────────────────────────────────────────────
 
@@ -470,6 +530,74 @@ async fn execute(
             ))
         }
 
+        // ── snapshot ───────────────────────────────────────────────────────
+        "snapshot" => {
+            if parts.len() < 2 {
+                return Ok("usage: snapshot <vm> [--name <n>]\r\n".to_string());
+            }
+            let vm_name = parts[1];
+            let snap_name = parts.windows(2)
+                .find(|w| w[0] == "--name" || w[0] == "-n")
+                .map(|w| w[1].to_string());
+            check_owns(api, vm_name, user).await?;
+            let snap = api.create_snapshot(vm_name, snap_name).await?;
+            Ok(format!(
+                "✓ Snapshot '{}' created for VM '{}' ({} bytes)\r\n  Created: {}\r\n",
+                snap.name, snap.vm_name,
+                snap.size_bytes.map(|s| s.to_string()).unwrap_or_else(|| "-".to_string()),
+                snap.created_at,
+            ))
+        }
+
+        // ── snapshots ──────────────────────────────────────────────────────
+        "snapshots" => {
+            if parts.len() < 2 {
+                return Ok("usage: snapshots <vm>\r\n".to_string());
+            }
+            check_owns(api, parts[1], user).await?;
+            let snaps = api.list_snapshots(parts[1]).await?;
+            if snaps.is_empty() {
+                return Ok(format!("no snapshots for VM '{}'\r\n", parts[1]));
+            }
+            let mut out = format!("{:<30} {:>12}  {}\r\n", "NAME", "SIZE", "CREATED");
+            out.push_str(&"-".repeat(65));
+            out.push_str("\r\n");
+            for s in &snaps {
+                let size = s.size_bytes
+                    .map(|b| format!("{:.1} MiB", b as f64 / (1024.0 * 1024.0)))
+                    .unwrap_or_else(|| "-".to_string());
+                out.push_str(&format!("{:<30} {:>12}  {}\r\n", s.name, size, s.created_at));
+            }
+            Ok(out)
+        }
+
+        // ── restore ────────────────────────────────────────────────────────
+        "restore" => {
+            if parts.len() < 3 {
+                return Ok("usage: restore <vm> <snapshot>  (VM must be stopped first)\r\n".to_string());
+            }
+            let vm_name = parts[1];
+            let snap_name = parts[2];
+            check_owns(api, vm_name, user).await?;
+            api.restore_snapshot(vm_name, snap_name).await?;
+            Ok(format!(
+                "✓ VM '{}' restored from snapshot '{}'\r\n  Start it with: restart {}\r\n",
+                vm_name, snap_name, vm_name
+            ))
+        }
+
+        // ── rm-snapshot ────────────────────────────────────────────────────
+        "rm-snapshot" => {
+            if parts.len() < 3 {
+                return Ok("usage: rm-snapshot <vm> <snapshot>\r\n".to_string());
+            }
+            let vm_name = parts[1];
+            let snap_name = parts[2];
+            check_owns(api, vm_name, user).await?;
+            api.delete_snapshot(vm_name, snap_name).await?;
+            Ok(format!("✓ Snapshot '{}' deleted\r\n", snap_name))
+        }
+
         // ── help ───────────────────────────────────────────────────────────
         "help" | "--help" | "-h" => Ok(help()),
 
@@ -496,6 +624,11 @@ fn help() -> String {
         "  expose <vm> [--port N]          expose VM web server on port N (default 80)",
         "  set-public <vm>                 make VM web accessible without login",
         "  set-private <vm>                require login to access VM web (default)",
+        "",
+        "  snapshot <vm> [--name <n>]      create a snapshot (VM can be running or stopped)",
+        "  snapshots <vm>                  list snapshots",
+        "  restore <vm> <snap>             restore from snapshot (VM must be stopped)",
+        "  rm-snapshot <vm> <snap>         delete a snapshot",
         "",
         "  whoami                          show your account info",
         "  ssh-key list                    list your registered SSH keys",

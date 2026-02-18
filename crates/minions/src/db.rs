@@ -83,6 +83,17 @@ fn migrate(conn: &Connection) -> Result<()> {
             verified    INTEGER NOT NULL DEFAULT 0,
             created_at  TEXT NOT NULL
         );
+
+        -- Snapshots table: one row per snapshot.
+        -- Snapshot files live at /var/lib/minions/snapshots/{vm_name}/{name}/rootfs.ext4
+        CREATE TABLE IF NOT EXISTS snapshots (
+            id          TEXT PRIMARY KEY,
+            vm_name     TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            size_bytes  INTEGER,
+            created_at  TEXT NOT NULL,
+            UNIQUE(vm_name, name)
+        );
         ",
     )
     .context("run migration")?;
@@ -341,6 +352,99 @@ pub fn set_proxy_public(conn: &Connection, name: &str, public: bool) -> Result<b
     Ok(changed > 0)
 }
 
+// ── Snapshots ─────────────────────────────────────────────────────────────────
+
+/// A snapshot record stored in the database.
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    pub id: String,
+    pub vm_name: String,
+    pub name: String,
+    pub size_bytes: Option<u64>,
+    pub created_at: String,
+}
+
+/// Insert a snapshot record.
+pub fn insert_snapshot(conn: &Connection, snap: &Snapshot) -> Result<()> {
+    conn.execute(
+        "INSERT INTO snapshots (id, vm_name, name, size_bytes, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            snap.id,
+            snap.vm_name,
+            snap.name,
+            snap.size_bytes.map(|s| s as i64),
+            snap.created_at,
+        ],
+    )
+    .context("insert snapshot")?;
+    Ok(())
+}
+
+/// Retrieve a snapshot by VM name + snapshot name.
+pub fn get_snapshot(conn: &Connection, vm_name: &str, snap_name: &str) -> Result<Option<Snapshot>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, vm_name, name, size_bytes, created_at
+         FROM snapshots WHERE vm_name=?1 AND name=?2",
+    )?;
+    let mut rows = stmt.query(params![vm_name, snap_name])?;
+    match rows.next()? {
+        None => Ok(None),
+        Some(row) => Ok(Some(row_to_snapshot(row)?)),
+    }
+}
+
+/// List all snapshots for a VM, ordered by creation time.
+pub fn list_snapshots(conn: &Connection, vm_name: &str) -> Result<Vec<Snapshot>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, vm_name, name, size_bytes, created_at
+         FROM snapshots WHERE vm_name=?1 ORDER BY created_at",
+    )?;
+    let rows = stmt.query_map(params![vm_name], |row| {
+        Ok(row_to_snapshot(row).expect("parse snapshot row"))
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// Count snapshots for a VM.
+pub fn count_snapshots(conn: &Connection, vm_name: &str) -> Result<u32> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM snapshots WHERE vm_name=?1",
+        params![vm_name],
+        |r| r.get(0),
+    )?;
+    Ok(count as u32)
+}
+
+/// Delete a snapshot record.
+pub fn delete_snapshot(conn: &Connection, vm_name: &str, snap_name: &str) -> Result<bool> {
+    let changed = conn.execute(
+        "DELETE FROM snapshots WHERE vm_name=?1 AND name=?2",
+        params![vm_name, snap_name],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Delete all snapshot records for a VM (called when the VM is destroyed).
+pub fn delete_all_snapshots(conn: &Connection, vm_name: &str) -> Result<usize> {
+    let changed = conn.execute(
+        "DELETE FROM snapshots WHERE vm_name=?1",
+        params![vm_name],
+    )?;
+    Ok(changed)
+}
+
+fn row_to_snapshot(row: &rusqlite::Row<'_>) -> rusqlite::Result<Snapshot> {
+    let size_bytes: Option<i64> = row.get(3)?;
+    Ok(Snapshot {
+        id: row.get(0)?,
+        vm_name: row.get(1)?,
+        name: row.get(2)?,
+        size_bytes: size_bytes.map(|s| s as u64),
+        created_at: row.get(4)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,5 +551,87 @@ mod tests {
         let conn = test_conn();
         let result = get_vm_owned(&conn, "nonexistent", "user-x").unwrap();
         assert!(result.is_none());
+    }
+
+    // ── Snapshot tests ────────────────────────────────────────────────────────
+
+    fn sample_snapshot(vm_name: &str, snap_name: &str) -> Snapshot {
+        Snapshot {
+            id: format!("{vm_name}-{snap_name}-id"),
+            vm_name: vm_name.to_string(),
+            name: snap_name.to_string(),
+            size_bytes: Some(1024 * 1024 * 500), // 500 MB
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_snapshot_insert_and_get() {
+        let conn = test_conn();
+        let snap = sample_snapshot("myvm", "snap1");
+        insert_snapshot(&conn, &snap).unwrap();
+
+        let found = get_snapshot(&conn, "myvm", "snap1").unwrap().unwrap();
+        assert_eq!(found.vm_name, "myvm");
+        assert_eq!(found.name, "snap1");
+        assert_eq!(found.size_bytes, Some(1024 * 1024 * 500));
+    }
+
+    #[test]
+    fn test_snapshot_list_and_count() {
+        let conn = test_conn();
+        insert_snapshot(&conn, &sample_snapshot("myvm", "a")).unwrap();
+        insert_snapshot(&conn, &sample_snapshot("myvm", "b")).unwrap();
+        insert_snapshot(&conn, &sample_snapshot("othervm", "x")).unwrap();
+
+        let snaps = list_snapshots(&conn, "myvm").unwrap();
+        assert_eq!(snaps.len(), 2);
+
+        let count = count_snapshots(&conn, "myvm").unwrap();
+        assert_eq!(count, 2);
+
+        let other_count = count_snapshots(&conn, "othervm").unwrap();
+        assert_eq!(other_count, 1);
+    }
+
+    #[test]
+    fn test_snapshot_delete() {
+        let conn = test_conn();
+        insert_snapshot(&conn, &sample_snapshot("myvm", "snap1")).unwrap();
+        insert_snapshot(&conn, &sample_snapshot("myvm", "snap2")).unwrap();
+
+        let deleted = delete_snapshot(&conn, "myvm", "snap1").unwrap();
+        assert!(deleted);
+
+        let remaining = list_snapshots(&conn, "myvm").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].name, "snap2");
+
+        // Deleting non-existent snapshot returns false.
+        let not_found = delete_snapshot(&conn, "myvm", "gone").unwrap();
+        assert!(!not_found);
+    }
+
+    #[test]
+    fn test_snapshot_unique_constraint() {
+        let conn = test_conn();
+        insert_snapshot(&conn, &sample_snapshot("myvm", "snap1")).unwrap();
+        // Inserting same (vm_name, name) should fail.
+        let result = insert_snapshot(&conn, &sample_snapshot("myvm", "snap1"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_delete_all_snapshots() {
+        let conn = test_conn();
+        insert_snapshot(&conn, &sample_snapshot("myvm", "a")).unwrap();
+        insert_snapshot(&conn, &sample_snapshot("myvm", "b")).unwrap();
+        insert_snapshot(&conn, &sample_snapshot("othervm", "x")).unwrap();
+
+        let deleted = delete_all_snapshots(&conn, "myvm").unwrap();
+        assert_eq!(deleted, 2);
+
+        assert_eq!(list_snapshots(&conn, "myvm").unwrap().len(), 0);
+        assert_eq!(list_snapshots(&conn, "othervm").unwrap().len(), 1);
     }
 }

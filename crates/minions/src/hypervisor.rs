@@ -82,6 +82,28 @@ pub fn spawn(cfg: &VmConfig) -> Result<u32> {
     Ok(child.id())
 }
 
+/// Pause a VM via the CH API (`vm.pause`).
+///
+/// Suspends all vCPUs and I/O threads. The VM remains in memory but stops
+/// executing. Used to quiesce disk state before taking a snapshot.
+/// Call `resume_vm()` to unpause after the snapshot copy completes.
+pub fn pause_vm(api_socket: &str) -> Result<()> {
+    if !std::path::Path::new(api_socket).exists() {
+        anyhow::bail!("CH API socket not found at '{api_socket}' — is the VM running?");
+    }
+    curl_put(api_socket, "vm.pause").context("vm.pause API call failed")?;
+    Ok(())
+}
+
+/// Resume a paused VM via the CH API (`vm.resume`).
+pub fn resume_vm(api_socket: &str) -> Result<()> {
+    if !std::path::Path::new(api_socket).exists() {
+        anyhow::bail!("CH API socket not found at '{api_socket}' — is the VM running?");
+    }
+    curl_put(api_socket, "vm.resume").context("vm.resume API call failed")?;
+    Ok(())
+}
+
 /// Reboot a VM via the CH API (`vm.reboot`).
 ///
 /// Takes the stored `api_socket` path from the DB record so it works correctly

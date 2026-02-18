@@ -27,6 +27,7 @@ nix = { version = "0.30", features = ["signal"] }
 libc = "0.2"
 subtle = { workspace = true }
 chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
 tabled = "0.17"
 # HTTP API (daemon)
 axum = "0.8"
