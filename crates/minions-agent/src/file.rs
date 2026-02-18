@@ -46,6 +46,11 @@ pub fn write_file(path: &str, content: &str, mode: u32, append: bool) -> Result<
     file.write_all(content.as_bytes())
         .with_context(|| format!("write to {:?}", path))?;
 
+    // Flush to the virtio-blk device immediately so the data survives a
+    // subsequent ACPI reboot (otherwise it may sit in the page cache).
+    file.sync_all()
+        .with_context(|| format!("sync {:?} to disk", path))?;
+
     // Set file permissions
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
         .with_context(|| format!("set permissions {:o} on {:?}", mode, path))?;

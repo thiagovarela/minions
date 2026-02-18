@@ -44,13 +44,16 @@ pub fn create_rootfs(name: &str) -> Result<PathBuf> {
 
 /// Copy an existing VM's rootfs to a new VM directory.
 ///
+/// `source_rootfs` is the **stored** rootfs path from the DB record, so this
+/// works correctly even when the source VM was renamed while running (in which
+/// case the filesystem path does not match the VM name).
+///
 /// Uses `cp --sparse=always` for a fast, sparse-preserving copy.
-/// The source VM must exist (its rootfs.ext4 file must be present).
-pub fn copy_rootfs(source_name: &str, dest_name: &str) -> Result<PathBuf> {
-    let src = rootfs_path(source_name);
+pub fn copy_rootfs(source_rootfs: &str, dest_name: &str) -> Result<PathBuf> {
+    let src = std::path::PathBuf::from(source_rootfs);
     if !src.exists() {
         anyhow::bail!(
-            "source rootfs not found at {} — is VM '{source_name}' valid?",
+            "source rootfs not found at {} — is the source VM valid?",
             src.display()
         );
     }
@@ -67,7 +70,7 @@ pub fn copy_rootfs(source_name: &str, dest_name: &str) -> Result<PathBuf> {
         .context("spawn cp")?;
 
     if !status.success() {
-        anyhow::bail!("cp rootfs from '{source_name}' to '{dest_name}' failed");
+        anyhow::bail!("cp rootfs from '{}' to '{}' failed", src.display(), dst.display());
     }
 
     Ok(dst)

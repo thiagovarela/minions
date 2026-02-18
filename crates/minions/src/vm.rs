@@ -228,6 +228,22 @@ pub async fn restart(db_path: &str, name: &str) -> Result<db::Vm> {
         vm.ch_api_socket
     }; // conn dropped
 
+    // Flush all guest filesystem writes before the ACPI reset.
+    // The ACPI reboot sends a hardware reset signal; without an explicit sync
+    // the guest page cache may not be flushed in time, losing recent writes
+    // (e.g. SSH authorized_keys injected during create).
+    let vsock_path_for_sync = {
+        let conn = db::open(db_path)?;
+        let vm = db::get_vm(&conn, name)?
+            .with_context(|| format!("VM '{name}' not found"))?;
+        std::path::PathBuf::from(vm.ch_vsock_socket)
+    };
+    let _ = agent::send_request(
+        &vsock_path_for_sync,
+        Request::Exec { command: "sync".to_string(), args: vec![] },
+    )
+    .await;
+
     // Send reboot signal using stored socket path.
     // If it fails we restore the running status and bail.
     if let Err(e) = hypervisor::reboot(&api_socket) {
@@ -359,7 +375,7 @@ pub async fn copy(
         let cid = db::next_available_cid(&conn)?;
         let mac = network::generate_mac(cid);
         let tap = network::create_tap(new_name).context("create TAP device")?;
-        let rootfs = storage::copy_rootfs(source_name, new_name)
+        let rootfs = storage::copy_rootfs(&source.rootfs_path, new_name)
             .context("copy source rootfs")?;
 
         let api_socket = hypervisor::api_socket_path(new_name);
