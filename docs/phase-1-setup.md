@@ -219,10 +219,17 @@ sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/16 -o $MAIN_IF -j MASQUERADE
 sudo iptables -I FORWARD -i br0 -o $MAIN_IF -j ACCEPT
 sudo iptables -I FORWARD -i $MAIN_IF -o br0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 
-# Allow VM-to-VM traffic on the bridge (required when br_netfilter is loaded)
-# br_netfilter routes intra-bridge traffic through the iptables FORWARD chain;
-# without this rule, VMs on the same host cannot reach each other.
-sudo iptables -I FORWARD -i br0 -o br0 -j ACCEPT
+# Defence-in-depth: explicitly DROP VM-to-VM traffic at Layer 3.
+# (Bridge port isolation below handles Layer 2; this rule is the L3 backstop.)
+# Insert at position 1 so it takes precedence over any permissive rules added
+# by Docker, Tailscale, or earlier manual setups.
+sudo iptables -I FORWARD -i br0 -o br0 -j DROP
+
+# Load br_netfilter so iptables can intercept bridge-internal (VM↔VM) packets.
+# Without this module the FORWARD chain never sees intra-bridge traffic and the
+# DROP rule above has no effect at Layer 3.
+sudo modprobe br_netfilter
+echo 1 | sudo tee /proc/sys/net/bridge/bridge-nf-call-iptables
 ```
 
 ### 6c. Create a TAP device for the VM
@@ -232,11 +239,26 @@ One TAP device per VM, attached to the bridge.
 ```bash
 sudo ip tuntap add dev tap-test mode tap
 sudo ip link set tap-test master br0
+
+# Isolate this bridge port so the kernel bridge will not forward Ethernet
+# frames between it and any other isolated port (i.e. any other VM's TAP).
+# This is a Layer-2 mechanism — it works independently of iptables and
+# br_netfilter, and is the primary VM isolation control.
+sudo bridge link set dev tap-test isolated on
+
 sudo ip link set tap-test up
 ```
 
+> **Isolation model:** Each VM TAP device is marked isolated.  The bridge
+> forwards frames from an isolated port only to non-isolated ports — in
+> practice, only to the bridge interface itself (the host at `10.0.0.1`).
+> VM A therefore cannot reach VM B at Layer 2.  The iptables DROP rule in
+> 6b provides a second layer of protection at Layer 3 when `br_netfilter`
+> is loaded.
+
 > **Note:** These network settings are not persistent across reboots.
 > For production, configure them via systemd-networkd or netplan on the host.
+> Run `sudo minions init --persist` to persist all settings automatically.
 
 ---
 
@@ -339,7 +361,7 @@ MAIN_IF=$(ip route show default | awk '{print $5}' | head -1)
 sudo iptables -t nat -D POSTROUTING -s 10.0.0.0/16 -o $MAIN_IF -j MASQUERADE
 sudo iptables -D FORWARD -i br0 -o $MAIN_IF -j ACCEPT
 sudo iptables -D FORWARD -i $MAIN_IF -o br0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-sudo iptables -D FORWARD -i br0 -o br0 -j ACCEPT
+sudo iptables -D FORWARD -i br0 -o br0 -j DROP
 
 # Remove VM disk
 rm /var/lib/minions/vms/test-vm-rootfs.ext4
