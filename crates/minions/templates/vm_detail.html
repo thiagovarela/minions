@@ -71,6 +71,72 @@
   </button>
 </div>
 
+<!-- Proxy / Networking -->
+<section class="mb-8">
+  <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Proxy / Networking</h2>
+  <div id="proxy-settings" class="rounded-xl border border-gray-800 bg-gray-900 p-5 space-y-4">
+    <!-- Proxy URL (read-only) -->
+    <div>
+      <p class="text-xs text-gray-500 uppercase tracking-wide mb-1">URL</p>
+      <p class="font-mono text-white text-sm">
+        {% if domain == "" %}
+          <span class="text-gray-600">proxy not configured</span>
+        {% else %}
+          <a href="https://{{ vm_name }}.{{ domain }}" target="_blank" 
+             class="text-indigo-400 hover:text-indigo-300 transition">
+            https://{{ vm_name }}.{{ domain }}
+          </a>
+        {% endif %}
+      </p>
+    </div>
+
+    <!-- Port (editable) -->
+    <div class="flex items-end gap-3">
+      <div>
+        <label class="text-xs text-gray-500 uppercase tracking-wide block mb-1">Port</label>
+        <form hx-post="/dashboard/vms/{{ vm_name }}/expose"
+              hx-target="#proxy-result" hx-swap="innerHTML"
+              class="flex items-center gap-2">
+          <input type="number" name="port" value="{{ proxy_port }}" min="1" max="65535"
+                 class="w-24 rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white font-mono
+                        focus:outline-none focus:border-indigo-500"/>
+          <button type="submit"
+                  class="rounded-lg bg-indigo-700 hover:bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white transition">
+            Update
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Access mode toggle -->
+    <div class="flex items-center gap-3">
+      <span class="text-xs text-gray-500 uppercase tracking-wide">Access</span>
+      {% if proxy_public %}
+        <span class="inline-flex items-center rounded-full bg-green-900/40 px-2.5 py-0.5 text-xs font-medium text-green-400 border border-green-800">
+          public
+        </span>
+        <button hx-post="/dashboard/vms/{{ vm_name }}/set-private"
+                hx-target="body"
+                class="text-xs text-gray-400 hover:text-white transition">
+          Make private
+        </button>
+      {% else %}
+        <span class="inline-flex items-center rounded-full bg-yellow-900/40 px-2.5 py-0.5 text-xs font-medium text-yellow-400 border border-yellow-800">
+          private
+        </span>
+        <button hx-post="/dashboard/vms/{{ vm_name }}/set-public"
+                hx-target="body"
+                class="text-xs text-gray-400 hover:text-white transition">
+          Make public
+        </button>
+      {% endif %}
+    </div>
+
+    <!-- Result message area -->
+    <div id="proxy-result"></div>
+  </div>
+</section>
+
 <!-- Metrics -->
 <section class="mb-8">
   <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Live Metrics</h2>

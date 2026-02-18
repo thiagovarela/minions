@@ -22,6 +22,8 @@ pub struct AppState {
     pub metrics: metrics::MetricsStore,
     /// Dashboard session tokens (in-memory, cleared on restart).
     pub sessions: dashboard::DashboardSessions,
+    /// Base domain for the proxy (e.g. "miniclankers.com"), or None if proxy not configured.
+    pub domain: Option<Arc<String>>,
 }
 
 /// Reconcile DB state with reality.
@@ -154,6 +156,7 @@ pub async fn serve(
         cors_origins,
         metrics: metrics_store,
         sessions: dashboard::DashboardSessions::new(),
+        domain: domain.clone().map(Arc::new),
     };
 
     let app = api::router(state.clone())
