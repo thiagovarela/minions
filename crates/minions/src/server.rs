@@ -102,6 +102,11 @@ pub async fn serve(db_path: String, bind: String, ssh_pubkey: Option<String>) ->
 
     let auth = auth::AuthConfig::new(api_key);
 
+    match &ssh_pubkey {
+        Some(key) => info!("✓ SSH public key loaded ({} chars) — will be injected into new VMs", key.len()),
+        None => warn!("⚠️  No SSH public key found — VMs will require manual key setup\n   Set MINIONS_SSH_PUBKEY_PATH=/path/to/key.pub or run 'minions init' to auto-detect"),
+    }
+
     let state = AppState {
         db_path: Arc::new(db_path),
         ssh_pubkey: ssh_pubkey.map(Arc::new),

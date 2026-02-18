@@ -540,6 +540,25 @@ fn resolve_copy_name(source: &str, new_name: Option<String>) -> String {
 // ── SSH key discovery ─────────────────────────────────────────────────────────
 
 fn find_ssh_pubkey() -> Option<String> {
+    // 1. Explicit path via env var (used by the systemd daemon, which runs as root).
+    if let Ok(path) = std::env::var("MINIONS_SSH_PUBKEY_PATH") {
+        if let Ok(key) = std::fs::read_to_string(&path) {
+            let key = key.trim().to_string();
+            if !key.is_empty() {
+                return Some(key);
+            }
+        }
+    }
+
+    // 2. Inline key via env var.
+    if let Ok(key) = std::env::var("MINIONS_SSH_PUBKEY") {
+        let key = key.trim().to_string();
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+
+    // 3. Discover from the invoking user's ~/.ssh/ directory.
     let ssh_dir = ssh_dir_for_invoking_user()?;
     for name in &["id_ed25519.pub", "id_rsa.pub", "id_ecdsa.pub"] {
         let path = ssh_dir.join(name);

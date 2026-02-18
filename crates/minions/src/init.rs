@@ -217,21 +217,30 @@ fn detect_main_interface() -> Result<String> {
 fn install_systemd_unit() -> Result<()> {
     info("installing minions.service systemd unit");
 
-    let unit = r#"[Unit]
+    // Detect the invoking user's SSH public key so the daemon can inject it
+    // into new VMs.  The daemon runs as root (no SUDO_USER in its env), so we
+    // bake the path into the unit at install time.
+    let ssh_env_line = detect_user_ssh_pubkey_path()
+        .map(|p| format!("Environment=MINIONS_SSH_PUBKEY_PATH={p}\n"))
+        .unwrap_or_default();
+
+    let unit = format!(
+        r#"[Unit]
 Description=Minions VM Manager Daemon
 After=network.target
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/minions serve
-Restart=always
+{ssh_env_line}Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
-"#;
+"#
+    );
 
     std::fs::write(SYSTEMD_UNIT_PATH, unit)
         .with_context(|| format!("write {SYSTEMD_UNIT_PATH}"))?;
@@ -267,4 +276,35 @@ fn info(msg: &str) {
 
 fn ok(msg: impl std::fmt::Display) {
     println!("✓ {msg}");
+}
+
+/// Find the invoking user's SSH public key path.
+/// Returns the path string if a key is found, None otherwise.
+fn detect_user_ssh_pubkey_path() -> Option<String> {
+    // When run as `sudo minions init`, SUDO_USER is the actual user.
+    let home = if let Ok(user) = std::env::var("SUDO_USER") {
+        // Look up home dir from /etc/passwd.
+        if let Ok(content) = std::fs::read_to_string("/etc/passwd") {
+            content.lines().find_map(|line| {
+                let fields: Vec<&str> = line.splitn(7, ':').collect();
+                if fields.len() >= 6 && fields[0] == user {
+                    Some(fields[5].to_string())
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        }
+    } else {
+        std::env::var("HOME").ok()
+    }?;
+
+    for name in &["id_ed25519.pub", "id_rsa.pub", "id_ecdsa.pub"] {
+        let path = format!("{home}/.ssh/{name}");
+        if std::path::Path::new(&path).exists() {
+            return Some(path);
+        }
+    }
+    None
 }
