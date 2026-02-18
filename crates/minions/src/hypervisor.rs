@@ -68,10 +68,12 @@ pub fn spawn(cfg: &VmConfig) -> Result<u32> {
     .stdout(Stdio::null())
     .stderr(Stdio::null());
 
-    // SAFETY: setsid() is async-signal-safe.
+    // SAFETY: setsid() is async-signal-safe and returns -1 on error.
     unsafe {
         cmd.pre_exec(|| {
-            libc::setsid();
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
             Ok(())
         });
     }
