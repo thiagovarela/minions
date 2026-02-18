@@ -59,6 +59,11 @@ pub struct ProxyConfig {
 // ── Serve ─────────────────────────────────────────────────────────────────────
 
 pub async fn serve(config: ProxyConfig, https_bind: &str, http_bind: &str) -> Result<()> {
+    // Install a rustls crypto provider before any TLS operations.
+    // Both aws-lc-rs and ring end up in the dependency graph (via reqwest + russh),
+    // so rustls can't auto-select — we must call install_default() explicitly.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Run DB migration.
     {
         let conn = db::open(&config.db_path).context("open db for proxy migration")?;
