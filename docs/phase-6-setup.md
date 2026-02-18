@@ -3,12 +3,15 @@
 Phase 6 adds an SSH gateway that makes VMs accessible over SSH using your domain
 (**MINICLANKERS.COM**) without needing to know each VM's internal IP.
 
-Two modes run on a single port (22):
+Two modes run on a single port (default: **2222**):
 
 | Mode | Command | What it does |
 |------|---------|--------------|
-| **Command** | `ssh minions@ssh.miniclankers.com` | Manage VMs (ls, new, rm, …) |
-| **Proxy** | `ssh vmname@ssh.miniclankers.com` | SSH directly into VM |
+| **Command** | `ssh -p 2222 minions@ssh.miniclankers.com` | Manage VMs (ls, new, rm, …) |
+| **Proxy** | `ssh -p 2222 vmname@ssh.miniclankers.com` | SSH directly into VM |
+
+The port is fully configurable via `--ssh-bind`. Use 2222 to avoid needing root
+or `CAP_NET_BIND_SERVICE`. Port-forward 2222 on your router to 192.168.1.x:2222.
 
 First-time users are prompted for an email address to register.
 
@@ -23,40 +26,25 @@ Add these records in the Cloudflare dashboard for MINICLANKERS.COM:
 | A | `ssh` | `<your host IP>` | **DNS only** (grey cloud) |
 | A | `@` | `<your host IP>` | DNS only |
 
-> **Important**: keep the proxy **off** (grey cloud) for port 22 — Cloudflare
-> doesn't proxy raw TCP/SSH traffic on arbitrary ports.
+> **Note**: keep the proxy **off** (grey cloud) — Cloudflare does not proxy
+> raw TCP/SSH traffic on port 2222.
 
 ---
 
 ## 2. Host Setup
 
-### 2a. Allow port 22 binding without root
+### 2a. Router port forward
 
-The `minions` binary needs to listen on port 22. Two options:
+Forward **external TCP 2222 → 192.168.1.x:2222** on your home router.
+No special Linux permissions needed to bind port 2222.
 
-**Option A — Run as root** (simplest, fine for a dedicated server):
-```bash
-sudo minions serve --bind 0.0.0.0:3000 --ssh-bind 0.0.0.0:22
-```
-
-**Option B — `CAP_NET_BIND_SERVICE` capability** (run as non-root):
-```bash
-sudo setcap cap_net_bind_service=+ep /usr/local/bin/minions
-# Now minions can bind port 22 as a normal user
-minions serve --bind 0.0.0.0:3000 --ssh-bind 0.0.0.0:22
-```
-
-**Option C — Move host SSH to a different port** (if you SSH into the host itself):
-```bash
-# In /etc/ssh/sshd_config, change Port 22 → Port 2222, then:
-sudo systemctl restart sshd
-# Now port 22 is free for minions
-sudo minions serve --bind 0.0.0.0:3000 --ssh-bind 0.0.0.0:22
-```
+If you need standard port 22 externally, forward **external 22 → internal 2222**
+and keep the `--ssh-bind` at 2222. Document that users need `-p 22` (or nothing,
+since it's the default).
 
 ### 2b. First run — key generation
 
-On the first run with `--ssh-bind`, minions generates two key files:
+On the first run with `--ssh-bind`, minions generates two key files automatically:
 
 | File | Purpose |
 |------|---------|
@@ -64,26 +52,23 @@ On the first run with `--ssh-bind`, minions generates two key files:
 | `/var/lib/minions/proxy_key` | Private key used to authenticate to VMs |
 | `/var/lib/minions/proxy_key.pub` | Public key injected into every new VM |
 
-These are generated automatically — no manual step required.
+### 2c. Systemd service
 
-### 2c. Systemd service update
-
-Update `/etc/systemd/system/minions.service` to add `--ssh-bind`:
+`/etc/systemd/system/minions.service`:
 
 ```ini
 [Unit]
-Description=minions VM daemon + SSH gateway
+Description=Minions VM Manager Daemon + SSH Gateway
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/minions serve \
-    --bind 0.0.0.0:3000 \
-    --ssh-bind 0.0.0.0:22
-Environment=MINIONS_API_KEY=your-secret-api-key
+ExecStart=/usr/local/bin/minions serve --ssh-bind 0.0.0.0:2222
 Environment=MINIONS_SSH_PUBKEY_PATH=/root/.ssh/authorized_keys
-Restart=on-failure
+Restart=always
 RestartSec=5
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -102,15 +87,8 @@ sudo systemctl status minions
 ```bash
 cd /tmp/minions
 git pull origin main
-
-# Cross-compile for the minipc (x86-64 Linux)
-cargo build --release --target x86_64-unknown-linux-musl
-
-# Copy to host
-scp target/x86_64-unknown-linux-musl/release/minions root@<host>:/usr/local/bin/minions
-
-# Restart daemon
-ssh root@<host> systemctl restart minions
+sudo SUDO_USER=$(logname) bash ./scripts/bake-agent.sh
+sudo systemctl restart minions
 ```
 
 ---
@@ -122,7 +100,7 @@ ssh root@<host> systemctl restart minions
 Connect interactively — the gateway prompts for your email:
 
 ```bash
-ssh minions@ssh.miniclankers.com
+ssh -p 2222 minions@ssh.miniclankers.com
 # Welcome to MINICLANKERS.COM
 #
 # Enter your email to register: you@example.com
@@ -131,65 +109,81 @@ ssh minions@ssh.miniclankers.com
 # $
 ```
 
-### Manage VMs
-
-```bash
-# List VMs
-ssh minions@ssh.miniclankers.com ls
-
-# Create a VM (auto-named)
-ssh minions@ssh.miniclankers.com new
-
-# Create with specific name / resources
-ssh minions@ssh.miniclankers.com new myapp --cpus 4 --mem 2048
-
-# Destroy a VM
-ssh minions@ssh.miniclankers.com rm myapp
-
-# Restart
-ssh minions@ssh.miniclankers.com restart myapp
-
-# Copy
-ssh minions@ssh.miniclankers.com cp myapp myapp-staging
-
-# Rename (VM must be stopped)
-ssh minions@ssh.miniclankers.com rename myapp production
-
-# Who am I?
-ssh minions@ssh.miniclankers.com whoami
-```
-
-### SSH into a VM
-
-```bash
-# Proxy mode: username = VM name
-ssh myapp@ssh.miniclankers.com
-
-# Run a single command
-ssh myapp@ssh.miniclankers.com cat /etc/os-release
-```
-
-> The gateway authenticates to the VM using its **proxy key**
-> (`/var/lib/minions/proxy_key`), which is automatically injected into every
-> VM's `/root/.ssh/authorized_keys` at creation time.
-
-### SSH config (optional, for convenience)
+### SSH config (recommended)
 
 Add to `~/.ssh/config`:
 
 ```
 Host ssh.miniclankers.com
+    Port 2222
     User minions
-    IdentityFile ~/.ssh/id_ed25519
-
-# Shortcut: ssh vm-myapp → ssh myapp@ssh.miniclankers.com
-Host vm-*
-    HostName ssh.miniclankers.com
-    User %h
     IdentityFile ~/.ssh/id_ed25519
 ```
 
-Then: `ssh vm-myapp` → proxied into VM `myapp`.
+After this, no need to type `-p 2222` or `-l minions`:
+
+```bash
+ssh ssh.miniclankers.com ls
+ssh ssh.miniclankers.com new myapp --cpus 4 --mem 2048
+ssh ssh.miniclankers.com whoami
+```
+
+For VM proxy access, add a wildcard entry:
+
+```
+# Any *.miniclankers.com → gateway at port 2222, username = hostname prefix
+Host *.miniclankers.com
+    Port 2222
+    IdentityFile ~/.ssh/id_ed25519
+```
+
+Then:
+
+```bash
+# SSH into VM "myapp" (username = VM name)
+ssh myapp@ssh.miniclankers.com
+
+# Or with the wildcard entry above, if DNS points subdomains to the host:
+# ssh myapp.miniclankers.com
+```
+
+### Manage VMs
+
+```bash
+# List VMs
+ssh -p 2222 minions@ssh.miniclankers.com ls
+
+# Create a VM
+ssh -p 2222 minions@ssh.miniclankers.com new
+ssh -p 2222 minions@ssh.miniclankers.com new myapp --cpus 4 --mem 2048
+
+# Destroy
+ssh -p 2222 minions@ssh.miniclankers.com rm myapp
+
+# Stop / restart / rename / copy
+ssh -p 2222 minions@ssh.miniclankers.com stop myapp
+ssh -p 2222 minions@ssh.miniclankers.com restart myapp
+ssh -p 2222 minions@ssh.miniclankers.com rename myapp production
+ssh -p 2222 minions@ssh.miniclankers.com cp myapp myapp-staging
+
+# Account info
+ssh -p 2222 minions@ssh.miniclankers.com whoami
+ssh -p 2222 minions@ssh.miniclankers.com ssh-key list
+```
+
+### SSH into a VM
+
+```bash
+# username = VM name, gateway proxies to VM's sshd
+ssh -p 2222 testvm@ssh.miniclankers.com
+
+# Run a single command
+ssh -p 2222 testvm@ssh.miniclankers.com cat /etc/os-release
+```
+
+> The gateway authenticates to the VM using its **proxy key**
+> (`/var/lib/minions/proxy_key`), which is automatically injected into every
+> VM's `/root/.ssh/authorized_keys` at creation time.
 
 ---
 
@@ -198,10 +192,10 @@ Then: `ssh vm-myapp` → proxied into VM `myapp`.
 ### Key injection flow
 
 ```
-minions serve --ssh-bind 0.0.0.0:22
+minions serve --ssh-bind 0.0.0.0:2222
   │
-  ├── Generate /var/lib/minions/proxy_key (if not exists)
-  ├── Generate /var/lib/minions/proxy_key.pub
+  ├── Generate /var/lib/minions/ssh_host_key  (if not exists)
+  ├── Generate /var/lib/minions/proxy_key[.pub] (if not exists)
   │
   └── On VM create / copy:
         └── inject proxy_key.pub → VM /root/.ssh/authorized_keys (append)
@@ -210,35 +204,28 @@ minions serve --ssh-bind 0.0.0.0:22
 ### SSH routing
 
 ```
-ssh minions@ssh.miniclankers.com ls
+ssh -p 2222 minions@ssh.miniclankers.com ls
 │
-├── DNS: ssh.miniclankers.com → host IP
-├── TCP connect to port 22
-├── Authenticate by SSH public key
-│   └── Look up fingerprint in users/ssh_keys DB table
-│       ├── Found → authenticated user
-│       └── Not found → registration prompt (collect email)
-└── exec_request "ls"
-    └── Call GET /api/vms (local HTTP API)
-        └── Format + return output
+├── DNS: ssh.miniclankers.com → host IP (Cloudflare, grey cloud)
+├── Router: external 2222 → 192.168.1.x:2222
+├── TCP connect to minions gateway on port 2222
+├── Authenticate by SSH public key fingerprint → users/ssh_keys DB table
+│   ├── Known key → authenticated user
+│   └── Unknown key → registration prompt (collect email)
+└── exec_request "ls" → GET /api/vms (local HTTP API) → format output
 
-ssh myapp@ssh.miniclankers.com
+ssh -p 2222 myapp@ssh.miniclankers.com
 │
-├── DNS: ssh.miniclankers.com → host IP (same)
-├── TCP connect to port 22
-├── Authenticate by SSH public key (same)
-│   └── ssh_username = "myapp" ≠ "minions" → proxy mode
-└── shell_request
+└── ssh_username = "myapp" ≠ "minions" → proxy mode
     └── ConnectedVm::connect("10.0.0.x:22", proxy_key)
-        └── authenticate as root with proxy_key
-            └── Bidirectional channel bridge (tokio split stream)
+        └── Bidirectional bridge (tokio::io::split on ChannelStream)
 ```
 
 ### DB tables (new in phase 6)
 
 ```sql
 CREATE TABLE IF NOT EXISTS users (
-    id          TEXT PRIMARY KEY,   -- UUID v4
+    id          TEXT PRIMARY KEY,
     email       TEXT UNIQUE NOT NULL,
     created_at  TEXT NOT NULL
 );
@@ -246,14 +233,14 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS ssh_keys (
     id          TEXT PRIMARY KEY,
     user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    public_key  TEXT NOT NULL,       -- openssh format
-    fingerprint TEXT UNIQUE NOT NULL, -- SHA256 base64 (no padding)
+    public_key  TEXT NOT NULL,
+    fingerprint TEXT UNIQUE NOT NULL,
     name        TEXT NOT NULL DEFAULT 'default',
     created_at  TEXT NOT NULL
 );
 ```
 
-Migration runs automatically on gateway startup — no manual DB changes needed.
+Migration runs automatically on gateway startup.
 
 ---
 
@@ -261,15 +248,15 @@ Migration runs automatically on gateway startup — no manual DB changes needed.
 
 ### "proxy key rejected by VM"
 
-The proxy key wasn't injected into this VM (it was created before phase 6).
+The proxy key wasn't injected (VM was created before phase 6).
 Recreate the VM:
 
 ```bash
-ssh minions@ssh.miniclankers.com rm oldvm
-ssh minions@ssh.miniclankers.com new oldvm
+ssh -p 2222 minions@ssh.miniclankers.com rm oldvm
+ssh -p 2222 minions@ssh.miniclankers.com new oldvm
 ```
 
-Or inject manually via VSOCK agent:
+Or inject manually:
 
 ```bash
 cat /var/lib/minions/proxy_key.pub
@@ -278,19 +265,25 @@ sudo minions exec oldvm -- bash -c "echo '<key>' >> /root/.ssh/authorized_keys"
 
 ### "VM 'xyz' is stopped"
 
-Start the VM first:
+Start the VM first via the HTTP API or CLI:
 
 ```bash
-# Can't start from SSH yet (phase 7) — use HTTP API or CLI
-minions --host http://localhost:3000 create xyz
+minions --host http://minipc:3000 create xyz
 ```
 
 ### Host key changed warning
 
-If you regenerate the host key (e.g., `/var/lib/minions/ssh_host_key`), clients
-will see a "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED" message.
-Remove the old entry:
+If you regenerate the host key, remove the old client-side entry:
 
 ```bash
-ssh-keygen -R ssh.miniclankers.com
+ssh-keygen -R '[ssh.miniclankers.com]:2222'
+```
+
+### Port 2222 not reachable
+
+Check your router's port forwarding rules and ensure the firewall allows TCP 2222 inbound.
+On the minipc:
+
+```bash
+ss -tlnp | grep 2222   # should show minions listening
 ```
