@@ -132,16 +132,29 @@ fn setup_iptables(persist: bool) -> Result<()> {
         "-m", "state", "--state", "RELATED,ESTABLISHED",
         "-j", "ACCEPT",
     ];
-    let fwd_vm2vm: &[&str] = &[
-        "-I", "FORWARD",
-        "-i", "br0", "-o", "br0",
-        "-j", "ACCEPT",
-    ];
 
-    for rule in &[nat_rule, fwd_out, fwd_in, fwd_vm2vm] {
+    // NOTE: We intentionally DO NOT add a blanket "br0 -o br0 ACCEPT" rule here.
+    // That rule would allow all VMs to communicate with each other, enabling:
+    //   - Lateral movement between VMs
+    //   - Data exfiltration from one tenant to another
+    //   - VM-to-VM attacks
+    //
+    // VMs can still reach:
+    //   - The internet (via gateway 10.0.0.1 + NAT)
+    //   - The host (via 10.0.0.1)
+    //
+    // VMs cannot reach:
+    //   - Other VMs on the same bridge (DROP by default FORWARD policy)
+    //
+    // If VM-to-VM communication is required for a specific use case, implement:
+    //   - Per-VM firewall rules (e.g., allow only specific VM pairs)
+    //   - Separate VLANs/bridges per tenant
+    //   - Application-level auth in the VMs themselves
+
+    for rule in &[nat_rule, fwd_out, fwd_in] {
         add_iptables_rule(rule)?;
     }
-    ok("iptables rules added");
+    ok("iptables rules added (VM isolation enabled)");
 
     if persist {
         // Install iptables-persistent and save rules.
