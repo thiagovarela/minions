@@ -90,6 +90,45 @@ impl Client {
         Ok(())
     }
 
+    pub async fn restart_vm(&self, name: &str) -> Result<VmResponse> {
+        self.http
+            .post(format!("{}/api/vms/{name}/restart", self.base))
+            .send()
+            .await
+            .context("send restart request")?
+            .error_for_status()
+            .context("restart VM")?
+            .json()
+            .await
+            .context("decode restart response")
+    }
+
+    pub async fn rename_vm(&self, name: &str, new_name: &str) -> Result<()> {
+        self.http
+            .post(format!("{}/api/vms/{name}/rename", self.base))
+            .json(&serde_json::json!({ "new_name": new_name }))
+            .send()
+            .await
+            .context("send rename request")?
+            .error_for_status()
+            .context("rename VM")?;
+        Ok(())
+    }
+
+    pub async fn copy_vm(&self, name: &str, new_name: &str) -> Result<VmResponse> {
+        self.http
+            .post(format!("{}/api/vms/{name}/copy", self.base))
+            .json(&serde_json::json!({ "new_name": new_name }))
+            .send()
+            .await
+            .context("send copy request")?
+            .error_for_status()
+            .context("copy VM")?
+            .json()
+            .await
+            .context("decode copy response")
+    }
+
     pub async fn exec_vm(&self, name: &str, req: ExecRequest) -> Result<ExecResponse> {
         self.http
             .post(format!("{}/api/vms/{name}/exec", self.base))

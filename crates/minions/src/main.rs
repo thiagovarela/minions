@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use serde::Serialize;
 use std::process::Command;
 use tabled::{Table, Tabled};
 
@@ -35,6 +36,10 @@ struct Cli {
     #[arg(long, global = true)]
     host: Option<String>,
 
+    /// Output results as JSON
+    #[arg(long, global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -53,6 +58,17 @@ enum Commands {
     Destroy { name: String },
     /// List all VMs
     List,
+    /// Restart a running VM (ACPI reboot signal)
+    Restart { name: String },
+    /// Rename a stopped VM
+    Rename { old_name: String, new_name: String },
+    /// Copy an existing VM to a new VM
+    Cp {
+        /// Source VM name
+        source: String,
+        /// New VM name (auto-generated if omitted)
+        new_name: Option<String>,
+    },
     /// Run a command inside a VM
     Exec {
         name: String,
@@ -79,6 +95,46 @@ enum Commands {
     },
 }
 
+// ── Serialisable VM row (for --json output) ───────────────────────────────────
+
+#[derive(Serialize)]
+struct VmJson {
+    name: String,
+    status: String,
+    ip: String,
+    cpus: u32,
+    memory_mb: u32,
+    pid: Option<i64>,
+}
+
+impl From<db::Vm> for VmJson {
+    fn from(v: db::Vm) -> Self {
+        VmJson {
+            name: v.name,
+            status: v.status,
+            ip: v.ip,
+            cpus: v.vcpus,
+            memory_mb: v.memory_mb,
+            pid: v.ch_pid,
+        }
+    }
+}
+
+impl From<client::VmResponse> for VmJson {
+    fn from(v: client::VmResponse) -> Self {
+        VmJson {
+            name: v.name,
+            status: v.status,
+            ip: v.ip,
+            cpus: v.cpus,
+            memory_mb: v.memory_mb,
+            pid: v.pid,
+        }
+    }
+}
+
+// ── Table row (for human-readable output) ────────────────────────────────────
+
 #[derive(Tabled)]
 struct VmRow {
     #[tabled(rename = "NAME")]
@@ -95,6 +151,75 @@ struct VmRow {
     pid: String,
 }
 
+impl From<db::Vm> for VmRow {
+    fn from(v: db::Vm) -> Self {
+        VmRow {
+            name: v.name,
+            status: v.status,
+            ip: v.ip,
+            cpus: v.vcpus,
+            memory: format!("{} MiB", v.memory_mb),
+            pid: v.ch_pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
+        }
+    }
+}
+
+impl From<client::VmResponse> for VmRow {
+    fn from(v: client::VmResponse) -> Self {
+        VmRow {
+            name: v.name,
+            status: v.status,
+            ip: v.ip,
+            cpus: v.cpus,
+            memory: format!("{} MiB", v.memory_mb),
+            pid: v.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
+        }
+    }
+}
+
+// ── Output helpers ────────────────────────────────────────────────────────────
+
+fn print_vm(vm: VmJson, json: bool) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&vm).unwrap());
+    } else {
+        println!();
+        println!("✓ VM '{}' is {}", vm.name, vm.status);
+        println!("  IP:     {}", vm.ip);
+        println!("  CPUs:   {}", vm.cpus);
+        println!("  Memory: {} MiB", vm.memory_mb);
+        println!("  PID:    {}", vm.pid.unwrap_or(0));
+        println!();
+        println!("  SSH:    ssh root@{}", vm.ip);
+    }
+}
+
+fn print_vm_list<I: IntoIterator<Item = VmJson>>(vms: I, json: bool) {
+    let vms: Vec<VmJson> = vms.into_iter().collect();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&vms).unwrap());
+    } else {
+        if vms.is_empty() {
+            println!("No VMs found.");
+            return;
+        }
+        let rows: Vec<VmRow> = vms
+            .into_iter()
+            .map(|v| VmRow {
+                name: v.name,
+                status: v.status,
+                ip: v.ip,
+                cpus: v.cpus,
+                memory: format!("{} MiB", v.memory_mb),
+                pid: v.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
+            })
+            .collect();
+        println!("{}", Table::new(rows));
+    }
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -103,6 +228,7 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let json = cli.json;
 
     // Init and Serve always run directly — they ARE the server side.
     match &cli.command {
@@ -125,50 +251,75 @@ async fn main() -> Result<()> {
     };
 
     if let Some(host) = host {
-        run_remote(&host, cli.command).await
+        run_remote(&host, cli.command, json).await
     } else {
-        run_direct(&cli.db, cli.command).await
+        run_direct(&cli.db, cli.command, json).await
     }
 }
 
 // ── Remote mode (HTTP client) ─────────────────────────────────────────────────
 
-async fn run_remote(host: &str, command: Commands) -> Result<()> {
+async fn run_remote(host: &str, command: Commands, json: bool) -> Result<()> {
     let c = client::Client::new(host);
 
     match command {
         Commands::Create { name, cpus, memory } => {
-            println!("Creating VM '{name}' via {host}…");
+            if !json {
+                println!("Creating VM '{name}' via {host}…");
+            }
             let vm = c
-                .create_vm(client::CreateRequest { name: name.clone(), cpus, memory_mb: memory })
+                .create_vm(client::CreateRequest { name, cpus, memory_mb: memory })
                 .await?;
-            print_vm_created(&vm.name, &vm.ip, vm.vsock_cid, vm.cpus, vm.memory_mb, vm.pid);
+            print_vm(VmJson::from(vm), json);
         }
 
         Commands::Destroy { name } => {
-            println!("Destroying VM '{name}' via {host}…");
+            if !json {
+                println!("Destroying VM '{name}' via {host}…");
+            }
             c.destroy_vm(&name).await?;
-            println!("✓ VM '{name}' destroyed");
+            if json {
+                println!("{}", serde_json::json!({ "message": format!("VM '{name}' destroyed") }));
+            } else {
+                println!("✓ VM '{name}' destroyed");
+            }
         }
 
         Commands::List => {
             let vms = c.list_vms().await?;
-            if vms.is_empty() {
-                println!("No VMs found.");
-            } else {
-                let rows: Vec<VmRow> = vms
-                    .into_iter()
-                    .map(|v| VmRow {
-                        name: v.name,
-                        status: v.status,
-                        ip: v.ip,
-                        cpus: v.cpus,
-                        memory: format!("{} MiB", v.memory_mb),
-                        pid: v.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
-                    })
-                    .collect();
-                println!("{}", Table::new(rows));
+            print_vm_list(vms.into_iter().map(VmJson::from), json);
+        }
+
+        Commands::Restart { name } => {
+            if !json {
+                println!("Restarting VM '{name}' via {host}…");
             }
+            let vm = c.restart_vm(&name).await?;
+            print_vm(VmJson::from(vm), json);
+        }
+
+        Commands::Rename { old_name, new_name } => {
+            if !json {
+                println!("Renaming VM '{old_name}' → '{new_name}' via {host}…");
+            }
+            c.rename_vm(&old_name, &new_name).await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "message": format!("VM '{old_name}' renamed to '{new_name}'") })
+                );
+            } else {
+                println!("✓ VM '{old_name}' renamed to '{new_name}'");
+            }
+        }
+
+        Commands::Cp { source, new_name } => {
+            let new_name = resolve_copy_name(&source, new_name);
+            if !json {
+                println!("Copying VM '{source}' → '{new_name}' via {host}…");
+            }
+            let vm = c.copy_vm(&source, &new_name).await?;
+            print_vm(VmJson::from(vm), json);
         }
 
         Commands::Exec { name, cmd } => {
@@ -207,43 +358,69 @@ async fn run_remote(host: &str, command: Commands) -> Result<()> {
 
 // ── Direct mode (local orchestration) ────────────────────────────────────────
 
-async fn run_direct(db_path: &str, command: Commands) -> Result<()> {
+async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> {
     match command {
         Commands::Create { name, cpus, memory } => {
-            println!("Creating VM '{name}'…");
+            if !json {
+                println!("Creating VM '{name}'…");
+            }
             let ssh_pubkey = find_ssh_pubkey();
-            if ssh_pubkey.is_some() {
+            if ssh_pubkey.is_some() && !json {
                 println!("  (SSH public key found — key-based SSH will work)");
             }
             let vm = vm::create(db_path, &name, cpus, memory, ssh_pubkey).await?;
-            print_vm_created(&vm.name, &vm.ip, vm.vsock_cid, vm.vcpus, vm.memory_mb, vm.ch_pid);
+            print_vm(VmJson::from(vm), json);
         }
 
         Commands::Destroy { name } => {
-            println!("Destroying VM '{name}'…");
+            if !json {
+                println!("Destroying VM '{name}'…");
+            }
             vm::destroy(db_path, &name).await?;
-            println!("✓ VM '{name}' destroyed");
+            if json {
+                println!("{}", serde_json::json!({ "message": format!("VM '{name}' destroyed") }));
+            } else {
+                println!("✓ VM '{name}' destroyed");
+            }
         }
 
         Commands::List => {
             let conn = db::open(db_path).context("open state database")?;
             let vms = vm::list(&conn)?;
-            if vms.is_empty() {
-                println!("No VMs found.");
-            } else {
-                let rows: Vec<VmRow> = vms
-                    .into_iter()
-                    .map(|v| VmRow {
-                        name: v.name,
-                        status: v.status,
-                        ip: v.ip,
-                        cpus: v.vcpus,
-                        memory: format!("{} MiB", v.memory_mb),
-                        pid: v.ch_pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
-                    })
-                    .collect();
-                println!("{}", Table::new(rows));
+            print_vm_list(vms.into_iter().map(VmJson::from), json);
+        }
+
+        Commands::Restart { name } => {
+            if !json {
+                println!("Restarting VM '{name}'…");
             }
+            let vm = vm::restart(db_path, &name).await?;
+            print_vm(VmJson::from(vm), json);
+        }
+
+        Commands::Rename { old_name, new_name } => {
+            if !json {
+                println!("Renaming VM '{old_name}' → '{new_name}'…");
+            }
+            vm::rename(db_path, &old_name, &new_name).await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "message": format!("VM '{old_name}' renamed to '{new_name}'") })
+                );
+            } else {
+                println!("✓ VM '{old_name}' renamed to '{new_name}'");
+            }
+        }
+
+        Commands::Cp { source, new_name } => {
+            let new_name = resolve_copy_name(&source, new_name);
+            if !json {
+                println!("Copying VM '{source}' → '{new_name}'…");
+            }
+            let ssh_pubkey = find_ssh_pubkey();
+            let vm = vm::copy(db_path, &source, &new_name, ssh_pubkey).await?;
+            print_vm(VmJson::from(vm), json);
         }
 
         Commands::Exec { name, cmd } => {
@@ -325,18 +502,21 @@ async fn cmd_ssh(db_path: &str, name: &str) -> Result<()> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-// ── Output helpers ────────────────────────────────────────────────────────────
+// ── Copy name resolution ──────────────────────────────────────────────────────
 
-fn print_vm_created(name: &str, ip: &str, cid: u32, cpus: u32, memory_mb: u32, pid: Option<i64>) {
-    println!();
-    println!("✓ VM '{name}' is running");
-    println!("  IP:     {ip}");
-    println!("  CID:    {cid}");
-    println!("  CPUs:   {cpus}");
-    println!("  Memory: {memory_mb} MiB");
-    println!("  PID:    {}", pid.unwrap_or(0));
-    println!();
-    println!("  SSH:    ssh root@{ip}");
+/// Derive a name for a copied VM if the user didn't supply one.
+///
+/// Strategy: append `-copy`, then `-copy2`, `-copy3` … but without hitting
+/// the DB (the VM manager will reject duplicates if there's a collision).
+/// Keep it under the 11-char TAP limit.
+fn resolve_copy_name(source: &str, new_name: Option<String>) -> String {
+    if let Some(n) = new_name {
+        return n;
+    }
+    // Truncate source to leave room for "-copy" suffix (5 chars → max 6 source chars)
+    let max_base = 11 - 5; // 6
+    let base = if source.len() > max_base { &source[..max_base] } else { source };
+    format!("{base}-copy")
 }
 
 // ── SSH key discovery ─────────────────────────────────────────────────────────

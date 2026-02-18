@@ -42,6 +42,37 @@ pub fn create_rootfs(name: &str) -> Result<PathBuf> {
     Ok(dst)
 }
 
+/// Copy an existing VM's rootfs to a new VM directory.
+///
+/// Uses `cp --sparse=always` for a fast, sparse-preserving copy.
+/// The source VM must exist (its rootfs.ext4 file must be present).
+pub fn copy_rootfs(source_name: &str, dest_name: &str) -> Result<PathBuf> {
+    let src = rootfs_path(source_name);
+    if !src.exists() {
+        anyhow::bail!(
+            "source rootfs not found at {} — is VM '{source_name}' valid?",
+            src.display()
+        );
+    }
+
+    let vm_dir = PathBuf::from(VMS_DIR).join(dest_name);
+    std::fs::create_dir_all(&vm_dir)
+        .with_context(|| format!("create VM dir {:?}", vm_dir))?;
+
+    let dst = vm_dir.join("rootfs.ext4");
+
+    let status = std::process::Command::new("cp")
+        .args(["--sparse=always", src.to_str().unwrap(), dst.to_str().unwrap()])
+        .status()
+        .context("spawn cp")?;
+
+    if !status.success() {
+        anyhow::bail!("cp rootfs from '{source_name}' to '{dest_name}' failed");
+    }
+
+    Ok(dst)
+}
+
 /// Remove the per-VM directory and all its contents.
 pub fn destroy_rootfs(name: &str) -> Result<()> {
     let vm_dir = PathBuf::from(VMS_DIR).join(name);

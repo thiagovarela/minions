@@ -30,6 +30,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/vms", get(list_vms))
         .route("/api/vms/{name}", get(get_vm))
         .route("/api/vms/{name}", delete(destroy_vm))
+        .route("/api/vms/{name}/restart", post(restart_vm))
+        .route("/api/vms/{name}/rename", post(rename_vm))
+        .route("/api/vms/{name}/copy", post(copy_vm))
         .route("/api/vms/{name}/exec", post(exec_vm))
         .route("/api/vms/{name}/status", get(vm_status))
         .route("/api/vms/{name}/logs", get(vm_logs))
@@ -88,6 +91,16 @@ impl From<db::Vm> for VmResponse {
             created_at: v.created_at,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RenameRequest {
+    pub new_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CopyRequest {
+    pub new_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -215,6 +228,78 @@ async fn destroy_vm(
         Ok(()) => Json(serde_json::json!({ "message": format!("VM '{name}' destroyed") }))
             .into_response(),
         Err(e) => internal(e).into_response(),
+    }
+}
+
+/// `POST /api/vms/:name/restart` — Reboot a running VM via ACPI signal.
+async fn restart_vm(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    info!(name = %name, "restart VM");
+    let db_path = state.db_path.as_str().to_string();
+    match vm::restart(&db_path, &name).await {
+        Ok(v) => Json(VmResponse::from(v)).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                not_found(&name).into_response()
+            } else if msg.contains("not running") {
+                bad_request(msg).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
+    }
+}
+
+/// `POST /api/vms/:name/rename` — Rename a stopped VM.
+async fn rename_vm(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<RenameRequest>,
+) -> impl IntoResponse {
+    info!(name = %name, new_name = %req.new_name, "rename VM");
+    let db_path = state.db_path.as_str().to_string();
+    match vm::rename(&db_path, &name, &req.new_name).await {
+        Ok(()) => Json(serde_json::json!({
+            "message": format!("VM '{}' renamed to '{}'", name, req.new_name)
+        }))
+        .into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                not_found(&name).into_response()
+            } else if msg.contains("must be stopped") || msg.contains("already exists") {
+                bad_request(msg).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
+    }
+}
+
+/// `POST /api/vms/:name/copy` — Copy a VM (running or stopped) to a new VM.
+async fn copy_vm(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<CopyRequest>,
+) -> impl IntoResponse {
+    info!(name = %name, new_name = %req.new_name, "copy VM");
+    let db_path = state.db_path.as_str().to_string();
+    let ssh_pubkey = state.ssh_pubkey.as_deref().map(|s| s.to_string());
+    match vm::copy(&db_path, &name, &req.new_name, ssh_pubkey).await {
+        Ok(v) => (StatusCode::CREATED, Json(VmResponse::from(v))).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                not_found(&name).into_response()
+            } else if msg.contains("already exists") {
+                bad_request(msg).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
     }
 }
 

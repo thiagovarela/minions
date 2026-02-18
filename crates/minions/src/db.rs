@@ -135,6 +135,44 @@ pub fn update_vm_status(conn: &Connection, name: &str, status: &str, pid: Option
     Ok(())
 }
 
+/// Rename a VM: update all name-derived columns atomically.
+///
+/// Caller is responsible for renaming the filesystem rootfs directory and
+/// TAP device before calling this. This function only updates the DB.
+pub fn rename_vm(
+    conn: &Connection,
+    old_name: &str,
+    new_name: &str,
+    new_tap: &str,
+    new_api_socket: &str,
+    new_vsock_socket: &str,
+    new_rootfs_path: &str,
+) -> Result<()> {
+    let updated = conn.execute(
+        "UPDATE vms SET
+            name            = ?1,
+            tap_device      = ?2,
+            ch_api_socket   = ?3,
+            ch_vsock_socket = ?4,
+            rootfs_path     = ?5
+         WHERE name = ?6",
+        rusqlite::params![
+            new_name,
+            new_tap,
+            new_api_socket,
+            new_vsock_socket,
+            new_rootfs_path,
+            old_name,
+        ],
+    )
+    .context("rename vm in db")?;
+
+    if updated == 0 {
+        anyhow::bail!("VM '{}' not found", old_name);
+    }
+    Ok(())
+}
+
 /// Delete a VM record.
 pub fn delete_vm(conn: &Connection, name: &str) -> Result<()> {
     conn.execute("DELETE FROM vms WHERE name=?1", params![name])
