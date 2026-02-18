@@ -130,6 +130,7 @@ pub async fn serve(config: ProxyConfig, https_bind: &str, http_bind: &str) -> Re
         sessions: auth::Sessions::new(),
         http_client: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("build http client")?,
         acme_challenges: challenges.clone(),
