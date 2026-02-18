@@ -216,8 +216,8 @@ pub async fn destroy(db_path: &str, name: &str) -> Result<()> {
 /// during the reboot cycle; callers should not immediately issue agent
 /// requests after this returns.
 pub async fn restart(db_path: &str, name: &str) -> Result<db::Vm> {
-    // Verify the VM exists and is running.
-    {
+    // Verify the VM exists and is running; capture stored socket path.
+    let api_socket = {
         let conn = db::open(db_path)?;
         let vm = db::get_vm(&conn, name)?
             .with_context(|| format!("VM '{name}' not found"))?;
@@ -225,10 +225,12 @@ pub async fn restart(db_path: &str, name: &str) -> Result<db::Vm> {
             anyhow::bail!("VM '{name}' is not running (status: {})", vm.status);
         }
         db::update_vm_status(&conn, name, "restarting", None)?;
-    } // conn dropped
+        vm.ch_api_socket
+    }; // conn dropped
 
-    // Send reboot signal.  If it fails we restore the running status and bail.
-    if let Err(e) = hypervisor::reboot(name) {
+    // Send reboot signal using stored socket path.
+    // If it fails we restore the running status and bail.
+    if let Err(e) = hypervisor::reboot(&api_socket) {
         let conn = db::open(db_path)?;
         let _ = db::update_vm_status(&conn, name, "running", None);
         return Err(e);

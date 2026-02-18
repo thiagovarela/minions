@@ -243,7 +243,8 @@ async fn stop_vm(
         Ok(v) => Json(VmResponse::from(v)).into_response(),
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("not found") {
+            // Only 404 when the VM genuinely doesn't exist in the DB.
+            if msg.contains("VM '") && msg.contains("' not found") {
                 not_found(&name).into_response()
             } else if msg.contains("already stopped") {
                 bad_request(msg).into_response()
@@ -265,7 +266,8 @@ async fn restart_vm(
         Ok(v) => Json(VmResponse::from(v)).into_response(),
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("not found") {
+            // Only 404 when the VM genuinely doesn't exist in the DB.
+            if msg.contains("VM '") && msg.contains("' not found") {
                 not_found(&name).into_response()
             } else if msg.contains("not running") {
                 bad_request(msg).into_response()
@@ -276,7 +278,7 @@ async fn restart_vm(
     }
 }
 
-/// `POST /api/vms/:name/rename` — Rename a stopped VM.
+/// `POST /api/vms/:name/rename` — Rename a VM (running or stopped).
 async fn rename_vm(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -291,9 +293,9 @@ async fn rename_vm(
         .into_response(),
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("not found") {
+            if msg.contains("VM '") && msg.contains("' not found") {
                 not_found(&name).into_response()
-            } else if msg.contains("must be stopped") || msg.contains("already exists") {
+            } else if msg.contains("already exists") || msg.contains("must only contain") || msg.contains("characters or fewer") {
                 bad_request(msg).into_response()
             } else {
                 internal(msg).into_response()
@@ -315,9 +317,9 @@ async fn copy_vm(
         Ok(v) => (StatusCode::CREATED, Json(VmResponse::from(v))).into_response(),
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("not found") {
+            if msg.contains("VM '") && msg.contains("' not found") {
                 not_found(&name).into_response()
-            } else if msg.contains("already exists") {
+            } else if msg.contains("already exists") || msg.contains("must only contain") || msg.contains("characters or fewer") {
                 bad_request(msg).into_response()
             } else {
                 internal(msg).into_response()
