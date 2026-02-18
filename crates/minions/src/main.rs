@@ -36,6 +36,11 @@ struct Cli {
     #[arg(long, global = true)]
     host: Option<String>,
 
+    /// API key for the remote daemon (overrides MINIONS_API_KEY env var).
+    /// Only used in remote mode (--host or auto-detected local daemon).
+    #[arg(long, global = true)]
+    api_key: Option<String>,
+
     /// Output results as JSON
     #[arg(long, global = true)]
     json: bool,
@@ -240,6 +245,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let json = cli.json;
+    let api_key = cli.api_key.clone();
 
     // Init and Serve always run directly — they ARE the server side.
     match &cli.command {
@@ -269,7 +275,7 @@ async fn main() -> Result<()> {
     };
 
     if let Some(host) = host {
-        run_remote(&host, cli.command, json).await
+        run_remote(&host, cli.command, json, api_key).await
     } else {
         run_direct(&cli.db, cli.command, json).await
     }
@@ -277,8 +283,8 @@ async fn main() -> Result<()> {
 
 // ── Remote mode (HTTP client) ─────────────────────────────────────────────────
 
-async fn run_remote(host: &str, command: Commands, json: bool) -> Result<()> {
-    let c = client::Client::new(host);
+async fn run_remote(host: &str, command: Commands, json: bool, api_key: Option<String>) -> Result<()> {
+    let c = client::Client::new(host, api_key);
 
     match command {
         Commands::Create { name, cpus, memory } => {

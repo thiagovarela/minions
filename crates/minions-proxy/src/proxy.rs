@@ -9,9 +9,10 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::Response;
+use subtle::ConstantTimeEq;
 use tracing::{debug, warn};
 
-use crate::auth::{Sessions, clear_cookie, extract_token, login_page, redirect_to_login, set_cookie};
+use crate::auth::{Sessions, clear_cookie, extract_token, login_page, redirect_to_login, safe_next, set_cookie};
 use crate::db;
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -105,7 +106,9 @@ async fn handle_internal(req: Request, state: &AppState) -> Response {
     let path = req.uri().path();
     match (req.method().clone(), path) {
         (Method::GET, "/__minions/login") => {
-            let next = query_param(req.uri(), "next").unwrap_or_else(|| "/".to_string());
+            let next_raw = query_param(req.uri(), "next").unwrap_or_else(|| "/".to_string());
+            // Validate before embedding in the login form to prevent open redirect.
+            let next = safe_next(&next_raw).to_string();
             login_page(&next, false)
         }
         (Method::POST, "/__minions/login") => handle_login_post(req, state).await,
@@ -134,10 +137,15 @@ async fn handle_login_post(req: Request, state: &AppState) -> Response {
         serde_urlencoded::from_bytes(&bytes).unwrap_or_default();
 
     let password = form.get("password").map(|s| s.as_str()).unwrap_or("");
-    let next = form.get("next").map(|s| s.as_str()).unwrap_or("/");
+    // Sanitize the redirect target before using it to prevent open redirect.
+    let next_raw = form.get("next").map(|s| s.as_str()).unwrap_or("/");
+    let next = safe_next(next_raw);
 
     let expected = state.api_key.as_deref().map(|k| k.as_ref()).unwrap_or("");
-    if !expected.is_empty() && password != expected {
+    // Use constant-time comparison to prevent timing side-channel attacks.
+    let password_ok = expected.is_empty()
+        || password.as_bytes().ct_eq(expected.as_bytes()).into();
+    if !password_ok {
         return login_page(next, true);
     }
 
