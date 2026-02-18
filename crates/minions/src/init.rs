@@ -13,6 +13,7 @@ pub fn run(persist: bool) -> Result<()> {
     setup_directories()?;
     setup_bridge()?;
     enable_ip_forward(persist)?;
+    load_br_netfilter(persist)?;
     setup_iptables(persist)?;
     install_systemd_unit()?;
 
@@ -110,6 +111,66 @@ fn enable_ip_forward(persist: bool) -> Result<()> {
     Ok(())
 }
 
+// ── br_netfilter ──────────────────────────────────────────────────────────────
+
+/// Load br_netfilter and enable bridge-nf-call-iptables.
+///
+/// `br_netfilter` routes bridge-internal packets (VM A → switch → VM B)
+/// through the iptables FORWARD chain.  Without it, intra-bridge traffic
+/// bypasses iptables entirely and the DROP rule below would have no effect.
+///
+/// This is a defence-in-depth layer: bridge port isolation (set per TAP in
+/// `network::create_tap`) already blocks VM-to-VM frames at Layer 2.
+/// `br_netfilter` + the DROP rule catch any edge cases where isolation is
+/// not yet in effect (e.g. TAP devices created before this fix, or on kernels
+/// where bridge port isolation is unavailable).
+fn load_br_netfilter(persist: bool) -> Result<()> {
+    info("loading br_netfilter kernel module");
+
+    // Best-effort: may fail inside containers that share the host kernel without
+    // permission to load modules.  Bridge port isolation still provides L2 isolation.
+    let loaded = Command::new("modprobe")
+        .arg("br_netfilter")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if loaded {
+        // Enable the sysctl so the module actually intercepts bridge frames.
+        let _ = std::fs::write(
+            "/proc/sys/net/bridge/bridge-nf-call-iptables",
+            "1\n",
+        );
+        ok("br_netfilter loaded, bridge-nf-call-iptables = 1");
+    } else {
+        println!(
+            "⚠  modprobe br_netfilter failed — iptables DROP rule will have no effect \
+             on bridge-internal traffic.\n   \
+             Bridge port isolation (TAP isolated flag) still provides Layer-2 VM isolation."
+        );
+    }
+
+    if persist {
+        // Persist module loading across reboots.
+        std::fs::create_dir_all("/etc/modules-load.d")?;
+        std::fs::write("/etc/modules-load.d/minions.conf", "br_netfilter\n")
+            .context("write /etc/modules-load.d/minions.conf")?;
+
+        // Append bridge sysctl to the existing minions sysctl drop-in
+        // (created by enable_ip_forward).  Use a separate file to avoid
+        // duplicating the ip_forward line.
+        std::fs::write(
+            "/etc/sysctl.d/99-minions-bridge.conf",
+            "net.bridge.bridge-nf-call-iptables = 1\n",
+        )
+        .context("write /etc/sysctl.d/99-minions-bridge.conf")?;
+
+        ok("br_netfilter module load and bridge-nf-call-iptables persisted");
+    }
+
+    Ok(())
+}
+
 // ── iptables ─────────────────────────────────────────────────────────────────
 
 fn setup_iptables(persist: bool) -> Result<()> {
@@ -117,18 +178,20 @@ fn setup_iptables(persist: bool) -> Result<()> {
 
     let main_if = detect_main_interface()?;
 
-    // Rules to add: (table, chain, args...)
+    // NAT: masquerade VM traffic going out to the internet.
     let nat_rule: &[&str] = &[
         "-t", "nat", "-A", "POSTROUTING",
         "-s", "10.0.0.0/16",
         "-o", &main_if,
         "-j", "MASQUERADE",
     ];
+    // Allow VMs to reach the internet.
     let fwd_out: &[&str] = &[
         "-I", "FORWARD",
         "-i", "br0", "-o", &main_if,
         "-j", "ACCEPT",
     ];
+    // Allow established/related return traffic back to VMs.
     let fwd_in: &[&str] = &[
         "-I", "FORWARD",
         "-i", &main_if, "-o", "br0",
@@ -136,28 +199,32 @@ fn setup_iptables(persist: bool) -> Result<()> {
         "-j", "ACCEPT",
     ];
 
-    // NOTE: We intentionally DO NOT add a blanket "br0 -o br0 ACCEPT" rule here.
-    // That rule would allow all VMs to communicate with each other, enabling:
-    //   - Lateral movement between VMs
-    //   - Data exfiltration from one tenant to another
-    //   - VM-to-VM attacks
+    // Defence-in-depth: explicitly DROP traffic routed between bridge ports
+    // (VM → VM).  This catches any scenario where br_netfilter is loaded but
+    // bridge port isolation is not set (e.g. TAPs created before this fix).
+    //
+    // When br_netfilter is active, bridge-internal packets traverse the
+    // FORWARD chain.  Inserting this rule at position 1 ensures it is
+    // evaluated before any more-permissive rules that Docker, Tailscale, or
+    // earlier manual setups may have added (e.g. a stale "br0 -o br0 ACCEPT").
     //
     // VMs can still reach:
     //   - The internet (via gateway 10.0.0.1 + NAT)
-    //   - The host (via 10.0.0.1)
+    //   - The host (10.0.0.1 is the bridge IP, not a bridge port)
     //
-    // VMs cannot reach:
-    //   - Other VMs on the same bridge (DROP by default FORWARD policy)
-    //
-    // If VM-to-VM communication is required for a specific use case, implement:
-    //   - Per-VM firewall rules (e.g., allow only specific VM pairs)
-    //   - Separate VLANs/bridges per tenant
-    //   - Application-level auth in the VMs themselves
+    // VMs cannot reach each other via:
+    //   - Layer 2 (bridge port isolation, set in network::create_tap)
+    //   - Layer 3 (this DROP rule, when br_netfilter is loaded)
+    let fwd_isolate: &[&str] = &[
+        "-I", "FORWARD",
+        "-i", "br0", "-o", "br0",
+        "-j", "DROP",
+    ];
 
-    for rule in &[nat_rule, fwd_out, fwd_in] {
+    for rule in &[nat_rule, fwd_out, fwd_in, fwd_isolate] {
         add_iptables_rule(rule)?;
     }
-    ok("iptables rules added (VM isolation enabled)");
+    ok("iptables rules added (VM-to-VM traffic blocked)");
 
     if persist {
         // Install iptables-persistent and save rules.
