@@ -11,49 +11,26 @@ This document covers the one-time host setup required before using the `minions`
 
 ## Baking the agent into the base image (one-time)
 
-After building the agent binary, inject it into the base image so every subsequent `minions create` is just a fast file copy:
+A single script handles everything: build, mount, inject, enable, unmount, and
+install the host CLI.
 
 ```bash
-# Build the agent (cross-compile for aarch64 if needed)
-cargo build --release -p minions-agent
-
-# Mount the base image
-sudo mkdir -p /tmp/minions-mount
-sudo mount -o loop /var/lib/minions/images/base-ubuntu.ext4 /tmp/minions-mount
-
-# Copy agent binary
-sudo cp target/release/minions-agent /tmp/minions-mount/usr/local/bin/minions-agent
-sudo chmod +x /tmp/minions-mount/usr/local/bin/minions-agent
-
-# Install systemd unit
-sudo tee /tmp/minions-mount/etc/systemd/system/minions-agent.service > /dev/null <<'EOF'
-[Unit]
-Description=Minions Guest Agent
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/minions-agent
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Enable the unit
-sudo ln -sf /etc/systemd/system/minions-agent.service \
-    /tmp/minions-mount/etc/systemd/system/multi-user.target.wants/minions-agent.service
-
-# Unmount
-sudo umount /tmp/minions-mount
+# On the minipc, from the repo root:
+sudo ./scripts/bake-agent.sh
 ```
 
-## Installing the `minions` CLI
+What the script does:
+1. `cargo build --release -p minions-agent -p minions`
+2. Installs `/usr/local/bin/minions` (host CLI) on the minipc
+3. Mounts the base image via loop device
+4. Copies the agent binary → `/usr/local/bin/minions-agent` inside the image
+5. Writes `/etc/systemd/system/minions-agent.service` inside the image
+6. Creates the `multi-user.target.wants` symlink to auto-start the agent
+7. Removes any leftover Phase-1 static network config
+8. Unmounts cleanly (even on failure, via `trap`)
 
-```bash
-cargo build --release -p minions
-sudo cp target/release/minions /usr/local/bin/minions
-```
+> **Re-baking after agent changes:** just re-run `sudo ./scripts/bake-agent.sh`.
+> The script is idempotent.
 
 ## Runtime directories
 
