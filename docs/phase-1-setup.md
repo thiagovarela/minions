@@ -98,14 +98,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /run/sshd
 RUN systemctl enable ssh
 
-# Set root password for testing (remove for production)
-RUN echo 'root:minions' | chpasswd
-
-# Allow root SSH with password (testing only)
-RUN sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-RUN sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+# SECURITY: Lock root password and disable password authentication
+# SSH access is only via public key injected by the host
+RUN passwd -l root
+RUN sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+RUN sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+RUN sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
 
 # Serial console for cloud-hypervisor
+# NOTE: Serial console is enabled for debugging/troubleshooting via
+# `minions logs <vmname>`. For production hardening, consider disabling
+# autologin and requiring authentication.
 RUN mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
 RUN echo '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root --noclear %I 115200 linux' \
     > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
@@ -270,9 +273,19 @@ ping -c 3 10.0.0.2
 
 ### SSH into the VM
 
+With the hardened base image, SSH requires a public key. The `minions` CLI
+automatically injects your SSH public key during VM creation. For manual testing
+at this stage, you would need to either:
+
+1. Inject an SSH key via the VSOCK agent (Phase 2+), or
+2. Access via serial console: `sudo minions logs <vmname>`
+
+For development/testing only, you can temporarily enable password auth by
+uncommenting the password lines in the Dockerfile above.
+
 ```bash
+# After VM creation with minions (Phase 3+), SSH will work automatically:
 ssh -o StrictHostKeyChecking=no root@10.0.0.2
-# Password: minions
 ```
 
 ### Inside the VM
