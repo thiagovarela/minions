@@ -6,10 +6,21 @@ use rusqlite::Connection;
 use std::time::Duration;
 use tracing::info;
 
+use minions_proto::Request;
+
 use crate::{agent, db, hypervisor, network, storage};
 
 /// Create a fully networked VM.
-pub async fn create(conn: &Connection, name: &str, vcpus: u32, memory_mb: u32) -> Result<db::Vm> {
+///
+/// `ssh_pubkey`: if Some, injected into `/root/.ssh/authorized_keys` inside the
+/// VM so that `minions ssh` works without a password.
+pub async fn create(
+    conn: &Connection,
+    name: &str,
+    vcpus: u32,
+    memory_mb: u32,
+    ssh_pubkey: Option<String>,
+) -> Result<db::Vm> {
     validate_name(name)?;
 
     if db::get_vm(conn, name)?.is_some() {
@@ -86,6 +97,25 @@ pub async fn create(conn: &Connection, name: &str, vcpus: u32, memory_mb: u32) -
     )
     .await
     .context("configure guest network")?;
+
+    // Inject SSH public key if provided.
+    if let Some(pubkey) = ssh_pubkey {
+        info!("injecting SSH public key into VM");
+        let script = format!(
+            "mkdir -p /root/.ssh && chmod 700 /root/.ssh && \
+             echo '{pubkey}' >> /root/.ssh/authorized_keys && \
+             chmod 600 /root/.ssh/authorized_keys"
+        );
+        agent::send_request(
+            &vsock_socket,
+            Request::Exec {
+                command: "sh".to_string(),
+                args: vec!["-c".to_string(), script],
+            },
+        )
+        .await
+        .context("inject SSH key")?;
+    }
 
     db::update_vm_status(conn, name, "running", None).context("update VM status to running")?;
 

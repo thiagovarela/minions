@@ -209,12 +209,17 @@ echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
 # Find the main outbound interface
 MAIN_IF=$(ip route show default | awk '{print $5}' | head -1)
 
-# Masquerade VM traffic
+# Masquerade VM traffic (outbound internet)
 sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/16 -o $MAIN_IF -j MASQUERADE
 
-# Allow forwarding between bridge and main interface
+# Allow forwarding: VM → internet and internet → VM (established)
 sudo iptables -I FORWARD -i br0 -o $MAIN_IF -j ACCEPT
 sudo iptables -I FORWARD -i $MAIN_IF -o br0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+# Allow VM-to-VM traffic on the bridge (required when br_netfilter is loaded)
+# br_netfilter routes intra-bridge traffic through the iptables FORWARD chain;
+# without this rule, VMs on the same host cannot reach each other.
+sudo iptables -I FORWARD -i br0 -o br0 -j ACCEPT
 ```
 
 ### 6c. Create a TAP device for the VM
@@ -321,6 +326,7 @@ MAIN_IF=$(ip route show default | awk '{print $5}' | head -1)
 sudo iptables -t nat -D POSTROUTING -s 10.0.0.0/16 -o $MAIN_IF -j MASQUERADE
 sudo iptables -D FORWARD -i br0 -o $MAIN_IF -j ACCEPT
 sudo iptables -D FORWARD -i $MAIN_IF -o br0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+sudo iptables -D FORWARD -i br0 -o br0 -j ACCEPT
 
 # Remove VM disk
 rm /var/lib/minions/vms/test-vm-rootfs.ext4

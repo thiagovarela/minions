@@ -113,7 +113,11 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Create { name, cpus, memory } => {
             println!("Creating VM '{name}'…");
-            let vm = vm::create(&conn, &name, cpus, memory).await?;
+            let ssh_pubkey = find_ssh_pubkey();
+            if ssh_pubkey.is_some() {
+                println!("  (SSH public key found — key-based SSH will work)");
+            }
+            let vm = vm::create(&conn, &name, cpus, memory, ssh_pubkey).await?;
             println!();
             println!("✓ VM '{name}' is running");
             println!("  IP:     {}", vm.ip);
@@ -194,14 +198,22 @@ async fn main() -> Result<()> {
         Commands::Ssh { name } => {
             let vm_rec = db::get_vm(&conn, &name)?
                 .with_context(|| format!("VM '{name}' not found"))?;
+
+            // Build ssh args; if SUDO_USER has a key, point at it explicitly.
+            let mut ssh_args: Vec<String> = vec![
+                "-o".into(),
+                "StrictHostKeyChecking=no".into(),
+                "-o".into(),
+                "UserKnownHostsFile=/dev/null".into(),
+            ];
+            if let Some(key_path) = find_ssh_identity_path() {
+                ssh_args.push("-i".into());
+                ssh_args.push(key_path);
+            }
+            ssh_args.push(format!("root@{}", vm_rec.ip));
+
             let status = Command::new("ssh")
-                .args([
-                    "-o",
-                    "StrictHostKeyChecking=no",
-                    "-o",
-                    "UserKnownHostsFile=/dev/null",
-                    &format!("root@{}", vm_rec.ip),
-                ])
+                .args(&ssh_args)
                 .status()
                 .context("exec ssh")?;
             std::process::exit(status.code().unwrap_or(1));
@@ -227,4 +239,53 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Find the SSH public key of the invoking user (works under sudo).
+/// Tries common key file names in the user's ~/.ssh directory.
+fn find_ssh_pubkey() -> Option<String> {
+    let ssh_dir = ssh_dir_for_invoking_user()?;
+    for name in &["id_ed25519.pub", "id_rsa.pub", "id_ecdsa.pub"] {
+        let path = ssh_dir.join(name);
+        if let Ok(key) = std::fs::read_to_string(&path) {
+            let key = key.trim().to_string();
+            if !key.is_empty() {
+                return Some(key);
+            }
+        }
+    }
+    None
+}
+
+/// Return the path to the private key identity file for the invoking user.
+fn find_ssh_identity_path() -> Option<String> {
+    let ssh_dir = ssh_dir_for_invoking_user()?;
+    for name in &["id_ed25519", "id_rsa", "id_ecdsa"] {
+        let path = ssh_dir.join(name);
+        if path.exists() {
+            return Some(path.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Return the ~/.ssh directory of the user who invoked sudo (or current user).
+fn ssh_dir_for_invoking_user() -> Option<std::path::PathBuf> {
+    // When running under sudo, SUDO_USER is the original user.
+    let user = std::env::var("SUDO_USER").ok().filter(|s| !s.is_empty());
+    if let Some(ref u) = user {
+        // Look up home directory via /etc/passwd.
+        if let Ok(content) = std::fs::read_to_string("/etc/passwd") {
+            for line in content.lines() {
+                let fields: Vec<&str> = line.splitn(7, ':').collect();
+                if fields.len() >= 6 && fields[0] == u {
+                    return Some(std::path::PathBuf::from(fields[5]).join(".ssh"));
+                }
+            }
+        }
+    }
+    // Fallback: current user's home.
+    std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".ssh"))
 }
