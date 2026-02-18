@@ -1,0 +1,14 @@
+[package]
+name = "minions-host"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "minions-host"
+path = "src/main.rs"
+
+[dependencies]
+minions-proto = { path = "../minions-proto" }
+tokio = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+anyhow = { workspace = true }

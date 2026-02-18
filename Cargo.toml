@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/minions-proto",
+    "crates/minions-agent",
+    "crates/minions-host",
+]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
