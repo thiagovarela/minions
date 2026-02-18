@@ -12,6 +12,7 @@ mod auth;
 mod client;
 mod dashboard;
 mod db;
+mod dns;
 mod hypervisor;
 mod init;
 mod metrics;

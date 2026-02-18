@@ -186,6 +186,47 @@ impl ApiClient {
         Ok(())
     }
 
+    // ── Custom Domains ────────────────────────────────────────────────────────
+
+    pub async fn add_custom_domain(&self, vm: &str, domain: &str) -> Result<CustomDomainInfo> {
+        #[derive(serde::Serialize)]
+        struct Req<'a> { domain: &'a str }
+        let resp = self
+            .auth(
+                self.client
+                    .post(format!("{}/api/vms/{}/domains", self.base_url, vm))
+                    .json(&Req { domain }),
+            )
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<CustomDomainInfo>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn list_custom_domains(&self, vm: &str) -> Result<Vec<CustomDomainInfo>> {
+        let resp = self
+            .auth(self.client.get(format!("{}/api/vms/{}/domains", self.base_url, vm)))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Vec<CustomDomainInfo>>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn remove_custom_domain(&self, vm: &str, domain: &str) -> Result<()> {
+        self.auth(
+            self.client
+                .delete(format!("{}/api/vms/{}/domains/{}", self.base_url, vm, domain)),
+        )
+        .send()
+        .await?
+        .error_for_status()?;
+        Ok(())
+    }
+
     // ── Metrics ───────────────────────────────────────────────────────────────
 
     pub async fn get_vm_metrics(&self, vm: &str) -> Result<serde_json::Value> {
@@ -318,6 +359,16 @@ pub struct SnapshotInfo {
     pub vm_name: String,
     pub name: String,
     pub size_bytes: Option<u64>,
+    pub created_at: String,
+}
+
+/// Custom domain metadata returned by the API.
+#[derive(Debug, Deserialize)]
+pub struct CustomDomainInfo {
+    pub id: String,
+    pub vm_name: String,
+    pub domain: String,
+    pub verified: bool,
     pub created_at: String,
 }
 
@@ -713,6 +764,63 @@ async fn execute(
             Ok(format!("✓ Snapshot '{}' deleted\r\n", snap_name))
         }
 
+        // ── domain ─────────────────────────────────────────────────────────
+        "domain" => {
+            if parts.len() < 2 {
+                return Ok("usage: domain <add|ls|rm> <vm> [domain]\r\n".to_string());
+            }
+            match parts[1] {
+                "add" => {
+                    if parts.len() < 4 {
+                        return Ok("usage: domain add <vm> <domain>\r\n  Example: domain add myvm www.example.com\r\n".to_string());
+                    }
+                    let vm_name = parts[2];
+                    let domain_name = parts[3];
+                    check_owns(api, vm_name, user).await?;
+                    match api.add_custom_domain(vm_name, domain_name).await {
+                        Ok(d) => {
+                            let status = if d.verified { "verified" } else { "pending" };
+                            Ok(format!(
+                                "✓ Custom domain '{}' added to VM '{}' ({})\r\n  Make sure your DNS has a CNAME pointing to {}.miniclankers.com\r\n  Access: https://{}\r\n",
+                                d.domain, d.vm_name, status, vm_name, d.domain
+                            ))
+                        }
+                        Err(e) => Ok(format!("✗ Failed to add domain: {}\r\n", e)),
+                    }
+                }
+                "ls" | "list" => {
+                    if parts.len() < 3 {
+                        return Ok("usage: domain ls <vm>\r\n".to_string());
+                    }
+                    let vm_name = parts[2];
+                    check_owns(api, vm_name, user).await?;
+                    let domains = api.list_custom_domains(vm_name).await?;
+                    if domains.is_empty() {
+                        return Ok(format!("No custom domains for VM '{}'\r\n", vm_name));
+                    }
+                    let mut out = format!("{:<40} {:<12}\r\n", "DOMAIN", "STATUS");
+                    out.push_str(&"-".repeat(55));
+                    out.push_str("\r\n");
+                    for d in &domains {
+                        let status = if d.verified { "verified" } else { "pending" };
+                        out.push_str(&format!("{:<40} {:<12}\r\n", d.domain, status));
+                    }
+                    Ok(out)
+                }
+                "rm" | "remove" => {
+                    if parts.len() < 4 {
+                        return Ok("usage: domain rm <vm> <domain>\r\n".to_string());
+                    }
+                    let vm_name = parts[2];
+                    let domain_name = parts[3];
+                    check_owns(api, vm_name, user).await?;
+                    api.remove_custom_domain(vm_name, domain_name).await?;
+                    Ok(format!("✓ Custom domain '{}' removed from VM '{}'\r\n", domain_name, vm_name))
+                }
+                _ => Ok("usage: domain <add|ls|rm> <vm> [domain]\r\n".to_string()),
+            }
+        }
+
         // ── help ───────────────────────────────────────────────────────────
         "help" | "--help" | "-h" => Ok(help()),
 
@@ -739,6 +847,10 @@ fn help() -> String {
         "  expose <vm> [--port N]          expose VM web server on port N (default 80)",
         "  set-public <vm>                 make VM web accessible without login",
         "  set-private <vm>                require login to access VM web (default)",
+        "",
+        "  domain add <vm> <domain>        add a custom domain (requires DNS CNAME setup)",
+        "  domain ls <vm>                  list custom domains for a VM",
+        "  domain rm <vm> <domain>         remove a custom domain",
         "",
         "  metrics <vm>                    show live CPU, memory, disk, network metrics",
         "  plan                            show your current plan and resource usage",

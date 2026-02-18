@@ -24,6 +24,8 @@ pub struct AppState {
     pub sessions: dashboard::DashboardSessions,
     /// Base domain for the proxy (e.g. "miniclankers.com"), or None if proxy not configured.
     pub domain: Option<Arc<String>>,
+    /// Host public IP address (for DNS verification of custom domains).
+    pub public_ip: Option<Arc<String>>,
 }
 
 /// Reconcile DB state with reality.
@@ -157,6 +159,7 @@ pub async fn serve(
         metrics: metrics_store,
         sessions: dashboard::DashboardSessions::new(),
         domain: domain.clone().map(Arc::new),
+        public_ip: public_ip.clone().map(Arc::new),
     };
 
     let app = api::router(state.clone())
