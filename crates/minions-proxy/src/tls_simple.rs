@@ -179,13 +179,18 @@ impl ResolvesServerCert for SniResolver {
             return Some(cert);
         }
 
-        // Fall back to wildcard for subdomains.
-        if let Some(subdomain) = sni.strip_suffix(&format!(".{}", self.base_domain)) {
-            if !subdomain.contains('.') {
-                let wildcard = format!("*.{}", self.base_domain);
-                if let Ok(cert) = self.load_and_cache(&wildcard) {
-                    return Some(cert);
-                }
+        // Fall back to wildcard for *.base_domain subdomains or the apex itself.
+        // Cloudflare Full mode terminates TLS at the edge, so using the wildcard
+        // cert for the apex is acceptable — the browser never sees it directly.
+        let is_our_subdomain = sni
+            .strip_suffix(&format!(".{}", self.base_domain))
+            .map_or(false, |sub| !sub.contains('.'));
+        let is_apex = sni == self.base_domain;
+
+        if is_our_subdomain || is_apex {
+            let wildcard = format!("*.{}", self.base_domain);
+            if let Ok(cert) = self.load_and_cache(&wildcard) {
+                return Some(cert);
             }
         }
 
