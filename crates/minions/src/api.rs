@@ -16,7 +16,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-use crate::{agent, auth, db, server::AppState, storage, vm};
+use crate::{agent, auth, db, metrics, server::AppState, storage, vm};
 use minions_proto::{Request as AgentRequest, Response as AgentResponse, ResponseData};
 
 // ── Router ────────────────────────────────────────────────────────────────────
@@ -49,6 +49,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/billing/plans", get(billing_plans))
         .route("/api/billing/subscription", get(billing_subscription))
         .route("/api/billing/plan", post(billing_set_plan))
+        // Per-VM metrics (authenticated)
+        .route("/api/vms/{name}/metrics", get(vm_metrics))
         // Add authentication middleware (checks Bearer token if MINIONS_API_KEY is set)
         .layer(middleware::from_fn_with_state(
             auth_config,
@@ -75,7 +77,12 @@ pub fn router(state: AppState) -> Router {
         );
     }
 
+    // `/metrics` is intentionally unauthenticated — standard Prometheus practice.
+    // It contains only operational data (counts, percentages), not user content.
+    let public = Router::new().route("/metrics", get(prometheus_metrics));
+
     router
+        .merge(public)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -805,5 +812,33 @@ async fn delete_snapshot(
                 internal(msg).into_response()
             }
         }
+    }
+}
+
+// ── Metrics handlers ───────────────────────────────────────────────────────────
+
+/// `GET /metrics` — Prometheus text format scrape endpoint (unauthenticated).
+async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let body = metrics::prometheus_text(&state.metrics);
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
+}
+
+/// `GET /api/vms/:name/metrics` — Per-VM metrics snapshot as JSON.
+async fn vm_metrics(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match state.metrics.get_vm(&name) {
+        Some(m) => Json(m).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("no metrics collected yet for VM '{name}' (is it running?)"),
+            }),
+        ).into_response(),
     }
 }

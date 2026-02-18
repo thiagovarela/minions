@@ -186,6 +186,19 @@ impl ApiClient {
         Ok(())
     }
 
+    // ── Metrics ───────────────────────────────────────────────────────────────
+
+    pub async fn get_vm_metrics(&self, vm: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .auth(self.client.get(format!("{}/api/vms/{}/metrics", self.base_url, vm)))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?;
+        Ok(resp)
+    }
+
     // ── Plan / subscription ───────────────────────────────────────────────────
 
     pub async fn get_subscription(&self, owner_id: &str) -> Result<SubscriptionInfo> {
@@ -571,6 +584,43 @@ async fn execute(
             ))
         }
 
+        // ── metrics ────────────────────────────────────────────────────────
+        "metrics" => {
+            if parts.len() < 2 {
+                return Ok("usage: metrics <vm>\r\n".to_string());
+            }
+            let vm_name = parts[1];
+            check_owns(api, vm_name, user).await?;
+            match api.get_vm_metrics(vm_name).await {
+                Ok(m) => {
+                    let get_f64 = |key: &str| m[key].as_f64().unwrap_or(0.0);
+                    let get_u64 = |key: &str| m[key].as_u64().unwrap_or(0);
+                    Ok(format!(
+                        "VM '{}' metrics\r\n\r\n\
+                         CPU:     {:.1}%\r\n\
+                         Memory:  {} / {} MiB ({:.1}%)\r\n\
+                         Disk:    {} / {} GiB\r\n\
+                         Net RX:  {:.2} MiB\r\n\
+                         Net TX:  {:.2} MiB\r\n\
+                         Load:    {:.2}\r\n\
+                         Uptime:  {}s\r\n",
+                        vm_name,
+                        get_f64("cpu_usage_percent"),
+                        get_u64("memory_used_mb"), get_u64("memory_total_mb"),
+                        if get_u64("memory_total_mb") > 0 {
+                            get_u64("memory_used_mb") as f64 / get_u64("memory_total_mb") as f64 * 100.0
+                        } else { 0.0 },
+                        get_u64("disk_used_gb"), get_u64("disk_total_gb"),
+                        get_u64("network_rx_bytes") as f64 / (1024.0 * 1024.0),
+                        get_u64("network_tx_bytes") as f64 / (1024.0 * 1024.0),
+                        get_f64("load_avg_1m"),
+                        get_u64("uptime_secs"),
+                    ))
+                }
+                Err(e) => Ok(format!("error fetching metrics: {e}\r\n")),
+            }
+        }
+
         // ── plan ──────────────────────────────────────────────────────────
         "plan" => {
             match api.get_subscription(&user.id).await {
@@ -690,6 +740,7 @@ fn help() -> String {
         "  set-public <vm>                 make VM web accessible without login",
         "  set-private <vm>                require login to access VM web (default)",
         "",
+        "  metrics <vm>                    show live CPU, memory, disk, network metrics",
         "  plan                            show your current plan and resource usage",
         "",
         "  snapshot <vm> [--name <n>]      create a snapshot (VM can be running or stopped)",

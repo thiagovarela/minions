@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use crate::{api, auth, db, hypervisor, network};
+use crate::{api, auth, db, hypervisor, metrics, network};
 
 /// Shared state passed to every HTTP handler.
 #[derive(Clone)]
@@ -18,6 +18,8 @@ pub struct AppState {
     /// Allowed CORS origins (e.g. `["https://app.example.com"]`).
     /// Empty means CORS is disabled. Set via `MINIONS_CORS_ORIGINS` env var.
     pub cors_origins: Vec<String>,
+    /// Shared metrics store updated by the background collector.
+    pub metrics: metrics::MetricsStore,
 }
 
 /// Reconcile DB state with reality.
@@ -134,11 +136,21 @@ pub async fn serve(
         None => warn!("⚠️  No SSH public key found — VMs will require manual key setup\n   Set MINIONS_SSH_PUBKEY_PATH=/path/to/key.pub or run 'minions init' to auto-detect"),
     }
 
+    // ── Metrics store + background collector ──────────────────────────────────
+    let metrics_store = metrics::MetricsStore::new();
+    let metrics_interval: u64 = std::env::var("MINIONS_METRICS_INTERVAL")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
+    metrics::spawn_collector(db_path.clone(), metrics_store.clone(), metrics_interval);
+    info!("✓ Metrics collector started (interval: {metrics_interval}s)");
+
     let state = AppState {
         db_path: Arc::new(db_path.clone()),
         ssh_pubkey: ssh_pubkey.map(Arc::new),
         auth,
         cors_origins,
+        metrics: metrics_store,
     };
 
     let app = api::router(state);

@@ -79,6 +79,19 @@ pub enum ResponseData {
         memory_used_mb: u64,
         disk_total_gb: u64,
         disk_used_gb: u64,
+        /// CPU usage percentage across all cores (0.0–100.0).
+        /// Measured over a ~100ms sample window.
+        #[serde(default)]
+        cpu_usage_percent: f64,
+        /// Total bytes received on eth0 since boot.
+        #[serde(default)]
+        network_rx_bytes: u64,
+        /// Total bytes transmitted on eth0 since boot.
+        #[serde(default)]
+        network_tx_bytes: u64,
+        /// 1-minute load average.
+        #[serde(default)]
+        load_avg_1m: f64,
     },
 }
 

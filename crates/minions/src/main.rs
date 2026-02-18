@@ -13,6 +13,7 @@ mod client;
 mod db;
 mod hypervisor;
 mod init;
+mod metrics;
 mod network;
 mod server;
 mod storage;
