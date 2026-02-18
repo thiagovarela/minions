@@ -1,0 +1,23 @@
+[package]
+name = "minions"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "minions"
+path = "src/main.rs"
+
+[dependencies]
+minions-proto = { path = "../minions-proto" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+nix = { version = "0.30", features = ["signal"] }
+libc = "0.2"
+chrono = "0.4"
+tabled = "0.17"

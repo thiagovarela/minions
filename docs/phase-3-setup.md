@@ -1,0 +1,114 @@
+# Phase 3 — VM Manager Setup
+
+This document covers the one-time host setup required before using the `minions` CLI.
+
+## Prerequisites
+
+- Phase 1/2 host setup complete (bridge `br0` at `10.0.0.1/16`, NAT, iptables)
+- `cloud-hypervisor` binary on `$PATH`
+- `/var/lib/minions/kernel/vmlinux` — the Linux kernel image for guests
+- `/var/lib/minions/images/base-ubuntu.ext4` — base rootfs **with agent pre-baked**
+
+## Baking the agent into the base image (one-time)
+
+After building the agent binary, inject it into the base image so every subsequent `minions create` is just a fast file copy:
+
+```bash
+# Build the agent (cross-compile for aarch64 if needed)
+cargo build --release -p minions-agent
+
+# Mount the base image
+sudo mkdir -p /tmp/minions-mount
+sudo mount -o loop /var/lib/minions/images/base-ubuntu.ext4 /tmp/minions-mount
+
+# Copy agent binary
+sudo cp target/release/minions-agent /tmp/minions-mount/usr/local/bin/minions-agent
+sudo chmod +x /tmp/minions-mount/usr/local/bin/minions-agent
+
+# Install systemd unit
+sudo tee /tmp/minions-mount/etc/systemd/system/minions-agent.service > /dev/null <<'EOF'
+[Unit]
+Description=Minions Guest Agent
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/minions-agent
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable the unit
+sudo ln -sf /etc/systemd/system/minions-agent.service \
+    /tmp/minions-mount/etc/systemd/system/multi-user.target.wants/minions-agent.service
+
+# Unmount
+sudo umount /tmp/minions-mount
+```
+
+## Installing the `minions` CLI
+
+```bash
+cargo build --release -p minions
+sudo cp target/release/minions /usr/local/bin/minions
+```
+
+## Runtime directories
+
+The CLI expects these paths to exist (created automatically on first use):
+
+| Path | Purpose |
+|------|---------|
+| `/var/lib/minions/state.db` | SQLite VM state |
+| `/var/lib/minions/vms/{name}/` | Per-VM rootfs and serial log |
+| `/run/minions/` | CH API and VSOCK sockets |
+
+## Usage
+
+```bash
+# Create a VM (default: 2 CPUs, 1024 MiB RAM)
+sudo minions create myvm
+
+# Create with custom resources
+sudo minions create bigvm --cpus 4 --memory 2048
+
+# List running VMs
+sudo minions list
+
+# Execute a command inside a VM
+sudo minions exec myvm -- uname -a
+
+# Open an interactive SSH session
+sudo minions ssh myvm
+
+# Show VM status from the agent
+sudo minions status myvm
+
+# Print the serial console log
+sudo minions logs myvm
+
+# Destroy a VM (graceful shutdown + full cleanup)
+sudo minions destroy myvm
+```
+
+## Architecture
+
+```
+crates/minions/
+└── src/
+    ├── main.rs        # CLI entry point (clap)
+    ├── vm.rs          # VM lifecycle orchestration
+    ├── hypervisor.rs  # CH process spawn + API client
+    ├── network.rs     # TAP create/destroy, MAC generation
+    ├── storage.rs     # Rootfs copy + serial log helpers
+    ├── agent.rs       # VSOCK client (connect, handshake, requests)
+    └── db.rs          # SQLite state management
+```
+
+## IP & CID pools
+
+- IP range: `10.0.0.2` – `10.0.0.254` (lowest unused allocated on `create`)
+- VSOCK CID range: `3` – `255` (lowest unused allocated on `create`)
+- MAC format: `52:54:00:00:{cid_high}:{cid_low}` (deterministic)
