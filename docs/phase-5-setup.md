@@ -42,7 +42,7 @@ briefly unreachable over SSH / VSOCK while the guest boots.
 sudo minions restart myvm
 
 # Remote
-minions --host http://minipc:3000 restart myvm
+minions --host http://vps-2b1e18f2:3000 restart myvm
 
 # JSON output
 sudo minions --json restart myvm
@@ -77,7 +77,7 @@ sudo minions destroy myvm   # or wait for it to stop
 sudo minions rename myvm production-api
 
 # Or via API
-curl -X POST http://minipc:3000/api/vms/myvm/rename \
+curl -X POST http://vps-2b1e18f2:3000/api/vms/myvm/rename \
   -H 'Content-Type: application/json' \
   -d '{"new_name": "production-api"}'
 ```
@@ -103,7 +103,7 @@ sudo minions cp myvm
 sudo minions cp myvm myvm-staging
 
 # Remote
-minions --host http://minipc:3000 cp myvm myvm-staging
+minions --host http://vps-2b1e18f2:3000 cp myvm myvm-staging
 
 # JSON output
 sudo minions --json cp myvm

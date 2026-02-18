@@ -2,7 +2,7 @@
 
 Building on Phase 1, we now have a guest agent that runs inside VMs and communicates with the host over VSOCK. The agent handles network configuration, health checks, command execution, and status reporting — all without needing to edit the rootfs for each VM.
 
-**Tested on:** minipc — AMD Ryzen 5 4500U, Ubuntu 24.04.4 LTS
+**Tested on:** vps-2b1e18f2 (OVH KVM VPS) — Ubuntu 25.04
 
 ---
 
@@ -44,14 +44,14 @@ minions-host CLI                              minions-agent (systemd service)
 ## Prerequisites
 
 Same as Phase 1, plus:
-- Rust toolchain on minipc (for building)
+- Rust toolchain on vps-2b1e18f2 (for building)
 - `git` to clone the minions repo
 
 ---
 
 ## Build
 
-On `minipc`:
+On `vps-2b1e18f2`:
 
 ```bash
 cd /tmp
@@ -297,7 +297,7 @@ Length-prefixed JSON frames:
 
 5. **Guest kernel needs `CONFIG_VIRTIO_VSOCKETS`** — The Cloud Hypervisor pre-built kernel already has this. Verify with `ls /dev/vsock` inside the VM.
 
-6. **Native build on minipc** — Cross-compiling from macOS with zig ran into CRT linking conflicts. Building natively on the target platform (x86_64 Linux) is simpler and faster for this project.
+6. **Native build on vps-2b1e18f2** — Cross-compiling from macOS with zig ran into CRT linking conflicts. Building natively on the target platform (x86_64 Linux) is simpler and faster for this project.
 
 ---
 

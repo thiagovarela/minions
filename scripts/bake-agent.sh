@@ -3,7 +3,7 @@
 # base Ubuntu rootfs image so every subsequent `minions create` gets the agent
 # for free.
 #
-# Must be run as root on the minipc (or any Linux host with loop-mount support).
+# Must be run as root on vps-2b1e18f2 (or any Linux host with loop-mount support).
 #
 # Usage:
 #   sudo ./scripts/bake-agent.sh

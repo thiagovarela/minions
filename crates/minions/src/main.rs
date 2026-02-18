@@ -31,7 +31,7 @@ struct Cli {
     #[arg(long, default_value = db::DB_PATH, global = true)]
     db: String,
 
-    /// Connect to a remote minions daemon (e.g. http://minipc:3000)
+    /// Connect to a remote minions daemon (e.g. http://vps-2b1e18f2:3000)
     /// When set, the CLI is a thin HTTP client — no sudo required.
     #[arg(long, global = true)]
     host: Option<String>,

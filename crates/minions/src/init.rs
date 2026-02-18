@@ -24,8 +24,11 @@ pub fn run(persist: bool) -> Result<()> {
     println!("    1. Copy base image:   /var/lib/minions/images/base-ubuntu.ext4");
     println!("    2. Copy kernel:       /var/lib/minions/kernel/vmlinux");
     println!("    3. Bake the agent:    sudo ./scripts/bake-agent.sh");
-    println!("    4. Start the daemon:  sudo systemctl enable --now minions");
-    println!("    5. Create a VM:       sudo minions create myvm");
+    println!("    4. Place TLS cert:    /var/lib/minions/certs/'*.yourdomain.com'/{{fullchain,privkey}}.pem");
+    println!("    5. Edit env:          /etc/minions/env  (set MINIONS_API_KEY)");
+    println!("    6. Edit unit:         /etc/systemd/system/minions.service  (set --domain, --public-ip)");
+    println!("    7. Start the daemon:  sudo systemctl enable --now minions");
+    println!("    8. Create a VM:       ssh -p 2222 minions@ssh.yourdomain.com new");
     println!("────────────────────────────────────────────");
 
     Ok(())
@@ -217,30 +220,57 @@ fn detect_main_interface() -> Result<String> {
 fn install_systemd_unit() -> Result<()> {
     info("installing minions.service systemd unit");
 
-    // Detect the invoking user's SSH public key so the daemon can inject it
-    // into new VMs.  The daemon runs as root (no SUDO_USER in its env), so we
-    // bake the path into the unit at install time.
-    let ssh_env_line = detect_user_ssh_pubkey_path()
-        .map(|p| format!("Environment=MINIONS_SSH_PUBKEY_PATH={p}\n"))
-        .unwrap_or_default();
+    // Write the environment file if it doesn't exist yet.
+    // This is where secrets live (API key, CF token, etc.) — separate from the unit
+    // so it can be updated without touching the unit file.
+    let env_dir = "/etc/minions";
+    let env_path = "/etc/minions/env";
+    std::fs::create_dir_all(env_dir)?;
+    if !std::path::Path::new(env_path).exists() {
+        // Detect SSH pubkey path for MINIONS_SSH_PUBKEY_PATH.
+        let ssh_pubkey_line = detect_user_ssh_pubkey_path()
+            .map(|p| format!("MINIONS_SSH_PUBKEY_PATH={p}\n"))
+            .unwrap_or_else(|| "# MINIONS_SSH_PUBKEY_PATH=/root/.ssh/authorized_keys\n".to_string());
 
-    let unit = format!(
-        r#"[Unit]
-Description=Minions VM Manager Daemon
-After=network.target
+        let env_content = format!(
+            "# Minions environment configuration\n\
+             # Set a strong random secret: openssl rand -hex 32\n\
+             MINIONS_API_KEY=\n\
+             {ssh_pubkey_line}\
+             # Cloudflare DNS API token (Zone:DNS:Edit) for DNS-01 wildcard cert provisioning\n\
+             # MINIONS_CF_DNS_TOKEN=\n"
+        );
+        std::fs::write(env_path, env_content)?;
+        // Restrict to root-only — contains secrets.
+        let _ = Command::new("chmod").args(["600", env_path]).status();
+        ok(format!("environment file created at {env_path} — fill in MINIONS_API_KEY"));
+    } else {
+        ok(format!("environment file already exists at {env_path}"));
+    }
+
+    // The unit uses EnvironmentFile so secrets stay out of `systemctl cat` output.
+    let unit = r#"[Unit]
+Description=Minions VM Manager Daemon + SSH Gateway + HTTPS Proxy
+After=network-online.target systemd-networkd.service
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/minions serve
-{ssh_env_line}Restart=always
+ExecStart=/usr/local/bin/minions serve \
+    --ssh-bind 0.0.0.0:2222 \
+    --proxy-bind 0.0.0.0:443 \
+    --http-bind 0.0.0.0:80 \
+    --domain miniclankers.com \
+    --acme-email admin@miniclankers.com
+EnvironmentFile=-/etc/minions/env
+Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
-"#
-    );
+"#;
 
     std::fs::write(SYSTEMD_UNIT_PATH, unit)
         .with_context(|| format!("write {SYSTEMD_UNIT_PATH}"))?;
@@ -252,7 +282,9 @@ WantedBy=multi-user.target
 
     ok(format!(
         "systemd unit installed at {SYSTEMD_UNIT_PATH}\n  \
-         Enable with: sudo systemctl enable --now minions"
+         Edit the unit to set --domain, --public-ip, --acme-email.\n  \
+         Fill in /etc/minions/env with MINIONS_API_KEY.\n  \
+         Then: sudo systemctl enable --now minions"
     ));
     Ok(())
 }

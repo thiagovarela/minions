@@ -15,13 +15,13 @@ A single script handles everything: build, mount, inject, enable, unmount, and
 install the host CLI.
 
 ```bash
-# On the minipc, from the repo root:
+# On vps-2b1e18f2, from the repo root:
 sudo ./scripts/bake-agent.sh
 ```
 
 What the script does:
 1. `cargo build --release -p minions-agent -p minions`
-2. Installs `/usr/local/bin/minions` (host CLI) on the minipc
+2. Installs `/usr/local/bin/minions` (host CLI) on vps-2b1e18f2
 3. Mounts the base image via loop device
 4. Copies the agent binary → `/usr/local/bin/minions-agent` inside the image
 5. Writes `/etc/systemd/system/minions-agent.service` inside the image
