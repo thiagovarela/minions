@@ -108,6 +108,18 @@ impl Client {
         Ok(())
     }
 
+    pub async fn start_vm(&self, name: &str) -> Result<VmResponse> {
+        self.auth(self.http.post(format!("{}/api/vms/{name}/start", self.base)))
+            .send()
+            .await
+            .context("send start request")?
+            .error_for_status()
+            .context("start VM")?
+            .json()
+            .await
+            .context("decode start response")
+    }
+
     pub async fn stop_vm(&self, name: &str) -> Result<VmResponse> {
         self.auth(self.http.post(format!("{}/api/vms/{name}/stop", self.base)))
             .send()

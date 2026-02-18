@@ -30,6 +30,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/vms", get(list_vms))
         .route("/api/vms/{name}", get(get_vm))
         .route("/api/vms/{name}", delete(destroy_vm))
+        .route("/api/vms/{name}/start", post(start_vm))
         .route("/api/vms/{name}/stop", post(stop_vm))
         .route("/api/vms/{name}/restart", post(restart_vm))
         .route("/api/vms/{name}/rename", post(rename_vm))
@@ -337,6 +338,28 @@ async fn stop_vm(
             if msg.contains("VM '") && msg.contains("' not found") {
                 not_found(&name).into_response()
             } else if msg.contains("already stopped") {
+                bad_request(msg).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
+    }
+}
+
+/// `POST /api/vms/:name/start` — Start a stopped VM using its existing rootfs.
+async fn start_vm(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    info!(name = %name, "start VM");
+    let db_path = state.db_path.as_str().to_string();
+    match vm::start(&db_path, &name).await {
+        Ok(v) => Json(VmResponse::from(v)).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("VM '") && msg.contains("' not found") {
+                not_found(&name).into_response()
+            } else if msg.contains("not stopped") {
                 bad_request(msg).into_response()
             } else {
                 internal(msg).into_response()

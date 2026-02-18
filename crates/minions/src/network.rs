@@ -34,6 +34,20 @@ pub fn create_tap(name: &str) -> Result<String> {
     Ok(tap)
 }
 
+/// Create a TAP device with an exact device name (used when restarting a
+/// stopped VM whose tap name is already stored in the DB).
+pub fn create_tap_named(tap: &str) -> Result<String> {
+    run("ip", &["tuntap", "add", "dev", tap, "mode", "tap"])
+        .with_context(|| format!("create TAP {tap}"))?;
+    run("ip", &["link", "set", tap, "master", "br0"])
+        .with_context(|| format!("attach {tap} to br0"))?;
+    run("bridge", &["link", "set", "dev", tap, "isolated", "on"])
+        .with_context(|| format!("set bridge port isolation on {tap}"))?;
+    run("ip", &["link", "set", tap, "up"])
+        .with_context(|| format!("bring up {tap}"))?;
+    Ok(tap.to_string())
+}
+
 /// Delete a TAP device by VM name (derives the tap device name).
 pub fn destroy_tap(name: &str) -> Result<()> {
     destroy_tap_device(&tap_name(name))

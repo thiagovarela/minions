@@ -191,6 +191,7 @@ pub fn router() -> Router<AppState> {
         .route("/dashboard/vms-fragment", get(vms_fragment))
         .route("/dashboard/vms/{name}", get(vm_detail))
         .route("/dashboard/vms/{name}/metrics-fragment", get(metrics_fragment_handler))
+        .route("/dashboard/vms/{name}/start", post(vm_start))
         .route("/dashboard/vms/{name}/restart", post(vm_restart))
         .route("/dashboard/vms/{name}/stop", post(vm_stop))
         .route("/dashboard/vms/{name}/snapshot", post(vm_snapshot))
@@ -344,6 +345,24 @@ async fn vm_stop(
     let db_path = state.db_path.as_ref().clone();
     match vm::stop(&db_path, &name).await {
         Ok(_) => Html("<span class='text-green-400 text-sm'>✓ VM stopped</span>").into_response(),
+        Err(e) => Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
+    }
+}
+
+async fn vm_start(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Response {
+    if check_session(&headers, &state.sessions).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let db_path = state.db_path.as_ref().clone();
+    match vm::start(&db_path, &name).await {
+        Ok(_) => {
+            // Redirect back to the VM detail page so the status badge refreshes.
+            Redirect::to(&format!("/dashboard/vms/{name}")).into_response()
+        }
         Err(e) => Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
     }
 }

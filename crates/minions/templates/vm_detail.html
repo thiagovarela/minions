@@ -27,6 +27,15 @@
 
 <!-- Action buttons -->
 <div class="flex gap-2 mb-8" id="action-result">
+  {% if vm_status == "stopped" %}
+  <button
+    hx-post="/dashboard/vms/{{ vm_name }}/start"
+    hx-target="#action-result"
+    hx-swap="innerHTML"
+    class="rounded-lg bg-green-700 hover:bg-green-600 px-4 py-2 text-sm font-medium text-white transition">
+    ▶ Start
+  </button>
+  {% endif %}
   {% if vm_status == "running" %}
   <button
     hx-post="/dashboard/vms/{{ vm_name }}/stop"

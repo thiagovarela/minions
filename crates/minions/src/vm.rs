@@ -203,6 +203,103 @@ pub async fn stop(db_path: &str, name: &str) -> Result<db::Vm> {
     db::get_vm(&conn, name)?.with_context(|| format!("VM '{name}' vanished after stop"))
 }
 
+/// Start a stopped VM using its existing rootfs and stored configuration.
+///
+/// Recreates the TAP device (destroyed on stop), spawns cloud-hypervisor with
+/// the original rootfs, reconfigures the guest network at the same IP, and
+/// marks the VM as running.  The rootfs is preserved exactly as it was when
+/// the VM was stopped — no data is lost.
+pub async fn start(db_path: &str, name: &str) -> Result<db::Vm> {
+    // ── Sync: validate + build config from stored state ───────────────────────
+    let (ip, vsock_socket, tap, cfg) = {
+        let conn = db::open(db_path)?;
+        let vm = db::get_vm(&conn, name)?
+            .with_context(|| format!("VM '{name}' not found"))?;
+
+        if vm.status != "stopped" {
+            anyhow::bail!("VM '{name}' is not stopped (status: {})", vm.status);
+        }
+
+        network::check_bridge().context("bridge check")?;
+        hypervisor::ensure_run_dir()?;
+
+        // Re-create TAP using the stored device name (handles renames correctly).
+        let tap = network::create_tap_named(&vm.tap_device)
+            .with_context(|| format!("recreate TAP device '{}'", vm.tap_device))?;
+
+        let serial_log = storage::serial_log_path(name);
+        let api_socket = std::path::PathBuf::from(&vm.ch_api_socket);
+        let vsock_socket = std::path::PathBuf::from(&vm.ch_vsock_socket);
+
+        let cfg = hypervisor::VmConfig {
+            name: name.to_string(),
+            vcpus: vm.vcpus,
+            memory_mb: vm.memory_mb,
+            mac: vm.mac_address.clone(),
+            cid: vm.vsock_cid,
+            rootfs: std::path::PathBuf::from(&vm.rootfs_path),
+            tap: tap.clone(),
+            api_socket,
+            vsock_socket: vsock_socket.clone(),
+            serial_log,
+        };
+
+        db::update_vm_status(&conn, name, "starting", None)?;
+
+        (vm.ip.clone(), vsock_socket, tap, cfg)
+        // conn dropped here
+    };
+
+    // ── Async: spawn CH, wait for agent, configure network ───────────────────
+    let result = async {
+        let pid = hypervisor::spawn(&cfg).context("spawn cloud-hypervisor")?;
+        info!("cloud-hypervisor PID={pid}");
+
+        {
+            let conn = db::open(db_path)?;
+            db::update_vm_status(&conn, name, "starting", Some(pid as i64))?;
+        }
+
+        info!("waiting for agent to become ready…");
+        agent::wait_ready(&vsock_socket, Duration::from_secs(60))
+            .await
+            .context("wait for agent ready")?;
+
+        info!("agent ready, reconfiguring network at {ip}");
+        agent::configure_network(
+            &vsock_socket,
+            &format!("{ip}/16"),
+            "10.0.0.1",
+            vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()],
+        )
+        .await
+        .context("configure guest network")?;
+
+        anyhow::Ok(())
+    }
+    .await;
+
+    // ── Rollback on failure ───────────────────────────────────────────────────
+    if let Err(e) = result {
+        info!("start failed ({e:#}), rolling back…");
+        let pid = {
+            let conn = db::open(db_path).ok();
+            conn.and_then(|c| db::get_vm(&c, name).ok().flatten()).and_then(|v| v.ch_pid)
+        };
+        let _ = hypervisor::shutdown(name, pid);
+        let _ = network::destroy_tap_device(&tap);
+        if let Ok(conn) = db::open(db_path) {
+            let _ = db::update_vm_status(&conn, name, "stopped", None);
+        }
+        return Err(e);
+    }
+
+    // ── Mark running ──────────────────────────────────────────────────────────
+    let conn = db::open(db_path)?;
+    db::update_vm_status(&conn, name, "running", None)?;
+    db::get_vm(&conn, name)?.with_context(|| format!("VM '{name}' vanished after start"))
+}
+
 /// Destroy a VM: shutdown CH, delete TAP, delete rootfs, remove DB row.
 ///
 /// Uses stored socket and TAP paths from the DB so it works correctly even
