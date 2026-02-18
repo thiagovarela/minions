@@ -75,10 +75,6 @@ fn migrate(conn: &Connection) -> Result<()> {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_vms_cid_active
             ON vms(vsock_cid) WHERE status != 'stopped';
 
-        -- Index for efficient per-owner VM lookups.
-        CREATE INDEX IF NOT EXISTS idx_vms_owner
-            ON vms(owner_id) WHERE owner_id IS NOT NULL;
-
         -- Custom domains table (for user-provided domains).
         CREATE TABLE IF NOT EXISTS custom_domains (
             id          TEXT PRIMARY KEY,
@@ -96,6 +92,10 @@ fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN proxy_port   INTEGER NOT NULL DEFAULT 80;");
     let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN proxy_public  INTEGER NOT NULL DEFAULT 0;");
     let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN owner_id      TEXT;");
+    // Index on owner_id — must come after the column exists (idempotent).
+    let _ = conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_vms_owner ON vms(owner_id) WHERE owner_id IS NOT NULL;",
+    );
 
     Ok(())
 }
