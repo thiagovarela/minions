@@ -5,10 +5,10 @@
 //! and node agents run on separate machines.
 
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
     routing::{delete, get, post},
-    Json, Router,
 };
 use minions_db as db;
 use serde::{Deserialize, Serialize};
@@ -170,13 +170,16 @@ async fn exec_vm(
     Path(name): Path<String>,
     Json(req): Json<ExecRequest>,
 ) -> Result<Json<minions_proto::Response>, AppError> {
-    info!("Executing command in VM {}: {} {:?}", name, req.command, req.args);
-    
+    info!(
+        "Executing command in VM {}: {} {:?}",
+        name, req.command, req.args
+    );
+
     // Get VM vsock socket
     let vsock_socket = {
         let conn = db::open(&state.db_path)?;
-        let vm = db::get_vm(&conn, &name)?
-            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
+        let vm =
+            db::get_vm(&conn, &name)?.ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
         std::path::PathBuf::from(vm.ch_vsock_socket)
     };
 

@@ -163,7 +163,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE vms ADD COLUMN proxy_public  INTEGER NOT NULL DEFAULT 0;");
     let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN owner_id      TEXT;");
     let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN host_id       TEXT;");
-    
+
     // Index on owner_id — must come after the column exists (idempotent).
     let _ = conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_vms_owner ON vms(owner_id) WHERE owner_id IS NOT NULL;",

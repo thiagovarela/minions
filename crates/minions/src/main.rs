@@ -806,7 +806,8 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
                     db::get_vm(&conn, &name)?.with_context(|| format!("VM '{name}' not found"))?;
                 std::path::PathBuf::from(vm_rec.ch_vsock_socket)
             };
-            let response = minions_node::agent::send_request(&vsock_socket, Request::ReportStatus).await?;
+            let response =
+                minions_node::agent::send_request(&vsock_socket, Request::ReportStatus).await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
 
@@ -905,19 +906,22 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
                     created_at: chrono::Utc::now().to_rfc3339(),
                 };
                 db::insert_host(&conn, &host)?;
-                
+
                 if json {
                     println!("{}", serde_json::to_string_pretty(&host)?);
                 } else {
                     println!("✓ Host '{name}' added successfully");
                     println!("  Address: {address}:{port}");
-                    println!("  Capacity: {} vCPUs, {} MB RAM, {} GB disk", vcpus, memory, disk);
+                    println!(
+                        "  Capacity: {} vCPUs, {} MB RAM, {} GB disk",
+                        vcpus, memory, disk
+                    );
                 }
             }
             HostCommands::List => {
                 let conn = db::open(db_path)?;
                 let hosts = db::list_hosts(&conn)?;
-                
+
                 if json {
                     println!("{}", serde_json::to_string_pretty(&hosts)?);
                 } else {
@@ -936,7 +940,7 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
                             #[tabled(rename = "Disk")]
                             disk: String,
                         }
-                        
+
                         let rows: Vec<HostRow> = hosts
                             .iter()
                             .map(|h| HostRow {
@@ -944,7 +948,10 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
                                 address: format!("{}:{}", h.address, h.api_port),
                                 status: h.status.clone(),
                                 vcpus: format!("{}/{}", h.available_vcpus, h.total_vcpus),
-                                memory: format!("{}/{} MB", h.available_memory_mb, h.total_memory_mb),
+                                memory: format!(
+                                    "{}/{} MB",
+                                    h.available_memory_mb, h.total_memory_mb
+                                ),
                                 disk: format!("{}/{} GB", h.available_disk_gb, h.total_disk_gb),
                             })
                             .collect();
@@ -957,10 +964,13 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
                 let host = db::get_host(&conn, &name)?
                     .or_else(|| {
                         // Try lookup by name
-                        db::list_hosts(&conn).ok()?.into_iter().find(|h| h.name == name)
+                        db::list_hosts(&conn)
+                            .ok()?
+                            .into_iter()
+                            .find(|h| h.name == name)
                     })
                     .with_context(|| format!("Host '{name}' not found"))?;
-                
+
                 if json {
                     println!("{}", serde_json::to_string_pretty(&host)?);
                 } else {
@@ -969,8 +979,14 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
                     println!("  Address: {}:{}", host.address, host.api_port);
                     println!("  Status: {}", host.status);
                     println!("  vCPUs: {}/{}", host.available_vcpus, host.total_vcpus);
-                    println!("  Memory: {}/{} MB", host.available_memory_mb, host.total_memory_mb);
-                    println!("  Disk: {}/{} GB", host.available_disk_gb, host.total_disk_gb);
+                    println!(
+                        "  Memory: {}/{} MB",
+                        host.available_memory_mb, host.total_memory_mb
+                    );
+                    println!(
+                        "  Disk: {}/{} GB",
+                        host.available_disk_gb, host.total_disk_gb
+                    );
                     if let Some(ref heartbeat) = host.last_heartbeat {
                         println!("  Last Heartbeat: {}", heartbeat);
                     }
@@ -981,15 +997,15 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
                     println!("Removing host '{name}'…");
                 }
                 let conn = db::open(db_path)?;
-                
+
                 // Find host by name
                 let host = db::list_hosts(&conn)?
                     .into_iter()
                     .find(|h| h.name == name)
                     .with_context(|| format!("Host '{name}' not found"))?;
-                
+
                 db::delete_host(&conn, &host.id)?;
-                
+
                 if json {
                     println!(
                         "{}",
