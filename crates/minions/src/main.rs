@@ -1,10 +1,12 @@
 //! `minions` — VM lifecycle CLI + daemon for cloud-hypervisor guests.
 
 use anyhow::{Context, Result};
+use chrono;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use std::process::Command;
 use tabled::{Table, Tabled};
+use uuid;
 
 mod api;
 mod auth;
@@ -133,6 +135,11 @@ enum Commands {
         #[command(subcommand)]
         action: SnapshotCommands,
     },
+    /// Manage hosts (multi-host deployments)
+    Host {
+        #[command(subcommand)]
+        action: HostCommands,
+    },
     /// One-time host setup: bridge, iptables, directories, systemd unit
     Init {
         /// Also persist networking across reboots (sysctl + iptables-persistent)
@@ -169,6 +176,42 @@ enum SnapshotCommands {
         vm: String,
         /// Snapshot name
         snapshot: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum HostCommands {
+    /// Register a new host
+    Add {
+        /// Host name
+        name: String,
+        /// Host address (IP or hostname)
+        #[arg(long)]
+        address: String,
+        /// API port
+        #[arg(long, default_value_t = 5001)]
+        port: u16,
+        /// Total vCPUs
+        #[arg(long, default_value_t = 32)]
+        vcpus: u32,
+        /// Total memory in MB
+        #[arg(long, default_value_t = 32768)]
+        memory: u32,
+        /// Total disk in GB
+        #[arg(long, default_value_t = 500)]
+        disk: u32,
+    },
+    /// List all hosts
+    List,
+    /// Show host status
+    Status {
+        /// Host name
+        name: String,
+    },
+    /// Remove a host (must have no VMs)
+    Remove {
+        /// Host name
+        name: String,
     },
 }
 
@@ -829,6 +872,131 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
                     );
                 } else {
                     println!("✓ Snapshot '{snapshot}' deleted");
+                }
+            }
+        },
+
+        Commands::Host { action } => match action {
+            HostCommands::Add {
+                name,
+                address,
+                port,
+                vcpus,
+                memory,
+                disk,
+            } => {
+                if !json {
+                    println!("Adding host '{name}' at {address}:{port}…");
+                }
+                let conn = db::open(db_path)?;
+                let host = db::Host {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: name.clone(),
+                    address: address.clone(),
+                    api_port: port,
+                    status: "active".to_string(),
+                    total_vcpus: vcpus,
+                    total_memory_mb: memory,
+                    total_disk_gb: disk,
+                    available_vcpus: vcpus,
+                    available_memory_mb: memory,
+                    available_disk_gb: disk,
+                    last_heartbeat: Some(chrono::Utc::now().to_rfc3339()),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                };
+                db::insert_host(&conn, &host)?;
+                
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&host)?);
+                } else {
+                    println!("✓ Host '{name}' added successfully");
+                    println!("  Address: {address}:{port}");
+                    println!("  Capacity: {} vCPUs, {} MB RAM, {} GB disk", vcpus, memory, disk);
+                }
+            }
+            HostCommands::List => {
+                let conn = db::open(db_path)?;
+                let hosts = db::list_hosts(&conn)?;
+                
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&hosts)?);
+                } else {
+                    if hosts.is_empty() {
+                        println!("No hosts registered");
+                    } else {
+                        #[derive(Tabled)]
+                        struct HostRow {
+                            name: String,
+                            address: String,
+                            status: String,
+                            #[tabled(rename = "vCPUs")]
+                            vcpus: String,
+                            #[tabled(rename = "Memory")]
+                            memory: String,
+                            #[tabled(rename = "Disk")]
+                            disk: String,
+                        }
+                        
+                        let rows: Vec<HostRow> = hosts
+                            .iter()
+                            .map(|h| HostRow {
+                                name: h.name.clone(),
+                                address: format!("{}:{}", h.address, h.api_port),
+                                status: h.status.clone(),
+                                vcpus: format!("{}/{}", h.available_vcpus, h.total_vcpus),
+                                memory: format!("{}/{} MB", h.available_memory_mb, h.total_memory_mb),
+                                disk: format!("{}/{} GB", h.available_disk_gb, h.total_disk_gb),
+                            })
+                            .collect();
+                        println!("{}", Table::new(rows));
+                    }
+                }
+            }
+            HostCommands::Status { name } => {
+                let conn = db::open(db_path)?;
+                let host = db::get_host(&conn, &name)?
+                    .or_else(|| {
+                        // Try lookup by name
+                        db::list_hosts(&conn).ok()?.into_iter().find(|h| h.name == name)
+                    })
+                    .with_context(|| format!("Host '{name}' not found"))?;
+                
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&host)?);
+                } else {
+                    println!("Host: {}", host.name);
+                    println!("  ID: {}", host.id);
+                    println!("  Address: {}:{}", host.address, host.api_port);
+                    println!("  Status: {}", host.status);
+                    println!("  vCPUs: {}/{}", host.available_vcpus, host.total_vcpus);
+                    println!("  Memory: {}/{} MB", host.available_memory_mb, host.total_memory_mb);
+                    println!("  Disk: {}/{} GB", host.available_disk_gb, host.total_disk_gb);
+                    if let Some(ref heartbeat) = host.last_heartbeat {
+                        println!("  Last Heartbeat: {}", heartbeat);
+                    }
+                }
+            }
+            HostCommands::Remove { name } => {
+                if !json {
+                    println!("Removing host '{name}'…");
+                }
+                let conn = db::open(db_path)?;
+                
+                // Find host by name
+                let host = db::list_hosts(&conn)?
+                    .into_iter()
+                    .find(|h| h.name == name)
+                    .with_context(|| format!("Host '{name}' not found"))?;
+                
+                db::delete_host(&conn, &host.id)?;
+                
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "message": format!("Host '{name}' removed") })
+                    );
+                } else {
+                    println!("✓ Host '{name}' removed");
                 }
             }
         },
