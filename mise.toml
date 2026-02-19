@@ -1,2 +1,2 @@
-[tools]
-zig = "0.15.2"
+# No build tools required in mise — use musl-cross from Homebrew
+# Install: brew install FiloSottile/musl-cross/musl-cross

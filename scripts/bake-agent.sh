@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# bake-agent.sh — Build minions-agent and inject it (+ systemd unit) into the
-# base Ubuntu rootfs image so every subsequent `minions create` gets the agent
-# for free.
+# bake-agent.sh — Inject minions-agent (+ systemd unit) into the base Ubuntu
+# rootfs image so every subsequent `minions create` gets the agent for free.
 #
 # Must be run as root on vps-2b1e18f2 (or any Linux host with loop-mount support).
 #
+# Prerequisites:
+#   - Pre-built binaries installed (run install.sh first or set BINARIES_DIR)
+#   - Base rootfs image at /var/lib/minions/images/base-ubuntu.ext4
+#
 # Usage:
 #   sudo ./scripts/bake-agent.sh
+#   sudo BINARIES_DIR=/path/to/extracted/release ./scripts/bake-agent.sh
 #
 # What it does:
-#   1. Builds minions-agent (and the minions CLI) with `cargo build --release`
+#   1. Verifies minions and minions-agent binaries are available
 #   2. Mounts /var/lib/minions/images/base-ubuntu.ext4 via a loop device
 #   3. Copies the agent binary to /usr/local/bin/minions-agent inside the image
 #   4. Writes the systemd unit /etc/systemd/system/minions-agent.service
@@ -25,7 +29,7 @@ set -euo pipefail
 # ── Configuration ────────────────────────────────────────────────────────────
 BASE_IMAGE="${BASE_IMAGE:-/var/lib/minions/images/base-ubuntu.ext4}"
 MOUNT_DIR="${MOUNT_DIR:-/tmp/minions-bake-mount}"
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BINARIES_DIR="${BINARIES_DIR:-/usr/local/bin}"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 info()  { echo "  [bake] $*"; }
@@ -47,42 +51,28 @@ trap cleanup EXIT
 [[ -f "$BASE_IMAGE" ]] || fail "base image not found: $BASE_IMAGE
   Build it first with docs/phase-1-setup.md"
 
-# cargo may live in the invoking user's ~/.cargo/bin (sudo strips PATH)
-if ! command -v cargo >/dev/null 2>&1; then
-    SUDO_USER="${SUDO_USER:-}"
-    if [[ -n "$SUDO_USER" ]]; then
-        CARGO_HOME_CANDIDATE="$(getent passwd "$SUDO_USER" | cut -d: -f6)/.cargo/bin"
-        if [[ -x "$CARGO_HOME_CANDIDATE/cargo" ]]; then
-            export PATH="$CARGO_HOME_CANDIDATE:$PATH"
-        fi
-    fi
-fi
-command -v cargo >/dev/null 2>&1 || fail "cargo not found — install Rust: https://rustup.rs"
+# ── Step 1: Verify binaries ───────────────────────────────────────────────────
+info "verifying pre-built binaries in $BINARIES_DIR…"
 
-# ── Step 1: Build ─────────────────────────────────────────────────────────────
-info "building minions-agent and minions CLI…"
-cd "$REPO_ROOT"
+AGENT_BIN="$BINARIES_DIR/minions-agent"
+MINIONS_BIN="$BINARIES_DIR/minions"
 
-# Run as the repo owner, not root, to avoid polluting root's cargo cache.
-REPO_OWNER="$(stat -c '%U' "$REPO_ROOT")"
-if [[ "$REPO_OWNER" != "root" ]]; then
-    sudo -u "$REPO_OWNER" env PATH="$PATH" cargo build --release -p minions-agent -p minions
+[[ -f "$AGENT_BIN" ]]  || fail "minions-agent binary not found at $AGENT_BIN
+  Install binaries first: curl -sSL https://raw.githubusercontent.com/thiagovarela/minions/main/scripts/install.sh | bash"
+
+[[ -f "$MINIONS_BIN" ]] || fail "minions binary not found at $MINIONS_BIN
+  Install binaries first: curl -sSL https://raw.githubusercontent.com/thiagovarela/minions/main/scripts/install.sh | bash"
+
+ok "found $(du -sh "$AGENT_BIN" | cut -f1) agent, $(du -sh "$MINIONS_BIN" | cut -f1) CLI"
+
+# ── Step 2: Verify minions CLI on the host ────────────────────────────────────
+if [[ "$BINARIES_DIR" != "/usr/local/bin" ]] && [[ ! -x "/usr/local/bin/minions" ]]; then
+    info "installing minions CLI → /usr/local/bin/minions"
+    install -m 0755 "$MINIONS_BIN" /usr/local/bin/minions
+    ok "minions CLI installed"
 else
-    cargo build --release -p minions-agent -p minions
+    ok "minions CLI already available"
 fi
-
-AGENT_BIN="$REPO_ROOT/target/release/minions-agent"
-MINIONS_BIN="$REPO_ROOT/target/release/minions"
-
-[[ -f "$AGENT_BIN" ]]  || fail "build produced no minions-agent binary"
-[[ -f "$MINIONS_BIN" ]] || fail "build produced no minions binary"
-
-ok "built $(du -sh "$AGENT_BIN" | cut -f1) agent, $(du -sh "$MINIONS_BIN" | cut -f1) CLI"
-
-# ── Step 2: Install minions CLI on the host ────────────────────────────────────
-info "installing minions CLI → /usr/local/bin/minions"
-install -m 0755 "$MINIONS_BIN" /usr/local/bin/minions
-ok "minions CLI installed"
 
 # ── Step 3: Mount base image ──────────────────────────────────────────────────
 info "mounting base image $BASE_IMAGE → $MOUNT_DIR"
