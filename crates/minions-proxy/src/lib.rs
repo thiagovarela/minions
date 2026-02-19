@@ -23,11 +23,10 @@ use tracing::{info, warn};
 pub mod auth;
 pub mod db;
 pub mod proxy;
-// Full ACME implementation (work in progress)
-// pub mod tls;
-// Simplified TLS with manual cert provisioning (for initial deployment)
+pub mod tls;
+// Simplified TLS with manual cert provisioning (deprecated, kept for reference)
+#[allow(dead_code)]
 pub mod tls_simple;
-pub use tls_simple as tls;
 
 pub use proxy::AppState;
 

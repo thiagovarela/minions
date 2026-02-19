@@ -29,8 +29,7 @@ subtle = { workspace = true }
 # TLS and ACME support
 rustls = { version = "0.23", features = ["ring"] }
 tokio-rustls = "0.26"
-instant-acme = "0.8"
-rcgen = "0.13"
+instant-acme = { version = "0.8", default-features = false, features = ["hyper-rustls", "ring", "rcgen"] }
 rustls-pemfile = "2"
 hickory-resolver = "0.24"
 dashmap = "6"
