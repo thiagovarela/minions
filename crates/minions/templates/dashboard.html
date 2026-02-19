@@ -5,7 +5,75 @@
 {% block content %}
 <div class="flex items-center justify-between mb-6">
   <h1 class="text-xl font-bold text-white">Virtual Machines</h1>
-  <span class="text-sm text-gray-500">auto-refresh every 30s</span>
+  <div class="flex items-center gap-3">
+    <button
+      onclick="document.getElementById('create-vm-form').classList.toggle('hidden')"
+      class="rounded-lg bg-indigo-700 hover:bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition">
+      + Create VM
+    </button>
+    <span class="text-sm text-gray-500">auto-refresh every 30s</span>
+  </div>
+</div>
+
+<!-- Create VM form (collapsible) -->
+<div id="create-vm-form" class="hidden mb-6">
+  <div class="rounded-xl border border-gray-800 bg-gray-900 p-5">
+    <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-4">New Virtual Machine</h2>
+    <form hx-post="/dashboard/vms"
+          hx-target="#create-result"
+          hx-swap="innerHTML"
+          class="space-y-4">
+      
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <!-- Name -->
+        <div>
+          <label class="text-xs text-gray-500 uppercase tracking-wide block mb-1">
+            Name <span class="text-red-400">*</span>
+          </label>
+          <input type="text" name="name" placeholder="myvm" required maxlength="11"
+                 pattern="[a-zA-Z0-9\-]+"
+                 class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white font-mono
+                        focus:outline-none focus:border-indigo-500"/>
+          <p class="text-xs text-gray-600 mt-1">Max 11 chars, alphanumeric + hyphens</p>
+        </div>
+
+        <!-- vCPUs -->
+        <div>
+          <label class="text-xs text-gray-500 uppercase tracking-wide block mb-1">
+            vCPUs
+          </label>
+          <input type="number" name="vcpus" value="2" min="1" max="16"
+                 class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white font-mono
+                        focus:outline-none focus:border-indigo-500"/>
+          <p class="text-xs text-gray-600 mt-1">Default: 2</p>
+        </div>
+
+        <!-- Memory -->
+        <div>
+          <label class="text-xs text-gray-500 uppercase tracking-wide block mb-1">
+            Memory (MB)
+          </label>
+          <input type="number" name="memory_mb" value="1024" min="128" max="16384" step="128"
+                 class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white font-mono
+                        focus:outline-none focus:border-indigo-500"/>
+          <p class="text-xs text-gray-600 mt-1">Default: 1024 MB</p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <button type="submit"
+                class="rounded-lg bg-green-700 hover:bg-green-600 px-4 py-2 text-sm font-medium text-white transition">
+          🚀 Create VM
+        </button>
+        <button type="button"
+                onclick="document.getElementById('create-vm-form').classList.add('hidden'); document.getElementById('create-result').innerHTML = ''"
+                class="rounded-lg bg-gray-700 hover:bg-gray-600 px-4 py-2 text-sm font-medium text-white transition">
+          Cancel
+        </button>
+        <div id="create-result"></div>
+      </div>
+    </form>
+  </div>
 </div>
 
 {% include "vms_fragment.html" %}

@@ -84,12 +84,7 @@ impl CertStore {
     }
 
     /// Store certificate chain + private key to disk.
-    pub fn store_cert(
-        &self,
-        domain: &str,
-        fullchain_pem: &[u8],
-        privkey_pem: &[u8],
-    ) -> Result<()> {
+    pub fn store_cert(&self, domain: &str, fullchain_pem: &[u8], privkey_pem: &[u8]) -> Result<()> {
         let dir = self.domain_dir(domain);
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
 
@@ -232,7 +227,10 @@ impl AcmeClient {
 
         // Wait for order to be ready (poll with retry policy).
         let retries = RetryPolicy::new().timeout(Duration::from_secs(120));
-        let status = order.poll_ready(&retries).await.context("poll order ready")?;
+        let status = order
+            .poll_ready(&retries)
+            .await
+            .context("poll order ready")?;
 
         // Clean up challenge token.
         self.challenges.remove(&token);
@@ -260,7 +258,10 @@ impl AcmeClient {
     /// Provision a wildcard certificate via DNS-01 challenge (requires Cloudflare DNS API).
     pub async fn provision_dns01_wildcard(&self, base_domain: &str) -> Result<()> {
         let wildcard_domain = format!("*.{}", base_domain);
-        info!(wildcard_domain, "provisioning wildcard certificate via DNS-01");
+        info!(
+            wildcard_domain,
+            "provisioning wildcard certificate via DNS-01"
+        );
 
         let cf_token = self
             .cf_dns_token
@@ -326,8 +327,11 @@ impl AcmeClient {
             .context("poll certificate")?;
 
         // Store to disk.
-        self.store
-            .store_cert(&wildcard_domain, cert_pem.as_bytes(), private_key_pem.as_bytes())?;
+        self.store.store_cert(
+            &wildcard_domain,
+            cert_pem.as_bytes(),
+            private_key_pem.as_bytes(),
+        )?;
 
         Ok(())
     }

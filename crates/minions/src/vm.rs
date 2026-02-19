@@ -31,13 +31,20 @@ pub async fn create(
     // Dispatch based on host type.
     let host = {
         let conn = db::open(db_path)?;
-        db::get_host(&conn, &host_id)?
-            .with_context(|| format!("Host '{}' not found", host_id))?
+        db::get_host(&conn, &host_id)?.with_context(|| format!("Host '{}' not found", host_id))?
     };
 
     if host.id == "local" {
         // Call minions_node library directly (in-process).
-        minions_node::create(db_path, name, vcpus, memory_mb, ssh_pubkey.clone(), owner_id.clone()).await
+        minions_node::create(
+            db_path,
+            name,
+            vcpus,
+            memory_mb,
+            ssh_pubkey.clone(),
+            owner_id.clone(),
+        )
+        .await
     } else {
         // Make HTTP call to remote node agent.
         let client = host_client::HostClient::new(&host.address, host.api_port);
@@ -48,7 +55,8 @@ pub async fn create(
 
         // Fetch the VM record from the DB (the remote agent inserted it).
         let conn = db::open(db_path)?;
-        db::get_vm(&conn, name)?.with_context(|| format!("VM '{}' not found after remote creation", name))
+        db::get_vm(&conn, name)?
+            .with_context(|| format!("VM '{}' not found after remote creation", name))
     }
 }
 
@@ -70,7 +78,7 @@ pub async fn stop(db_path: &str, name: &str) -> Result<db::Vm> {
         };
         let client = host_client::HostClient::new(&host.address, host.api_port);
         let _response = client.stop_vm(name).await?;
-        
+
         let conn = db::open(db_path)?;
         db::get_vm(&conn, name)?.with_context(|| format!("VM '{}' not found after stop", name))
     }
@@ -94,7 +102,7 @@ pub async fn start(db_path: &str, name: &str) -> Result<db::Vm> {
         };
         let client = host_client::HostClient::new(&host.address, host.api_port);
         let _response = client.start_vm(name).await?;
-        
+
         let conn = db::open(db_path)?;
         db::get_vm(&conn, name)?.with_context(|| format!("VM '{}' not found after start", name))
     }
@@ -118,7 +126,7 @@ pub async fn restart(db_path: &str, name: &str) -> Result<db::Vm> {
         };
         let client = host_client::HostClient::new(&host.address, host.api_port);
         let _response = client.restart_vm(name).await?;
-        
+
         let conn = db::open(db_path)?;
         db::get_vm(&conn, name)?.with_context(|| format!("VM '{}' not found after restart", name))
     }
@@ -189,7 +197,8 @@ pub async fn snapshot(
 ) -> Result<db::Snapshot> {
     let host_id = {
         let conn = db::open(db_path)?;
-        let vm = db::get_vm(&conn, vm_name)?.with_context(|| format!("VM '{}' not found", vm_name))?;
+        let vm =
+            db::get_vm(&conn, vm_name)?.with_context(|| format!("VM '{}' not found", vm_name))?;
         vm.host_id.unwrap_or_else(|| "local".to_string())
     };
 
@@ -203,7 +212,7 @@ pub async fn snapshot(
         };
         let client = host_client::HostClient::new(&host.address, host.api_port);
         let _response = client.snapshot_vm(vm_name, snap_name).await?;
-        
+
         // TODO: Parse snapshot from response
         anyhow::bail!("Remote snapshot not fully implemented yet");
     }

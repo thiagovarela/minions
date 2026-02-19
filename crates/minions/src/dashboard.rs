@@ -204,6 +204,7 @@ pub fn router() -> Router<AppState> {
         .route("/dashboard/logout", get(logout))
         .route("/dashboard", get(dashboard))
         .route("/dashboard/vms-fragment", get(vms_fragment))
+        .route("/dashboard/vms", post(vm_create))
         .route("/dashboard/vms/{name}", get(vm_detail))
         .route(
             "/dashboard/vms/{name}/metrics-fragment",
@@ -475,6 +476,13 @@ async fn vm_snapshot(
 }
 
 #[derive(Deserialize)]
+struct CreateVmForm {
+    name: String,
+    vcpus: Option<u32>,
+    memory_mb: Option<u32>,
+}
+
+#[derive(Deserialize)]
 struct ExposeForm {
     port: u16,
 }
@@ -491,7 +499,8 @@ async fn vm_expose(
     let conn = match db::open(&state.db_path) {
         Ok(c) => c,
         Err(e) => {
-            return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response();
+            return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>"))
+                .into_response();
         }
     };
     if !(1..=65535).contains(&form.port) {
@@ -557,6 +566,32 @@ async fn vm_resize(
     }
 }
 
+async fn vm_create(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Form(form): Form<CreateVmForm>,
+) -> Response {
+    if check_session(&headers, &state.sessions).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let vcpus = form.vcpus.unwrap_or(2);
+    let memory_mb = form.memory_mb.unwrap_or(1024);
+    let ssh_pubkey = state.ssh_pubkey.as_ref().map(|s| s.to_string());
+    let db_path = state.db_path.as_ref().clone();
+
+    match vm::create(&db_path, &form.name, vcpus, memory_mb, ssh_pubkey, None).await {
+        Ok(_vm) => {
+            // Redirect to the new VM's detail page
+            Redirect::to(&format!("/dashboard/vms/{}", form.name)).into_response()
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            Html(format!("<span class='text-red-400 text-sm'>✗ {msg}</span>")).into_response()
+        }
+    }
+}
+
 async fn vm_set_public(
     headers: HeaderMap,
     State(state): State<AppState>,
@@ -568,7 +603,8 @@ async fn vm_set_public(
     let conn = match db::open(&state.db_path) {
         Ok(c) => c,
         Err(e) => {
-            return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response();
+            return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>"))
+                .into_response();
         }
     };
     match db::set_proxy_public(&conn, &name, true) {
@@ -594,7 +630,8 @@ async fn vm_set_private(
     let conn = match db::open(&state.db_path) {
         Ok(c) => c,
         Err(e) => {
-            return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response();
+            return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>"))
+                .into_response();
         }
     };
     match db::set_proxy_public(&conn, &name, false) {
@@ -667,7 +704,8 @@ async fn vm_remove_domain(
     let conn = match db::open(&state.db_path) {
         Ok(c) => c,
         Err(e) => {
-            return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response();
+            return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>"))
+                .into_response();
         }
     };
 
