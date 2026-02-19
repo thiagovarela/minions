@@ -24,10 +24,7 @@ pub async fn verify_domain_dns(
     base_domain: &str,
     public_ip: Option<&str>,
 ) -> Result<bool> {
-    let resolver = TokioAsyncResolver::tokio(
-        ResolverConfig::cloudflare(),
-        ResolverOpts::default(),
-    );
+    let resolver = TokioAsyncResolver::tokio(ResolverConfig::cloudflare(), ResolverOpts::default());
 
     let expected_cname = format!("{}.{}.", vm_name, base_domain); // Trailing dot = FQDN
 
@@ -39,7 +36,7 @@ pub async fn verify_domain_dns(
                 if let Some(cname_data) = record.data().and_then(|d| d.as_cname()) {
                     let target = cname_data.to_string();
                     debug!(domain, cname = %target, "found CNAME record");
-                    
+
                     // CNAME targets may or may not have a trailing dot
                     if target == expected_cname || target == expected_cname.trim_end_matches('.') {
                         debug!(domain, "CNAME points to correct VM subdomain");
@@ -62,7 +59,7 @@ pub async fn verify_domain_dns(
                 for record in a_lookup.iter() {
                     let resolved_ip = record.to_string();
                     debug!(domain, a_record = %resolved_ip, "found A record");
-                    
+
                     if resolved_ip == ip {
                         debug!(domain, "A record points to correct host IP");
                         return Ok(true);
@@ -91,14 +88,9 @@ mod tests {
     async fn test_verify_cloudflare_dns() {
         // This test uses real DNS — cloudflare.com definitely has DNS records.
         // Just checking the function doesn't panic.
-        let result = verify_domain_dns(
-            "cloudflare.com",
-            "test",
-            "example.com",
-            Some("1.1.1.1"),
-        )
-        .await;
-        
+        let result =
+            verify_domain_dns("cloudflare.com", "test", "example.com", Some("1.1.1.1")).await;
+
         // Don't assert true/false since DNS can change, just that it runs
         assert!(result.is_ok());
     }

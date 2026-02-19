@@ -38,8 +38,7 @@ pub struct Vm {
 pub fn open(path: &str) -> Result<Connection> {
     // Ensure parent directory exists.
     if let Some(parent) = Path::new(path).parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create db dir {:?}", parent))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create db dir {:?}", parent))?;
     }
     let conn = Connection::open(path).context("open sqlite db")?;
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
@@ -138,8 +137,10 @@ fn migrate(conn: &Connection) -> Result<()> {
 
     // Idempotent column additions for existing databases (errors are ignored
     // because SQLite errors on duplicate ADD COLUMN).
-    let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN proxy_port   INTEGER NOT NULL DEFAULT 80;");
-    let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN proxy_public  INTEGER NOT NULL DEFAULT 0;");
+    let _ =
+        conn.execute_batch("ALTER TABLE vms ADD COLUMN proxy_port   INTEGER NOT NULL DEFAULT 80;");
+    let _ =
+        conn.execute_batch("ALTER TABLE vms ADD COLUMN proxy_public  INTEGER NOT NULL DEFAULT 0;");
     let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN owner_id      TEXT;");
     // Index on owner_id — must come after the column exists (idempotent).
     let _ = conn.execute_batch(
@@ -155,8 +156,7 @@ fn migrate(conn: &Connection) -> Result<()> {
 //          6=ch_vsock_socket 7=tap_device 8=mac_address 9=vcpus
 //          10=memory_mb 11=rootfs_path 12=created_at 13=stopped_at
 //          14=proxy_port 15=proxy_public 16=owner_id
-const VM_COLUMNS: &str =
-    "name,status,ip,vsock_cid,ch_pid,ch_api_socket,ch_vsock_socket,\
+const VM_COLUMNS: &str = "name,status,ip,vsock_cid,ch_pid,ch_api_socket,ch_vsock_socket,\
      tap_device,mac_address,vcpus,memory_mb,rootfs_path,created_at,stopped_at,\
      proxy_port,proxy_public,owner_id";
 
@@ -244,7 +244,12 @@ pub fn list_vms_by_owner(conn: &Connection, owner_id: &str) -> Result<Vec<Vm>> {
 }
 
 /// Update VM status and optionally pid.
-pub fn update_vm_status(conn: &Connection, name: &str, status: &str, pid: Option<i64>) -> Result<()> {
+pub fn update_vm_status(
+    conn: &Connection,
+    name: &str,
+    status: &str,
+    pid: Option<i64>,
+) -> Result<()> {
     conn.execute(
         "UPDATE vms SET status=?1, ch_pid=COALESCE(?2, ch_pid) WHERE name=?3",
         params![status, pid, name],
@@ -266,24 +271,25 @@ pub fn rename_vm(
     new_vsock_socket: &str,
     new_rootfs_path: &str,
 ) -> Result<()> {
-    let updated = conn.execute(
-        "UPDATE vms SET
+    let updated = conn
+        .execute(
+            "UPDATE vms SET
             name            = ?1,
             tap_device      = ?2,
             ch_api_socket   = ?3,
             ch_vsock_socket = ?4,
             rootfs_path     = ?5
          WHERE name = ?6",
-        rusqlite::params![
-            new_name,
-            new_tap,
-            new_api_socket,
-            new_vsock_socket,
-            new_rootfs_path,
-            old_name,
-        ],
-    )
-    .context("rename vm in db")?;
+            rusqlite::params![
+                new_name,
+                new_tap,
+                new_api_socket,
+                new_vsock_socket,
+                new_rootfs_path,
+                old_name,
+            ],
+        )
+        .context("rename vm in db")?;
 
     if updated == 0 {
         anyhow::bail!("VM '{}' not found", old_name);
@@ -390,6 +396,39 @@ pub fn set_proxy_public(conn: &Connection, name: &str, public: bool) -> Result<b
     Ok(changed > 0)
 }
 
+/// Update VM resources (CPU and/or memory). Only updates non-None fields.
+pub fn set_vm_resources(
+    conn: &Connection,
+    name: &str,
+    vcpus: Option<u32>,
+    memory_mb: Option<u32>,
+) -> Result<bool> {
+    match (vcpus, memory_mb) {
+        (Some(v), Some(m)) => {
+            let changed = conn.execute(
+                "UPDATE vms SET vcpus = ?1, memory_mb = ?2 WHERE name = ?3",
+                params![v as i64, m as i64, name],
+            )?;
+            Ok(changed > 0)
+        }
+        (Some(v), None) => {
+            let changed = conn.execute(
+                "UPDATE vms SET vcpus = ?1 WHERE name = ?2",
+                params![v as i64, name],
+            )?;
+            Ok(changed > 0)
+        }
+        (None, Some(m)) => {
+            let changed = conn.execute(
+                "UPDATE vms SET memory_mb = ?1 WHERE name = ?2",
+                params![m as i64, name],
+            )?;
+            Ok(changed > 0)
+        }
+        (None, None) => Ok(false), // No-op if both are None
+    }
+}
+
 // ── Plans & Subscriptions ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -468,7 +507,9 @@ pub fn get_subscription(conn: &Connection, user_id: &str) -> Result<Option<Subsc
          FROM subscriptions WHERE user_id=?1",
     )?;
     let mut rows = stmt.query(params![user_id])?;
-    Ok(rows.next()?.map(|r| row_to_subscription(r).expect("parse subscription")))
+    Ok(rows
+        .next()?
+        .map(|r| row_to_subscription(r).expect("parse subscription")))
 }
 
 /// Get a user's subscription joined with their plan. Returns the effective plan
@@ -486,7 +527,11 @@ pub fn get_user_plan(conn: &Connection, user_id: &str) -> Result<(Subscription, 
 }
 
 /// Create a subscription for a user (called at registration time).
-pub fn create_subscription(conn: &Connection, user_id: &str, plan_id: &str) -> Result<Subscription> {
+pub fn create_subscription(
+    conn: &Connection,
+    user_id: &str,
+    plan_id: &str,
+) -> Result<Subscription> {
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     conn.execute(
@@ -637,10 +682,7 @@ pub fn delete_snapshot(conn: &Connection, vm_name: &str, snap_name: &str) -> Res
 
 /// Delete all snapshot records for a VM (called when the VM is destroyed).
 pub fn delete_all_snapshots(conn: &Connection, vm_name: &str) -> Result<usize> {
-    let changed = conn.execute(
-        "DELETE FROM snapshots WHERE vm_name=?1",
-        params![vm_name],
-    )?;
+    let changed = conn.execute("DELETE FROM snapshots WHERE vm_name=?1", params![vm_name])?;
     Ok(changed)
 }
 
@@ -698,7 +740,8 @@ pub fn list_custom_domains(conn: &Connection, vm_name: &str) -> Result<Vec<Custo
             created_at: row.get(4)?,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().context("list custom domains")
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("list custom domains")
 }
 
 /// Look up a custom domain by domain name (to check for duplicates).
@@ -745,7 +788,8 @@ pub fn mark_domain_verified(conn: &Connection, domain: &str) -> Result<bool> {
 pub fn list_all_verified_domains(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT domain FROM custom_domains WHERE verified = 1")?;
     let rows = stmt.query_map([], |row| row.get(0))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().context("list verified domains")
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("list verified domains")
 }
 
 #[cfg(test)]
@@ -811,7 +855,11 @@ mod tests {
 
         let alice_vms = list_vms_by_owner(&conn, "alice").unwrap();
         assert_eq!(alice_vms.len(), 2);
-        assert!(alice_vms.iter().all(|v| v.owner_id.as_deref() == Some("alice")));
+        assert!(
+            alice_vms
+                .iter()
+                .all(|v| v.owner_id.as_deref() == Some("alice"))
+        );
 
         let bob_vms = list_vms_by_owner(&conn, "bob").unwrap();
         assert_eq!(bob_vms.len(), 1);
@@ -846,7 +894,10 @@ mod tests {
 
         // Admin (owner_id=NULL) VMs are not accessible by SSH gateway users.
         let result = get_vm_owned(&conn, "admin-vm", "any-user");
-        assert!(result.is_err(), "admin VM should not be accessible by SSH users");
+        assert!(
+            result.is_err(),
+            "admin VM should not be accessible by SSH users"
+        );
     }
 
     #[test]
@@ -951,7 +1002,7 @@ mod tests {
 
         let usage = get_user_usage(&conn, "user-1").unwrap();
         assert_eq!(usage.vm_count, 2);
-        assert_eq!(usage.total_vcpus, 6);       // 2 + 4
+        assert_eq!(usage.total_vcpus, 6); // 2 + 4
         assert_eq!(usage.total_memory_mb, 1536); // 512 + 1024
     }
 

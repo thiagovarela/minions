@@ -25,9 +25,13 @@ pub fn run(persist: bool) -> Result<()> {
     println!("    1. Copy base image:   /var/lib/minions/images/base-ubuntu.ext4");
     println!("    2. Copy kernel:       /var/lib/minions/kernel/vmlinux");
     println!("    3. Bake the agent:    sudo ./scripts/bake-agent.sh");
-    println!("    4. Place TLS cert:    /var/lib/minions/certs/'*.yourdomain.com'/{{fullchain,privkey}}.pem");
+    println!(
+        "    4. Place TLS cert:    /var/lib/minions/certs/'*.yourdomain.com'/{{fullchain,privkey}}.pem"
+    );
     println!("    5. Edit env:          /etc/minions/env  (set MINIONS_API_KEY)");
-    println!("    6. Edit unit:         /etc/systemd/system/minions.service  (set --domain, --public-ip)");
+    println!(
+        "    6. Edit unit:         /etc/systemd/system/minions.service  (set --domain, --public-ip)"
+    );
     println!("    7. Start the daemon:  sudo systemctl enable --now minions");
     println!("    8. Create a VM:       ssh -p 2222 minions@ssh.yourdomain.com new");
     println!("────────────────────────────────────────────");
@@ -60,8 +64,7 @@ fn setup_directories() -> Result<()> {
         "/var/lib/minions/vms",
         "/run/minions",
     ] {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("create {dir}"))?;
+        std::fs::create_dir_all(dir).with_context(|| format!("create {dir}"))?;
     }
     ok("directories ready");
     Ok(())
@@ -100,11 +103,8 @@ fn enable_ip_forward(persist: bool) -> Result<()> {
     if persist {
         // Write a sysctl drop-in so it survives reboots.
         std::fs::create_dir_all("/etc/sysctl.d")?;
-        std::fs::write(
-            "/etc/sysctl.d/99-minions.conf",
-            "net.ipv4.ip_forward = 1\n",
-        )
-        .context("write sysctl drop-in")?;
+        std::fs::write("/etc/sysctl.d/99-minions.conf", "net.ipv4.ip_forward = 1\n")
+            .context("write sysctl drop-in")?;
         ok("ip_forward persisted via /etc/sysctl.d/99-minions.conf");
     }
 
@@ -137,10 +137,7 @@ fn load_br_netfilter(persist: bool) -> Result<()> {
 
     if loaded {
         // Enable the sysctl so the module actually intercepts bridge frames.
-        let _ = std::fs::write(
-            "/proc/sys/net/bridge/bridge-nf-call-iptables",
-            "1\n",
-        );
+        let _ = std::fs::write("/proc/sys/net/bridge/bridge-nf-call-iptables", "1\n");
         ok("br_netfilter loaded, bridge-nf-call-iptables = 1");
     } else {
         println!(
@@ -180,23 +177,33 @@ fn setup_iptables(persist: bool) -> Result<()> {
 
     // NAT: masquerade VM traffic going out to the internet.
     let nat_rule: &[&str] = &[
-        "-t", "nat", "-A", "POSTROUTING",
-        "-s", "10.0.0.0/16",
-        "-o", &main_if,
-        "-j", "MASQUERADE",
+        "-t",
+        "nat",
+        "-A",
+        "POSTROUTING",
+        "-s",
+        "10.0.0.0/16",
+        "-o",
+        &main_if,
+        "-j",
+        "MASQUERADE",
     ];
     // Allow VMs to reach the internet.
-    let fwd_out: &[&str] = &[
-        "-I", "FORWARD",
-        "-i", "br0", "-o", &main_if,
-        "-j", "ACCEPT",
-    ];
+    let fwd_out: &[&str] = &["-I", "FORWARD", "-i", "br0", "-o", &main_if, "-j", "ACCEPT"];
     // Allow established/related return traffic back to VMs.
     let fwd_in: &[&str] = &[
-        "-I", "FORWARD",
-        "-i", &main_if, "-o", "br0",
-        "-m", "state", "--state", "RELATED,ESTABLISHED",
-        "-j", "ACCEPT",
+        "-I",
+        "FORWARD",
+        "-i",
+        &main_if,
+        "-o",
+        "br0",
+        "-m",
+        "state",
+        "--state",
+        "RELATED,ESTABLISHED",
+        "-j",
+        "ACCEPT",
     ];
 
     // Defence-in-depth: explicitly DROP traffic routed between bridge ports
@@ -215,11 +222,7 @@ fn setup_iptables(persist: bool) -> Result<()> {
     // VMs cannot reach each other via:
     //   - Layer 2 (bridge port isolation, set in network::create_tap)
     //   - Layer 3 (this DROP rule, when br_netfilter is loaded)
-    let fwd_isolate: &[&str] = &[
-        "-I", "FORWARD",
-        "-i", "br0", "-o", "br0",
-        "-j", "DROP",
-    ];
+    let fwd_isolate: &[&str] = &["-I", "FORWARD", "-i", "br0", "-o", "br0", "-j", "DROP"];
 
     for rule in &[nat_rule, fwd_out, fwd_in, fwd_isolate] {
         add_iptables_rule(rule)?;
@@ -297,7 +300,9 @@ fn install_systemd_unit() -> Result<()> {
         // Detect SSH pubkey path for MINIONS_SSH_PUBKEY_PATH.
         let ssh_pubkey_line = detect_user_ssh_pubkey_path()
             .map(|p| format!("MINIONS_SSH_PUBKEY_PATH={p}\n"))
-            .unwrap_or_else(|| "# MINIONS_SSH_PUBKEY_PATH=/root/.ssh/authorized_keys\n".to_string());
+            .unwrap_or_else(|| {
+                "# MINIONS_SSH_PUBKEY_PATH=/root/.ssh/authorized_keys\n".to_string()
+            });
 
         let env_content = format!(
             "# Minions environment configuration\n\
@@ -310,7 +315,9 @@ fn install_systemd_unit() -> Result<()> {
         std::fs::write(env_path, env_content)?;
         // Restrict to root-only — contains secrets.
         let _ = Command::new("chmod").args(["600", env_path]).status();
-        ok(format!("environment file created at {env_path} — fill in MINIONS_API_KEY"));
+        ok(format!(
+            "environment file created at {env_path} — fill in MINIONS_API_KEY"
+        ));
     } else {
         ok(format!("environment file already exists at {env_path}"));
     }
@@ -343,9 +350,7 @@ WantedBy=multi-user.target
         .with_context(|| format!("write {SYSTEMD_UNIT_PATH}"))?;
 
     // Reload systemd so the new unit is visible.
-    let _ = Command::new("systemctl")
-        .args(["daemon-reload"])
-        .status();
+    let _ = Command::new("systemctl").args(["daemon-reload"]).status();
 
     ok(format!(
         "systemd unit installed at {SYSTEMD_UNIT_PATH}\n  \

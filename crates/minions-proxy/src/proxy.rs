@@ -12,7 +12,9 @@ use axum::response::Response;
 use subtle::ConstantTimeEq;
 use tracing::{debug, warn};
 
-use crate::auth::{Sessions, clear_cookie, extract_token, login_page, redirect_to_login, safe_next, set_cookie};
+use crate::auth::{
+    Sessions, clear_cookie, extract_token, login_page, redirect_to_login, safe_next, set_cookie,
+};
 use crate::db;
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -108,7 +110,10 @@ async fn forward_to_vm(req: Request, vm: &db::VmProxy, host: &str, state: &AppSt
     // Auth check for private VMs.
     if !vm.proxy_public && state.api_key.is_some() {
         let token = extract_token(req.headers());
-        let valid = token.as_deref().map(|t| state.sessions.is_valid(t)).unwrap_or(false);
+        let valid = token
+            .as_deref()
+            .map(|t| state.sessions.is_valid(t))
+            .unwrap_or(false);
         if !valid {
             return redirect_to_login(req.uri().path());
         }
@@ -162,8 +167,7 @@ async fn handle_login_post(req: Request, state: &AppState) -> Response {
 
     let expected = state.api_key.as_deref().map(|k| k.as_ref()).unwrap_or("");
     // Use constant-time comparison to prevent timing side-channel attacks.
-    let password_ok = expected.is_empty()
-        || password.as_bytes().ct_eq(expected.as_bytes()).into();
+    let password_ok = expected.is_empty() || password.as_bytes().ct_eq(expected.as_bytes()).into();
     if !password_ok {
         return login_page(next, true);
     }
@@ -191,7 +195,12 @@ static HOP_BY_HOP: &[&str] = &[
     "upgrade",
 ];
 
-async fn forward(req: Request, origin: &str, original_host: &str, client: &reqwest::Client) -> Response {
+async fn forward(
+    req: Request,
+    origin: &str,
+    original_host: &str,
+    client: &reqwest::Client,
+) -> Response {
     let (parts, body) = req.into_parts();
 
     // Build the upstream URL.
@@ -233,7 +242,8 @@ async fn forward(req: Request, origin: &str, original_host: &str, client: &reqwe
     // Inject forwarding headers.
     let _ = fwd_headers.insert(
         reqwest::header::HeaderName::from_static("x-forwarded-host"),
-        reqwest::header::HeaderValue::from_str(original_host).unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("")),
+        reqwest::header::HeaderValue::from_str(original_host)
+            .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("")),
     );
     let _ = fwd_headers.insert(
         reqwest::header::HeaderName::from_static("x-forwarded-proto"),
@@ -275,7 +285,8 @@ async fn forward(req: Request, origin: &str, original_host: &str, client: &reqwe
 
     // Stream the response body back to the client.
     let body = Body::from_stream(upstream_resp.bytes_stream());
-    resp.body(body).unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Response error"))
+    resp.body(body)
+        .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Response error"))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -295,12 +306,14 @@ pub fn extract_subdomain<'a>(host: &'a str, domain: &str) -> Option<String> {
 }
 
 fn query_param(uri: &Uri, key: &str) -> Option<String> {
-    uri.query()?
-        .split('&')
-        .find_map(|kv| {
-            let (k, v) = kv.split_once('=')?;
-            if k == key { Some(v.replace('+', " ")) } else { None }
-        })
+    uri.query()?.split('&').find_map(|kv| {
+        let (k, v) = kv.split_once('=')?;
+        if k == key {
+            Some(v.replace('+', " "))
+        } else {
+            None
+        }
+    })
 }
 
 pub fn error_response(status: StatusCode, message: &str) -> Response {
@@ -342,10 +355,7 @@ pub fn error_response(status: StatusCode, message: &str) -> Response {
 
 use axum::extract::Path;
 
-pub async fn acme_challenge(
-    State(state): State<AppState>,
-    Path(token): Path<String>,
-) -> Response {
+pub async fn acme_challenge(State(state): State<AppState>, Path(token): Path<String>) -> Response {
     debug!(token, "ACME HTTP-01 challenge request");
     if let Some(key_auth) = state.acme_challenges.get(&token) {
         let response_text = key_auth.value().clone();
@@ -371,7 +381,11 @@ pub async fn http_redirect(req: Request) -> Response {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("localhost");
 
-    let path_and_query = req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
     let location = format!("https://{}{}", host, path_and_query);
 
     Response::builder()

@@ -55,9 +55,7 @@ async fn find_ethernet_interface() -> Result<String> {
         let name_str = name.to_string_lossy();
 
         // Match eth*, enp*, ens*
-        if name_str.starts_with("eth")
-            || name_str.starts_with("enp")
-            || name_str.starts_with("ens")
+        if name_str.starts_with("eth") || name_str.starts_with("enp") || name_str.starts_with("ens")
         {
             return Ok(name_str.to_string());
         }
@@ -105,7 +103,10 @@ fn write_resolv_conf(dns_servers: &[String]) -> Result<()> {
 fn validate_ip_with_cidr(ip: &str) -> Result<()> {
     let parts: Vec<&str> = ip.split('/').collect();
     if parts.len() != 2 {
-        anyhow::bail!("invalid IP with CIDR: '{}' (expected format: 10.0.0.2/16)", ip);
+        anyhow::bail!(
+            "invalid IP with CIDR: '{}' (expected format: 10.0.0.2/16)",
+            ip
+        );
     }
 
     // Validate IP address part

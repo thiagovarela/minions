@@ -25,7 +25,11 @@ pub struct ApiClient {
 
 impl ApiClient {
     pub fn new(base_url: String, api_key: Option<String>) -> Self {
-        Self { client: reqwest::Client::new(), base_url, api_key }
+        Self {
+            client: reqwest::Client::new(),
+            base_url,
+            api_key,
+        }
     }
 
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -53,7 +57,10 @@ impl ApiClient {
     /// Fetch a single VM by name (returns all fields including owner_id).
     pub async fn get_vm(&self, name: &str) -> Result<Option<VmInfo>> {
         let resp = self
-            .auth(self.client.get(format!("{}/api/vms/{}", self.base_url, name)))
+            .auth(
+                self.client
+                    .get(format!("{}/api/vms/{}", self.base_url, name)),
+            )
             .send()
             .await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -81,7 +88,12 @@ impl ApiClient {
             .auth(
                 self.client
                     .post(format!("{}/api/vms", self.base_url))
-                    .json(&Req { name, cpus, memory_mb, owner_id }),
+                    .json(&Req {
+                        name,
+                        cpus,
+                        memory_mb,
+                        owner_id,
+                    }),
             )
             .send()
             .await?
@@ -92,16 +104,22 @@ impl ApiClient {
     }
 
     pub async fn destroy_vm(&self, name: &str) -> Result<()> {
-        self.auth(self.client.delete(format!("{}/api/vms/{}", self.base_url, name)))
-            .send()
-            .await?
-            .error_for_status()?;
+        self.auth(
+            self.client
+                .delete(format!("{}/api/vms/{}", self.base_url, name)),
+        )
+        .send()
+        .await?
+        .error_for_status()?;
         Ok(())
     }
 
     pub async fn stop_vm(&self, name: &str) -> Result<VmInfo> {
         let resp = self
-            .auth(self.client.post(format!("{}/api/vms/{}/stop", self.base_url, name)))
+            .auth(
+                self.client
+                    .post(format!("{}/api/vms/{}/stop", self.base_url, name)),
+            )
             .send()
             .await?
             .error_for_status()?
@@ -112,7 +130,41 @@ impl ApiClient {
 
     pub async fn restart_vm(&self, name: &str) -> Result<VmInfo> {
         let resp = self
-            .auth(self.client.post(format!("{}/api/vms/{}/restart", self.base_url, name)))
+            .auth(
+                self.client
+                    .post(format!("{}/api/vms/{}/restart", self.base_url, name)),
+            )
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<VmInfo>()
+            .await?;
+        Ok(resp)
+    }
+
+    pub async fn resize_vm(
+        &self,
+        name: &str,
+        vcpus: Option<u32>,
+        memory_mb: Option<u32>,
+        disk_gb: Option<u32>,
+    ) -> Result<VmInfo> {
+        #[derive(Serialize)]
+        struct Req {
+            vcpus: Option<u32>,
+            memory_mb: Option<u32>,
+            disk_gb: Option<u32>,
+        }
+        let resp = self
+            .auth(
+                self.client
+                    .post(format!("{}/api/vms/{}/resize", self.base_url, name))
+                    .json(&Req {
+                        vcpus,
+                        memory_mb,
+                        disk_gb,
+                    }),
+            )
             .send()
             .await?
             .error_for_status()?
@@ -123,7 +175,9 @@ impl ApiClient {
 
     pub async fn rename_vm(&self, name: &str, new_name: &str) -> Result<()> {
         #[derive(Serialize)]
-        struct Req<'a> { new_name: &'a str }
+        struct Req<'a> {
+            new_name: &'a str,
+        }
         self.auth(
             self.client
                 .post(format!("{}/api/vms/{}/rename", self.base_url, name))
@@ -158,7 +212,9 @@ impl ApiClient {
 
     pub async fn expose_vm(&self, name: &str, port: u16) -> Result<()> {
         #[derive(Serialize)]
-        struct Req { port: u16 }
+        struct Req {
+            port: u16,
+        }
         self.auth(
             self.client
                 .post(format!("{}/api/vms/{}/expose", self.base_url, name))
@@ -171,18 +227,24 @@ impl ApiClient {
     }
 
     pub async fn set_vm_public(&self, name: &str) -> Result<()> {
-        self.auth(self.client.post(format!("{}/api/vms/{}/set-public", self.base_url, name)))
-            .send()
-            .await?
-            .error_for_status()?;
+        self.auth(
+            self.client
+                .post(format!("{}/api/vms/{}/set-public", self.base_url, name)),
+        )
+        .send()
+        .await?
+        .error_for_status()?;
         Ok(())
     }
 
     pub async fn set_vm_private(&self, name: &str) -> Result<()> {
-        self.auth(self.client.post(format!("{}/api/vms/{}/set-private", self.base_url, name)))
-            .send()
-            .await?
-            .error_for_status()?;
+        self.auth(
+            self.client
+                .post(format!("{}/api/vms/{}/set-private", self.base_url, name)),
+        )
+        .send()
+        .await?
+        .error_for_status()?;
         Ok(())
     }
 
@@ -190,7 +252,9 @@ impl ApiClient {
 
     pub async fn add_custom_domain(&self, vm: &str, domain: &str) -> Result<CustomDomainInfo> {
         #[derive(serde::Serialize)]
-        struct Req<'a> { domain: &'a str }
+        struct Req<'a> {
+            domain: &'a str,
+        }
         let resp = self
             .auth(
                 self.client
@@ -207,7 +271,10 @@ impl ApiClient {
 
     pub async fn list_custom_domains(&self, vm: &str) -> Result<Vec<CustomDomainInfo>> {
         let resp = self
-            .auth(self.client.get(format!("{}/api/vms/{}/domains", self.base_url, vm)))
+            .auth(
+                self.client
+                    .get(format!("{}/api/vms/{}/domains", self.base_url, vm)),
+            )
             .send()
             .await?
             .error_for_status()?
@@ -217,10 +284,10 @@ impl ApiClient {
     }
 
     pub async fn remove_custom_domain(&self, vm: &str, domain: &str) -> Result<()> {
-        self.auth(
-            self.client
-                .delete(format!("{}/api/vms/{}/domains/{}", self.base_url, vm, domain)),
-        )
+        self.auth(self.client.delete(format!(
+            "{}/api/vms/{}/domains/{}",
+            self.base_url, vm, domain
+        )))
         .send()
         .await?
         .error_for_status()?;
@@ -231,7 +298,10 @@ impl ApiClient {
 
     pub async fn get_vm_metrics(&self, vm: &str) -> Result<serde_json::Value> {
         let resp = self
-            .auth(self.client.get(format!("{}/api/vms/{}/metrics", self.base_url, vm)))
+            .auth(
+                self.client
+                    .get(format!("{}/api/vms/{}/metrics", self.base_url, vm)),
+            )
             .send()
             .await?
             .error_for_status()?
@@ -243,7 +313,10 @@ impl ApiClient {
     // ── Plan / subscription ───────────────────────────────────────────────────
 
     pub async fn get_subscription(&self, owner_id: &str) -> Result<SubscriptionInfo> {
-        let url = format!("{}/api/billing/subscription?owner_id={}", self.base_url, owner_id);
+        let url = format!(
+            "{}/api/billing/subscription?owner_id={}",
+            self.base_url, owner_id
+        );
         let raw: serde_json::Value = self
             .auth(self.client.get(url))
             .send()
@@ -285,7 +358,10 @@ impl ApiClient {
 
     pub async fn list_snapshots(&self, vm: &str) -> Result<Vec<SnapshotInfo>> {
         let resp = self
-            .auth(self.client.get(format!("{}/api/vms/{}/snapshots", self.base_url, vm)))
+            .auth(
+                self.client
+                    .get(format!("{}/api/vms/{}/snapshots", self.base_url, vm)),
+            )
             .send()
             .await?
             .error_for_status()?
@@ -295,10 +371,10 @@ impl ApiClient {
     }
 
     pub async fn restore_snapshot(&self, vm: &str, snapshot: &str) -> Result<()> {
-        self.auth(
-            self.client
-                .post(format!("{}/api/vms/{}/snapshots/{}/restore", self.base_url, vm, snapshot)),
-        )
+        self.auth(self.client.post(format!(
+            "{}/api/vms/{}/snapshots/{}/restore",
+            self.base_url, vm, snapshot
+        )))
         .send()
         .await?
         .error_for_status()?;
@@ -306,10 +382,10 @@ impl ApiClient {
     }
 
     pub async fn delete_snapshot(&self, vm: &str, snapshot: &str) -> Result<()> {
-        self.auth(
-            self.client
-                .delete(format!("{}/api/vms/{}/snapshots/{}", self.base_url, vm, snapshot)),
-        )
+        self.auth(self.client.delete(format!(
+            "{}/api/vms/{}/snapshots/{}",
+            self.base_url, vm, snapshot
+        )))
         .send()
         .await?
         .error_for_status()?;
@@ -335,7 +411,9 @@ pub struct VmInfo {
     pub owner_id: Option<String>,
 }
 
-fn default_proxy_port() -> u16 { 80 }
+fn default_proxy_port() -> u16 {
+    80
+}
 
 /// Subscription + usage summary returned by the API.
 #[derive(Debug, Deserialize)]
@@ -394,24 +472,14 @@ async fn check_owns<'a>(api: &ApiClient, name: &str, user: &User) -> Result<VmIn
 
 /// Execute a command string on behalf of `user`, returning output to send
 /// back to the SSH client. Returns `(output, exit_code)`.
-pub async fn run(
-    cmd_str: &str,
-    user: &User,
-    api: &ApiClient,
-    db_path: &str,
-) -> (String, u32) {
+pub async fn run(cmd_str: &str, user: &User, api: &ApiClient, db_path: &str) -> (String, u32) {
     match execute(cmd_str, user, api, db_path).await {
         Ok(output) => (output, 0),
         Err(e) => (format!("error: {}\r\n", e), 1),
     }
 }
 
-async fn execute(
-    cmd_str: &str,
-    user: &User,
-    api: &ApiClient,
-    db_path: &str,
-) -> Result<String> {
+async fn execute(cmd_str: &str, user: &User, api: &ApiClient, db_path: &str) -> Result<String> {
     let parts: Vec<&str> = cmd_str.split_whitespace().collect();
     if parts.is_empty() {
         return Ok(help());
@@ -435,8 +503,7 @@ async fn execute(
                 let access = if vm.proxy_public { "public" } else { "private" };
                 out.push_str(&format!(
                     "{:<12} {:<10} {:<16} {:>5} {:>8} MiB  {:>5}  {:<8}\r\n",
-                    vm.name, vm.status, vm.ip, vm.cpus, vm.memory_mb,
-                    vm.proxy_port, access,
+                    vm.name, vm.status, vm.ip, vm.cpus, vm.memory_mb, vm.proxy_port, access,
                 ));
             }
             Ok(out)
@@ -453,17 +520,25 @@ async fn execute(
                 match parts[i] {
                     "--name" | "-n" => {
                         i += 1;
-                        if i < parts.len() { name = parts[i].to_string(); }
+                        if i < parts.len() {
+                            name = parts[i].to_string();
+                        }
                     }
                     "--cpus" | "-c" => {
                         i += 1;
-                        if i < parts.len() { cpus = parts[i].parse().unwrap_or(2); }
+                        if i < parts.len() {
+                            cpus = parts[i].parse().unwrap_or(2);
+                        }
                     }
                     "--memory" | "--mem" | "-m" => {
                         i += 1;
-                        if i < parts.len() { memory_mb = parts[i].parse().unwrap_or(1024); }
+                        if i < parts.len() {
+                            memory_mb = parts[i].parse().unwrap_or(1024);
+                        }
                     }
-                    arg if !arg.starts_with('-') => { name = parts[i].to_string(); }
+                    arg if !arg.starts_with('-') => {
+                        name = parts[i].to_string();
+                    }
                     _ => {}
                 }
                 i += 1;
@@ -503,7 +578,68 @@ async fn execute(
             }
             check_owns(api, parts[1], user).await?;
             let vm = api.restart_vm(parts[1]).await?;
-            Ok(format!("✓ VM '{}' restarted (status: {})\r\n", vm.name, vm.status))
+            Ok(format!(
+                "✓ VM '{}' restarted (status: {})\r\n",
+                vm.name, vm.status
+            ))
+        }
+
+        // ── resize ─────────────────────────────────────────────────────────
+        "resize" => {
+            if parts.len() < 2 {
+                return Ok("usage: resize <name> [--cpus N] [--mem N] [--disk N]\r\n".to_string());
+            }
+            let vm_name = parts[1];
+            check_owns(api, vm_name, user).await?;
+
+            // Parse flags
+            let mut vcpus = None;
+            let mut memory_mb = None;
+            let mut disk_gb = None;
+            let mut i = 2;
+            while i < parts.len() {
+                match parts[i] {
+                    "--cpus" if i + 1 < parts.len() => {
+                        vcpus = Some(
+                            parts[i + 1]
+                                .parse::<u32>()
+                                .map_err(|_| anyhow::anyhow!("invalid --cpus value"))?,
+                        );
+                        i += 2;
+                    }
+                    "--mem" if i + 1 < parts.len() => {
+                        memory_mb = Some(
+                            parts[i + 1]
+                                .parse::<u32>()
+                                .map_err(|_| anyhow::anyhow!("invalid --mem value"))?,
+                        );
+                        i += 2;
+                    }
+                    "--disk" if i + 1 < parts.len() => {
+                        disk_gb = Some(
+                            parts[i + 1]
+                                .parse::<u32>()
+                                .map_err(|_| anyhow::anyhow!("invalid --disk value"))?,
+                        );
+                        i += 2;
+                    }
+                    _ => {
+                        return Ok(format!("unknown flag: {}\r\n", parts[i]));
+                    }
+                }
+            }
+
+            if vcpus.is_none() && memory_mb.is_none() && disk_gb.is_none() {
+                return Ok(
+                    "at least one of --cpus, --mem, or --disk must be specified\r\n".to_string(),
+                );
+            }
+
+            let vm = api.resize_vm(vm_name, vcpus, memory_mb, disk_gb).await?;
+            Ok(format!(
+                "✓ VM '{}' resized:\r\n  CPU: {} vCPUs\r\n  Memory: {} MB\r\n",
+                vm.name, vm.cpus, vm.memory_mb
+            ))
         }
 
         // ── rename ─────────────────────────────────────────────────────────
@@ -538,12 +674,10 @@ async fn execute(
         }
 
         // ── whoami ─────────────────────────────────────────────────────────
-        "whoami" => {
-            Ok(format!(
-                "email:      {}\r\nuser-id:    {}\r\ncreated:    {}\r\n",
-                user.email, user.id, user.created_at,
-            ))
-        }
+        "whoami" => Ok(format!(
+            "email:      {}\r\nuser-id:    {}\r\ncreated:    {}\r\n",
+            user.email, user.id, user.created_at,
+        )),
 
         // ── ssh-key ────────────────────────────────────────────────────────
         "ssh-key" => {
@@ -577,7 +711,8 @@ async fn execute(
                     match matching.len() {
                         0 => Ok(format!("no key matching '{}'\r\n", fp_prefix)),
                         1 => {
-                            if crate::db::remove_ssh_key(&conn, &user.id, &matching[0].fingerprint)? {
+                            if crate::db::remove_ssh_key(&conn, &user.id, &matching[0].fingerprint)?
+                            {
                                 Ok(format!("✓ key '{}' removed\r\n", matching[0].name))
                             } else {
                                 Ok("key not found\r\n".to_string())
@@ -599,7 +734,8 @@ async fn execute(
                 return Ok("usage: expose <vm> [--port <n>]\r\n".to_string());
             }
             let vm_name = parts[1];
-            let port: u16 = parts.windows(2)
+            let port: u16 = parts
+                .windows(2)
                 .find(|w| w[0] == "--port" || w[0] == "-p")
                 .and_then(|w| w[1].parse().ok())
                 .unwrap_or(80);
@@ -657,11 +793,16 @@ async fn execute(
                          Uptime:  {}s\r\n",
                         vm_name,
                         get_f64("cpu_usage_percent"),
-                        get_u64("memory_used_mb"), get_u64("memory_total_mb"),
+                        get_u64("memory_used_mb"),
+                        get_u64("memory_total_mb"),
                         if get_u64("memory_total_mb") > 0 {
-                            get_u64("memory_used_mb") as f64 / get_u64("memory_total_mb") as f64 * 100.0
-                        } else { 0.0 },
-                        get_u64("disk_used_gb"), get_u64("disk_total_gb"),
+                            get_u64("memory_used_mb") as f64 / get_u64("memory_total_mb") as f64
+                                * 100.0
+                        } else {
+                            0.0
+                        },
+                        get_u64("disk_used_gb"),
+                        get_u64("disk_total_gb"),
                         get_u64("network_rx_bytes") as f64 / (1024.0 * 1024.0),
                         get_u64("network_tx_bytes") as f64 / (1024.0 * 1024.0),
                         get_f64("load_avg_1m"),
@@ -673,28 +814,37 @@ async fn execute(
         }
 
         // ── plan ──────────────────────────────────────────────────────────
-        "plan" => {
-            match api.get_subscription(&user.id).await {
-                Ok(sub) => {
-                    let bar = |used: u32, max: u32| -> String {
-                        let w = 16usize;
-                        let filled = if max == 0 { 0 } else {
-                            ((used as f64 / max as f64) * w as f64) as usize
-                        }.min(w);
-                        format!("[{}{}] {}/{}", "#".repeat(filled), ".".repeat(w - filled), used, max)
-                    };
-                    Ok(format!(
-                        "Plan: {} ({})\r\n\r\n  VMs:     {}\r\n  vCPUs:   {}\r\n  Memory:  {} / {} MiB\r\n  Snaps:   {}\r\n",
-                        sub.plan_name, sub.status,
-                        bar(sub.usage_vms, sub.max_vms),
-                        bar(sub.usage_vcpus, sub.max_vcpus),
-                        sub.usage_memory_mb, sub.max_memory_mb,
-                        bar(sub.usage_snapshots, sub.max_snapshots),
-                    ))
-                }
-                Err(e) => Ok(format!("error fetching plan: {e}\r\n")),
+        "plan" => match api.get_subscription(&user.id).await {
+            Ok(sub) => {
+                let bar = |used: u32, max: u32| -> String {
+                    let w = 16usize;
+                    let filled = if max == 0 {
+                        0
+                    } else {
+                        ((used as f64 / max as f64) * w as f64) as usize
+                    }
+                    .min(w);
+                    format!(
+                        "[{}{}] {}/{}",
+                        "#".repeat(filled),
+                        ".".repeat(w - filled),
+                        used,
+                        max
+                    )
+                };
+                Ok(format!(
+                    "Plan: {} ({})\r\n\r\n  VMs:     {}\r\n  vCPUs:   {}\r\n  Memory:  {} / {} MiB\r\n  Snaps:   {}\r\n",
+                    sub.plan_name,
+                    sub.status,
+                    bar(sub.usage_vms, sub.max_vms),
+                    bar(sub.usage_vcpus, sub.max_vcpus),
+                    sub.usage_memory_mb,
+                    sub.max_memory_mb,
+                    bar(sub.usage_snapshots, sub.max_snapshots),
+                ))
             }
-        }
+            Err(e) => Ok(format!("error fetching plan: {e}\r\n")),
+        },
 
         // ── snapshot ───────────────────────────────────────────────────────
         "snapshot" => {
@@ -702,15 +852,19 @@ async fn execute(
                 return Ok("usage: snapshot <vm> [--name <n>]\r\n".to_string());
             }
             let vm_name = parts[1];
-            let snap_name = parts.windows(2)
+            let snap_name = parts
+                .windows(2)
                 .find(|w| w[0] == "--name" || w[0] == "-n")
                 .map(|w| w[1].to_string());
             check_owns(api, vm_name, user).await?;
             let snap = api.create_snapshot(vm_name, snap_name).await?;
             Ok(format!(
                 "✓ Snapshot '{}' created for VM '{}' ({} bytes)\r\n  Created: {}\r\n",
-                snap.name, snap.vm_name,
-                snap.size_bytes.map(|s| s.to_string()).unwrap_or_else(|| "-".to_string()),
+                snap.name,
+                snap.vm_name,
+                snap.size_bytes
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
                 snap.created_at,
             ))
         }
@@ -729,10 +883,14 @@ async fn execute(
             out.push_str(&"-".repeat(65));
             out.push_str("\r\n");
             for s in &snaps {
-                let size = s.size_bytes
+                let size = s
+                    .size_bytes
                     .map(|b| format!("{:.1} MiB", b as f64 / (1024.0 * 1024.0)))
                     .unwrap_or_else(|| "-".to_string());
-                out.push_str(&format!("{:<30} {:>12}  {}\r\n", s.name, size, s.created_at));
+                out.push_str(&format!(
+                    "{:<30} {:>12}  {}\r\n",
+                    s.name, size, s.created_at
+                ));
             }
             Ok(out)
         }
@@ -740,7 +898,9 @@ async fn execute(
         // ── restore ────────────────────────────────────────────────────────
         "restore" => {
             if parts.len() < 3 {
-                return Ok("usage: restore <vm> <snapshot>  (VM must be stopped first)\r\n".to_string());
+                return Ok(
+                    "usage: restore <vm> <snapshot>  (VM must be stopped first)\r\n".to_string(),
+                );
             }
             let vm_name = parts[1];
             let snap_name = parts[2];
@@ -815,7 +975,10 @@ async fn execute(
                     let domain_name = parts[3];
                     check_owns(api, vm_name, user).await?;
                     api.remove_custom_domain(vm_name, domain_name).await?;
-                    Ok(format!("✓ Custom domain '{}' removed from VM '{}'\r\n", domain_name, vm_name))
+                    Ok(format!(
+                        "✓ Custom domain '{}' removed from VM '{}'\r\n",
+                        domain_name, vm_name
+                    ))
                 }
                 _ => Ok("usage: domain <add|ls|rm> <vm> [domain]\r\n".to_string()),
             }
@@ -841,6 +1004,7 @@ fn help() -> String {
         "  rm <name>                       destroy a VM",
         "  stop <name>                     stop a VM (keep rootfs)",
         "  restart <name>                  reboot a running VM",
+        "  resize <vm> [--cpus N] [--mem M] [--disk G]  resize a stopped VM",
         "  rename <old> <new>              rename a stopped VM",
         "  cp <source> [new-name]          copy a VM",
         "",

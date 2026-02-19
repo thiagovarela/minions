@@ -10,8 +10,7 @@ use std::time::{Duration, Instant};
 
 use askama::Template;
 use axum::{
-    Form,
-    Router,
+    Form, Router,
     extract::{Path, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
@@ -44,7 +43,9 @@ impl DashboardSessions {
     }
 
     pub fn validate(&self, token: &str) -> bool {
-        let Ok(mut m) = self.0.lock() else { return false };
+        let Ok(mut m) = self.0.lock() else {
+            return false;
+        };
         if let Some(ts) = m.get(token) {
             if ts.elapsed() < SESSION_TTL {
                 return true;
@@ -91,7 +92,11 @@ fn clear_session_cookie() -> HeaderValue {
 /// Check session cookie. Returns the token if valid, else `None`.
 fn check_session(headers: &HeaderMap, sessions: &DashboardSessions) -> Option<String> {
     let token = get_session_token(headers)?;
-    if sessions.validate(&token) { Some(token) } else { None }
+    if sessions.validate(&token) {
+        Some(token)
+    } else {
+        None
+    }
 }
 
 // ── Template helper ───────────────────────────────────────────────────────────
@@ -156,6 +161,7 @@ struct VmDetailTemplate {
     vm_ip: String,
     vm_vcpus: u32,
     vm_memory_mb: u32,
+    vm_disk_gb: u64,
     vm_owner: String,
     has_metrics: bool,
     cpu_str: String,
@@ -199,16 +205,23 @@ pub fn router() -> Router<AppState> {
         .route("/dashboard", get(dashboard))
         .route("/dashboard/vms-fragment", get(vms_fragment))
         .route("/dashboard/vms/{name}", get(vm_detail))
-        .route("/dashboard/vms/{name}/metrics-fragment", get(metrics_fragment_handler))
+        .route(
+            "/dashboard/vms/{name}/metrics-fragment",
+            get(metrics_fragment_handler),
+        )
         .route("/dashboard/vms/{name}/start", post(vm_start))
         .route("/dashboard/vms/{name}/restart", post(vm_restart))
         .route("/dashboard/vms/{name}/stop", post(vm_stop))
         .route("/dashboard/vms/{name}/snapshot", post(vm_snapshot))
         .route("/dashboard/vms/{name}/expose", post(vm_expose))
+        .route("/dashboard/vms/{name}/resize", post(vm_resize))
         .route("/dashboard/vms/{name}/set-public", post(vm_set_public))
         .route("/dashboard/vms/{name}/set-private", post(vm_set_private))
         .route("/dashboard/vms/{name}/domains", post(vm_add_domain))
-        .route("/dashboard/vms/{name}/domains/{domain}", delete(vm_remove_domain))
+        .route(
+            "/dashboard/vms/{name}/domains/{domain}",
+            delete(vm_remove_domain),
+        )
         .route("/dashboard/vms/{name}", delete(vm_destroy))
         .route(
             "/dashboard/vms/{name}/snapshots/{snap}/restore",
@@ -226,7 +239,9 @@ async fn login_page(headers: HeaderMap, State(state): State<AppState>) -> Respon
     if check_session(&headers, &state.sessions).is_some() {
         return Redirect::to("/dashboard").into_response();
     }
-    render(LoginTemplate { error: String::new() })
+    render(LoginTemplate {
+        error: String::new(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -234,13 +249,12 @@ struct LoginForm {
     api_key: String,
 }
 
-async fn login_submit(
-    State(state): State<AppState>,
-    Form(form): Form<LoginForm>,
-) -> Response {
+async fn login_submit(State(state): State<AppState>, Form(form): Form<LoginForm>) -> Response {
     let expected = std::env::var("MINIONS_API_KEY").unwrap_or_default();
     if expected.is_empty() || !crate::auth::constant_time_eq(&form.api_key, &expected) {
-        return render(LoginTemplate { error: "Invalid API key.".to_string() });
+        return render(LoginTemplate {
+            error: "Invalid API key.".to_string(),
+        });
     }
     let token = state.sessions.create();
     let mut resp = Redirect::to("/dashboard").into_response();
@@ -294,16 +308,34 @@ async fn vm_detail(
         Ok(None) => return (StatusCode::NOT_FOUND, "VM not found").into_response(),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    let snapshots = db::list_snapshots(&conn, &name).unwrap_or_default().into_iter().map(|s| {
-        let size_mb = snapshot_size_mb(&state.db_path, &name, &s.name);
-        SnapRow { name: s.name, created_at: s.created_at, size_mb }
-    }).collect();
+    let snapshots = db::list_snapshots(&conn, &name)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| {
+            let size_mb = snapshot_size_mb(&state.db_path, &name, &s.name);
+            SnapRow {
+                name: s.name,
+                created_at: s.created_at,
+                size_mb,
+            }
+        })
+        .collect();
 
-    let custom_domains = db::list_custom_domains(&conn, &name).unwrap_or_default().into_iter().map(|d| {
-        CustomDomainRow { domain: d.domain, verified: d.verified }
-    }).collect();
+    let custom_domains = db::list_custom_domains(&conn, &name)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|d| CustomDomainRow {
+            domain: d.domain,
+            verified: d.verified,
+        })
+        .collect();
 
     let (has_metrics, mf) = build_metrics_fields(&name, &state.metrics);
+
+    // Read actual disk size from rootfs file
+    let vm_disk_gb = std::fs::metadata(&vm.rootfs_path)
+        .map(|m| (m.len() as f64 / (1024.0 * 1024.0 * 1024.0)).ceil() as u64)
+        .unwrap_or(0);
 
     render(VmDetailTemplate {
         vm_name: name.clone(),
@@ -311,6 +343,7 @@ async fn vm_detail(
         vm_ip: vm.ip.clone(),
         vm_vcpus: vm.vcpus,
         vm_memory_mb: vm.memory_mb,
+        vm_disk_gb,
         vm_owner: vm.owner_id.as_deref().unwrap_or("system").to_string(),
         has_metrics,
         cpu_str: mf.cpu_str,
@@ -325,7 +358,10 @@ async fn vm_detail(
         snapshots,
         proxy_port: vm.proxy_port,
         proxy_public: vm.proxy_public,
-        domain: state.domain.as_deref().map_or(String::new(), |d| d.to_string()),
+        domain: state
+            .domain
+            .as_deref()
+            .map_or(String::new(), |d| d.to_string()),
         custom_domains,
     })
 }
@@ -432,7 +468,8 @@ async fn vm_snapshot(
         Ok(snap) => Html(format!(
             "<span class='text-green-400 text-sm'>✓ Snapshot '{}' created</span>",
             snap.name
-        )).into_response(),
+        ))
+        .into_response(),
         Err(e) => Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
     }
 }
@@ -453,18 +490,70 @@ async fn vm_expose(
     }
     let conn = match db::open(&state.db_path) {
         Ok(c) => c,
-        Err(e) => return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
+        Err(e) => {
+            return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response();
+        }
     };
     if !(1..=65535).contains(&form.port) {
-        return Html("<span class='text-red-400 text-sm'>✗ Port must be between 1 and 65535</span>").into_response();
+        return Html(
+            "<span class='text-red-400 text-sm'>✗ Port must be between 1 and 65535</span>",
+        )
+        .into_response();
     }
     match db::set_proxy_port(&conn, &name, form.port) {
         Ok(true) => Html(format!(
             "<span class='text-green-400 text-sm'>✓ Proxy port set to {}</span>",
             form.port
-        )).into_response(),
-        Ok(false) => Html("<span class='text-red-400 text-sm'>✗ VM not found</span>").into_response(),
+        ))
+        .into_response(),
+        Ok(false) => {
+            Html("<span class='text-red-400 text-sm'>✗ VM not found</span>").into_response()
+        }
         Err(e) => Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ResizeForm {
+    vcpus: Option<u32>,
+    memory_mb: Option<u32>,
+    disk_gb: Option<u32>,
+}
+
+async fn vm_resize(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Form(form): Form<ResizeForm>,
+) -> Response {
+    if check_session(&headers, &state.sessions).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    // Run the resize operation
+    let db_path = state.db_path.clone();
+    match vm::resize(&db_path, &name, form.vcpus, form.memory_mb, form.disk_gb).await {
+        Ok(_) => {
+            // Return success message with updated values
+            let conn = match db::open(&db_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>"))
+                        .into_response();
+                }
+            };
+            match db::get_vm(&conn, &name) {
+                Ok(Some(vm)) => Html(format!(
+                    "<span class='text-green-400 text-sm'>✓ VM resized: {} vCPUs, {} MB memory</span>",
+                    vm.vcpus, vm.memory_mb
+                )).into_response(),
+                _ => Html("<span class='text-green-400 text-sm'>✓ VM resized</span>").into_response(),
+            }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            Html(format!("<span class='text-red-400 text-sm'>✗ {msg}</span>")).into_response()
+        }
     }
 }
 
@@ -478,14 +567,18 @@ async fn vm_set_public(
     }
     let conn = match db::open(&state.db_path) {
         Ok(c) => c,
-        Err(e) => return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
+        Err(e) => {
+            return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response();
+        }
     };
     match db::set_proxy_public(&conn, &name, true) {
         Ok(true) => {
             // Redirect back to the VM detail page so the access toggle updates.
             Redirect::to(&format!("/dashboard/vms/{name}")).into_response()
         }
-        Ok(false) => Html("<span class='text-red-400 text-sm'>✗ VM not found</span>").into_response(),
+        Ok(false) => {
+            Html("<span class='text-red-400 text-sm'>✗ VM not found</span>").into_response()
+        }
         Err(e) => Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
     }
 }
@@ -500,14 +593,18 @@ async fn vm_set_private(
     }
     let conn = match db::open(&state.db_path) {
         Ok(c) => c,
-        Err(e) => return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
+        Err(e) => {
+            return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response();
+        }
     };
     match db::set_proxy_public(&conn, &name, false) {
         Ok(true) => {
             // Redirect back to the VM detail page so the access toggle updates.
             Redirect::to(&format!("/dashboard/vms/{name}")).into_response()
         }
-        Ok(false) => Html("<span class='text-red-400 text-sm'>✗ VM not found</span>").into_response(),
+        Ok(false) => {
+            Html("<span class='text-red-400 text-sm'>✗ VM not found</span>").into_response()
+        }
         Err(e) => Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
     }
 }
@@ -526,7 +623,7 @@ async fn vm_add_domain(
     if check_session(&headers, &state.sessions).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    
+
     // Call the API internally via reqwest (reuse validation + DNS check logic)
     let api_url = format!("http://127.0.0.1:3000/api/vms/{}/domains", name);
     let client = reqwest::Client::new();
@@ -535,15 +632,22 @@ async fn vm_add_domain(
         .json(&serde_json::json!({ "domain": form.domain }))
         .send()
         .await;
-    
+
     match resp {
         Ok(r) if r.status().is_success() => {
             // Refresh the page to show the new domain
             Redirect::to(&format!("/dashboard/vms/{name}")).into_response()
         }
         Ok(r) => {
-            let error = r.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            Html(format!("<span class='text-red-400 text-sm'>✗ {}</span>", error)).into_response()
+            let error = r
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            Html(format!(
+                "<span class='text-red-400 text-sm'>✗ {}</span>",
+                error
+            ))
+            .into_response()
         }
         Err(e) => {
             Html(format!("<span class='text-red-400 text-sm'>✗ {}</span>", e)).into_response()
@@ -559,15 +663,19 @@ async fn vm_remove_domain(
     if check_session(&headers, &state.sessions).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    
+
     let conn = match db::open(&state.db_path) {
         Ok(c) => c,
-        Err(e) => return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
+        Err(e) => {
+            return Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response();
+        }
     };
-    
+
     match db::remove_custom_domain(&conn, &name, &domain) {
         Ok(true) => StatusCode::OK.into_response(),
-        Ok(false) => Html("<span class='text-red-400 text-sm'>✗ Domain not found</span>").into_response(),
+        Ok(false) => {
+            Html("<span class='text-red-400 text-sm'>✗ Domain not found</span>").into_response()
+        }
         Err(e) => Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
     }
 }
@@ -582,7 +690,8 @@ async fn vm_restore_snapshot(
     }
     let db_path = state.db_path.as_ref().clone();
     match vm::restore_snapshot(&db_path, &name, &snap).await {
-        Ok(()) => Html("<span class='text-green-400 text-sm'>✓ Restored successfully</span>").into_response(),
+        Ok(()) => Html("<span class='text-green-400 text-sm'>✓ Restored successfully</span>")
+            .into_response(),
         Err(e) => Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
     }
 }
@@ -610,21 +719,23 @@ fn load_vm_rows(state: &AppState) -> Vec<VmRow> {
         Err(_) => return Vec::new(),
     };
     let vms = db::list_vms(&conn).unwrap_or_default();
-    vms.into_iter().map(|vm| {
-        let metrics = state.metrics.get_vm(&vm.name);
-        let cpu_percent = metrics.as_ref().map(|m| m.cpu_usage_percent).unwrap_or(0.0);
-        let cpu_percent_str = format!("{:.1}", cpu_percent);
-        VmRow {
-            name: vm.name,
-            status: vm.status,
-            ip: vm.ip,
-            vcpus: vm.vcpus,
-            memory_mb: vm.memory_mb,
-            owner: vm.owner_id.as_deref().unwrap_or("system").to_string(),
-            cpu_percent,
-            cpu_percent_str,
-        }
-    }).collect()
+    vms.into_iter()
+        .map(|vm| {
+            let metrics = state.metrics.get_vm(&vm.name);
+            let cpu_percent = metrics.as_ref().map(|m| m.cpu_usage_percent).unwrap_or(0.0);
+            let cpu_percent_str = format!("{:.1}", cpu_percent);
+            VmRow {
+                name: vm.name,
+                status: vm.status,
+                ip: vm.ip,
+                vcpus: vm.vcpus,
+                memory_mb: vm.memory_mb,
+                owner: vm.owner_id.as_deref().unwrap_or("system").to_string(),
+                cpu_percent,
+                cpu_percent_str,
+            }
+        })
+        .collect()
 }
 
 struct MetricsFields {
@@ -641,27 +752,40 @@ struct MetricsFields {
 
 fn build_metrics_fields(vm_name: &str, store: &MetricsStore) -> (bool, MetricsFields) {
     match store.get_vm(vm_name) {
-        None => (false, MetricsFields {
-            cpu_str: "0.0".into(), load_str: "0.00".into(),
-            mem_used_mb: 0, mem_total_mb: 0, mem_pct_str: "0.0".into(),
-            disk_used_gb: 0, disk_total_gb: 0,
-            net_rx_str: "0.00".into(), net_tx_str: "0.00".into(),
-        }),
+        None => (
+            false,
+            MetricsFields {
+                cpu_str: "0.0".into(),
+                load_str: "0.00".into(),
+                mem_used_mb: 0,
+                mem_total_mb: 0,
+                mem_pct_str: "0.0".into(),
+                disk_used_gb: 0,
+                disk_total_gb: 0,
+                net_rx_str: "0.00".into(),
+                net_tx_str: "0.00".into(),
+            },
+        ),
         Some(m) => {
             let mem_pct = if m.memory_total_mb > 0 {
                 m.memory_used_mb as f64 / m.memory_total_mb as f64 * 100.0
-            } else { 0.0 };
-            (true, MetricsFields {
-                cpu_str: format!("{:.1}", m.cpu_usage_percent),
-                load_str: format!("{:.2}", m.load_avg_1m),
-                mem_used_mb: m.memory_used_mb,
-                mem_total_mb: m.memory_total_mb,
-                mem_pct_str: format!("{:.1}", mem_pct),
-                disk_used_gb: m.disk_used_gb,
-                disk_total_gb: m.disk_total_gb,
-                net_rx_str: format!("{:.2}", m.network_rx_bytes as f64 / (1024.0 * 1024.0)),
-                net_tx_str: format!("{:.2}", m.network_tx_bytes as f64 / (1024.0 * 1024.0)),
-            })
+            } else {
+                0.0
+            };
+            (
+                true,
+                MetricsFields {
+                    cpu_str: format!("{:.1}", m.cpu_usage_percent),
+                    load_str: format!("{:.2}", m.load_avg_1m),
+                    mem_used_mb: m.memory_used_mb,
+                    mem_total_mb: m.memory_total_mb,
+                    mem_pct_str: format!("{:.1}", mem_pct),
+                    disk_used_gb: m.disk_used_gb,
+                    disk_total_gb: m.disk_total_gb,
+                    net_rx_str: format!("{:.2}", m.network_rx_bytes as f64 / (1024.0 * 1024.0)),
+                    net_tx_str: format!("{:.2}", m.network_tx_bytes as f64 / (1024.0 * 1024.0)),
+                },
+            )
         }
     }
 }
@@ -670,5 +794,7 @@ fn build_metrics_fields(vm_name: &str, store: &MetricsStore) -> (bool, MetricsFi
 fn snapshot_size_mb(db_path: &str, vm_name: &str, snap_name: &str) -> u64 {
     use crate::storage;
     let path = storage::snapshot_rootfs_path(vm_name, snap_name);
-    std::fs::metadata(path).map(|m| m.len() / (1024 * 1024)).unwrap_or(0)
+    std::fs::metadata(path)
+        .map(|m| m.len() / (1024 * 1024))
+        .unwrap_or(0)
 }

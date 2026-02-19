@@ -137,6 +137,64 @@
   </div>
 </section>
 
+<!-- Resources -->
+{% if vm_status == "stopped" %}
+<section class="mb-8">
+  <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Resources</h2>
+  <div class="rounded-xl border border-gray-800 bg-gray-900 p-5">
+    <p class="text-xs text-gray-500 mb-4">Resize VM resources (VM must be stopped). Changes take effect on next start.</p>
+    <form hx-post="/dashboard/vms/{{ vm_name }}/resize"
+          hx-target="#resize-result"
+          hx-swap="innerHTML"
+          class="space-y-4">
+      
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <!-- CPU -->
+        <div>
+          <label class="text-xs text-gray-500 uppercase tracking-wide block mb-1">
+            CPU (vCPUs)
+          </label>
+          <input type="number" name="vcpus" value="{{ vm_vcpus }}" min="1" max="16"
+                 class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white font-mono
+                        focus:outline-none focus:border-indigo-500"/>
+          <p class="text-xs text-gray-600 mt-1">Range: 1-16</p>
+        </div>
+
+        <!-- Memory -->
+        <div>
+          <label class="text-xs text-gray-500 uppercase tracking-wide block mb-1">
+            Memory (MB)
+          </label>
+          <input type="number" name="memory_mb" value="{{ vm_memory_mb }}" min="128" max="16384" step="128"
+                 class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white font-mono
+                        focus:outline-none focus:border-indigo-500"/>
+          <p class="text-xs text-gray-600 mt-1">Range: 128-16384 MB</p>
+        </div>
+
+        <!-- Disk -->
+        <div>
+          <label class="text-xs text-gray-500 uppercase tracking-wide block mb-1">
+            Disk (GB)
+          </label>
+          <input type="number" name="disk_gb" value="{{ vm_disk_gb }}" min="{{ vm_disk_gb }}" max="200"
+                 class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white font-mono
+                        focus:outline-none focus:border-indigo-500"/>
+          <p class="text-xs text-gray-600 mt-1">Can only grow, not shrink</p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <button type="submit"
+                class="rounded-lg bg-indigo-700 hover:bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition">
+          💾 Resize
+        </button>
+        <div id="resize-result"></div>
+      </div>
+    </form>
+  </div>
+</section>
+{% endif %}
+
 <!-- Custom Domains -->
 <section class="mb-8">
   <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Custom Domains</h2>

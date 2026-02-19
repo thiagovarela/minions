@@ -97,7 +97,11 @@ pub fn extract_token(headers: &HeaderMap) -> Option<String> {
         .filter_map(|part| {
             let part = part.trim();
             let (k, v) = part.split_once('=')?;
-            if k.trim() == COOKIE_NAME { Some(v.trim().to_string()) } else { None }
+            if k.trim() == COOKIE_NAME {
+                Some(v.trim().to_string())
+            } else {
+                None
+            }
         })
         .next()
 }
@@ -105,9 +109,7 @@ pub fn extract_token(headers: &HeaderMap) -> Option<String> {
 /// Build a `Set-Cookie` header value that sets the session cookie.
 /// The `Secure` flag is included so the cookie is only sent over HTTPS.
 pub fn set_cookie(token: &str) -> String {
-    format!(
-        "{COOKIE_NAME}={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=86400"
-    )
+    format!("{COOKIE_NAME}={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=86400")
 }
 
 /// Build a `Set-Cookie` header value that clears the session cookie.
@@ -261,8 +263,17 @@ mod tests {
     #[test]
     fn test_cookie_has_secure_flag() {
         let cookie = set_cookie("testtoken");
-        assert!(cookie.contains("Secure"), "cookie must have Secure flag: {cookie}");
-        assert!(cookie.contains("HttpOnly"), "cookie must have HttpOnly flag: {cookie}");
-        assert!(cookie.contains("SameSite=Lax"), "cookie must have SameSite=Lax: {cookie}");
+        assert!(
+            cookie.contains("Secure"),
+            "cookie must have Secure flag: {cookie}"
+        );
+        assert!(
+            cookie.contains("HttpOnly"),
+            "cookie must have HttpOnly flag: {cookie}"
+        );
+        assert!(
+            cookie.contains("SameSite=Lax"),
+            "cookie must have SameSite=Lax: {cookie}"
+        );
     }
 }

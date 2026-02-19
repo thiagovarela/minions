@@ -72,6 +72,16 @@ enum Commands {
     List,
     /// Restart a running VM (ACPI reboot signal)
     Restart { name: String },
+    /// Resize a stopped VM's resources (CPU, memory, disk)
+    Resize {
+        name: String,
+        #[arg(long)]
+        cpus: Option<u32>,
+        #[arg(long)]
+        memory: Option<u32>,
+        #[arg(long)]
+        disk: Option<u32>,
+    },
     /// Rename a stopped VM
     Rename { old_name: String, new_name: String },
     /// Copy an existing VM to a new VM
@@ -228,7 +238,10 @@ impl From<db::Vm> for VmRow {
             ip: v.ip,
             cpus: v.vcpus,
             memory: format!("{} MiB", v.memory_mb),
-            pid: v.ch_pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
+            pid: v
+                .ch_pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "-".to_string()),
         }
     }
 }
@@ -241,7 +254,10 @@ impl From<client::VmResponse> for VmRow {
             ip: v.ip,
             cpus: v.cpus,
             memory: format!("{} MiB", v.memory_mb),
-            pid: v.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
+            pid: v
+                .pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "-".to_string()),
         }
     }
 }
@@ -305,11 +321,14 @@ fn print_snapshot_list(vm_name: &str, snaps: &[client::SnapshotResponse], json: 
             println!("No snapshots for VM '{vm_name}'.");
             return;
         }
-        let rows: Vec<SnapshotRow> = snaps.iter().map(|s| SnapshotRow {
-            name: s.name.clone(),
-            size: fmt_bytes(s.size_bytes),
-            created_at: s.created_at.clone(),
-        }).collect();
+        let rows: Vec<SnapshotRow> = snaps
+            .iter()
+            .map(|s| SnapshotRow {
+                name: s.name.clone(),
+                size: fmt_bytes(s.size_bytes),
+                created_at: s.created_at.clone(),
+            })
+            .collect();
         println!("{}", Table::new(rows));
     }
 }
@@ -331,7 +350,10 @@ fn print_vm_list<I: IntoIterator<Item = VmJson>>(vms: I, json: bool) {
                 ip: v.ip,
                 cpus: v.cpus,
                 memory: format!("{} MiB", v.memory_mb),
-                pid: v.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
+                pid: v
+                    .pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
             })
             .collect();
         println!("{}", Table::new(rows));
@@ -354,7 +376,16 @@ async fn main() -> Result<()> {
     // Init and Serve always run directly — they ARE the server side.
     match &cli.command {
         Commands::Init { persist } => return init::run(*persist),
-        Commands::Serve { bind, ssh_bind, proxy_bind, http_bind, domain, public_ip, acme_email, acme_staging } => {
+        Commands::Serve {
+            bind,
+            ssh_bind,
+            proxy_bind,
+            http_bind,
+            domain,
+            public_ip,
+            acme_email,
+            acme_staging,
+        } => {
             let ssh_pubkey = find_ssh_pubkey();
             return server::serve(
                 cli.db.clone(),
@@ -367,7 +398,8 @@ async fn main() -> Result<()> {
                 public_ip.clone(),
                 acme_email.clone(),
                 *acme_staging,
-            ).await;
+            )
+            .await;
         }
         // Ssh is always local (interactive terminal).
         Commands::Ssh { name } => return cmd_ssh(&cli.db, name).await,
@@ -391,7 +423,12 @@ async fn main() -> Result<()> {
 
 // ── Remote mode (HTTP client) ─────────────────────────────────────────────────
 
-async fn run_remote(host: &str, command: Commands, json: bool, api_key: Option<String>) -> Result<()> {
+async fn run_remote(
+    host: &str,
+    command: Commands,
+    json: bool,
+    api_key: Option<String>,
+) -> Result<()> {
     let c = client::Client::new(host, api_key);
 
     match command {
@@ -400,7 +437,11 @@ async fn run_remote(host: &str, command: Commands, json: bool, api_key: Option<S
                 println!("Creating VM '{name}' via {host}…");
             }
             let vm = c
-                .create_vm(client::CreateRequest { name, cpus, memory_mb: memory })
+                .create_vm(client::CreateRequest {
+                    name,
+                    cpus,
+                    memory_mb: memory,
+                })
                 .await?;
             print_vm(VmJson::from(vm), json);
         }
@@ -411,7 +452,10 @@ async fn run_remote(host: &str, command: Commands, json: bool, api_key: Option<S
             }
             c.destroy_vm(&name).await?;
             if json {
-                println!("{}", serde_json::json!({ "message": format!("VM '{name}' destroyed") }));
+                println!(
+                    "{}",
+                    serde_json::json!({ "message": format!("VM '{name}' destroyed") })
+                );
             } else {
                 println!("✓ VM '{name}' destroyed");
             }
@@ -446,6 +490,21 @@ async fn run_remote(host: &str, command: Commands, json: bool, api_key: Option<S
             print_vm(VmJson::from(vm), json);
         }
 
+        Commands::Resize {
+            name,
+            cpus,
+            memory,
+            disk,
+        } => {
+            if !json {
+                println!("Resizing VM '{name}' via {host}…");
+            }
+            let vm = c
+                .resize_vm(&name, cpus.clone(), memory.clone(), disk.clone())
+                .await?;
+            print_vm(VmJson::from(vm), json);
+        }
+
         Commands::Rename { old_name, new_name } => {
             if !json {
                 println!("Renaming VM '{old_name}' → '{new_name}' via {host}…");
@@ -477,11 +536,18 @@ async fn run_remote(host: &str, command: Commands, json: bool, api_key: Option<S
             let resp = c
                 .exec_vm(
                     &name,
-                    client::ExecRequest { command: cmd[0].clone(), args: cmd[1..].to_vec() },
+                    client::ExecRequest {
+                        command: cmd[0].clone(),
+                        args: cmd[1..].to_vec(),
+                    },
                 )
                 .await?;
-            if !resp.stdout.is_empty() { print!("{}", resp.stdout); }
-            if !resp.stderr.is_empty() { eprint!("{}", resp.stderr); }
+            if !resp.stdout.is_empty() {
+                print!("{}", resp.stdout);
+            }
+            if !resp.stderr.is_empty() {
+                eprint!("{}", resp.stderr);
+            }
             if resp.exit_code != 0 {
                 std::process::exit(resp.exit_code);
             }
@@ -497,37 +563,47 @@ async fn run_remote(host: &str, command: Commands, json: bool, api_key: Option<S
             print!("{logs}");
         }
 
-        Commands::Snapshot { action } => {
-            match action {
-                SnapshotCommands::Create { vm, name } => {
-                    if !json { println!("Creating snapshot for VM '{vm}'…"); }
-                    let snap = c.create_snapshot(&vm, name).await?;
-                    print_snapshot(&snap, json);
+        Commands::Snapshot { action } => match action {
+            SnapshotCommands::Create { vm, name } => {
+                if !json {
+                    println!("Creating snapshot for VM '{vm}'…");
                 }
-                SnapshotCommands::List { vm } => {
-                    let snaps = c.list_snapshots(&vm).await?;
-                    print_snapshot_list(&vm, &snaps, json);
+                let snap = c.create_snapshot(&vm, name).await?;
+                print_snapshot(&snap, json);
+            }
+            SnapshotCommands::List { vm } => {
+                let snaps = c.list_snapshots(&vm).await?;
+                print_snapshot_list(&vm, &snaps, json);
+            }
+            SnapshotCommands::Restore { vm, snapshot } => {
+                if !json {
+                    println!("Restoring VM '{vm}' from snapshot '{snapshot}'…");
                 }
-                SnapshotCommands::Restore { vm, snapshot } => {
-                    if !json { println!("Restoring VM '{vm}' from snapshot '{snapshot}'…"); }
-                    c.restore_snapshot(&vm, &snapshot).await?;
-                    if json {
-                        println!("{}", serde_json::json!({ "message": format!("VM '{vm}' restored from '{snapshot}'") }));
-                    } else {
-                        println!("✓ VM '{vm}' restored from snapshot '{snapshot}'");
-                    }
-                }
-                SnapshotCommands::Delete { vm, snapshot } => {
-                    if !json { println!("Deleting snapshot '{snapshot}' for VM '{vm}'…"); }
-                    c.delete_snapshot(&vm, &snapshot).await?;
-                    if json {
-                        println!("{}", serde_json::json!({ "message": format!("Snapshot '{snapshot}' deleted") }));
-                    } else {
-                        println!("✓ Snapshot '{snapshot}' deleted");
-                    }
+                c.restore_snapshot(&vm, &snapshot).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "message": format!("VM '{vm}' restored from '{snapshot}'") })
+                    );
+                } else {
+                    println!("✓ VM '{vm}' restored from snapshot '{snapshot}'");
                 }
             }
-        }
+            SnapshotCommands::Delete { vm, snapshot } => {
+                if !json {
+                    println!("Deleting snapshot '{snapshot}' for VM '{vm}'…");
+                }
+                c.delete_snapshot(&vm, &snapshot).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "message": format!("Snapshot '{snapshot}' deleted") })
+                    );
+                } else {
+                    println!("✓ Snapshot '{snapshot}' deleted");
+                }
+            }
+        },
 
         // Already handled above or unreachable in remote mode.
         _ => unreachable!(),
@@ -558,7 +634,10 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
             }
             vm::destroy(db_path, &name).await?;
             if json {
-                println!("{}", serde_json::json!({ "message": format!("VM '{name}' destroyed") }));
+                println!(
+                    "{}",
+                    serde_json::json!({ "message": format!("VM '{name}' destroyed") })
+                );
             } else {
                 println!("✓ VM '{name}' destroyed");
             }
@@ -594,6 +673,19 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
             print_vm(VmJson::from(vm), json);
         }
 
+        Commands::Resize {
+            name,
+            cpus,
+            memory,
+            disk,
+        } => {
+            if !json {
+                println!("Resizing VM '{name}'…");
+            }
+            let vm = vm::resize(db_path, &name, cpus.clone(), memory.clone(), disk.clone()).await?;
+            print_vm(VmJson::from(vm), json);
+        }
+
         Commands::Rename { old_name, new_name } => {
             if !json {
                 println!("Renaming VM '{old_name}' → '{new_name}'…");
@@ -626,25 +718,39 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
             // Drop conn before await.
             let vsock_socket = {
                 let conn = db::open(db_path).context("open state database")?;
-                let vm_rec = db::get_vm(&conn, &name)?
-                    .with_context(|| format!("VM '{name}' not found"))?;
+                let vm_rec =
+                    db::get_vm(&conn, &name)?.with_context(|| format!("VM '{name}' not found"))?;
                 std::path::PathBuf::from(vm_rec.ch_vsock_socket)
             };
 
             let response = agent::send_request(
                 &vsock_socket,
-                Request::Exec { command: cmd[0].clone(), args: cmd[1..].to_vec() },
+                Request::Exec {
+                    command: cmd[0].clone(),
+                    args: cmd[1..].to_vec(),
+                },
             )
             .await?;
 
             match response {
                 Response::Ok {
-                    data: Some(ResponseData::Exec { exit_code, stdout, stderr }),
+                    data:
+                        Some(ResponseData::Exec {
+                            exit_code,
+                            stdout,
+                            stderr,
+                        }),
                     ..
                 } => {
-                    if !stdout.is_empty() { print!("{stdout}"); }
-                    if !stderr.is_empty() { eprint!("{stderr}"); }
-                    if exit_code != 0 { std::process::exit(exit_code); }
+                    if !stdout.is_empty() {
+                        print!("{stdout}");
+                    }
+                    if !stderr.is_empty() {
+                        eprint!("{stderr}");
+                    }
+                    if exit_code != 0 {
+                        std::process::exit(exit_code);
+                    }
                 }
                 Response::Error { message } => anyhow::bail!("exec error: {message}"),
                 other => anyhow::bail!("unexpected response: {other:?}"),
@@ -655,8 +761,8 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
             // Drop conn before await.
             let vsock_socket = {
                 let conn = db::open(db_path).context("open state database")?;
-                let vm_rec = db::get_vm(&conn, &name)?
-                    .with_context(|| format!("VM '{name}' not found"))?;
+                let vm_rec =
+                    db::get_vm(&conn, &name)?.with_context(|| format!("VM '{name}' not found"))?;
                 std::path::PathBuf::from(vm_rec.ch_vsock_socket)
             };
             let response = agent::send_request(&vsock_socket, Request::ReportStatus).await?;
@@ -671,53 +777,63 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
             print!("{}", std::fs::read_to_string(&log_path)?);
         }
 
-        Commands::Snapshot { action } => {
-            match action {
-                SnapshotCommands::Create { vm, name } => {
-                    if !json { println!("Creating snapshot for VM '{vm}'…"); }
-                    let snap = vm::snapshot(db_path, &vm, name).await?;
-                    let client_snap = client::SnapshotResponse {
-                        id: snap.id,
-                        vm_name: snap.vm_name,
-                        name: snap.name,
-                        size_bytes: snap.size_bytes,
-                        created_at: snap.created_at,
-                    };
-                    print_snapshot(&client_snap, json);
+        Commands::Snapshot { action } => match action {
+            SnapshotCommands::Create { vm, name } => {
+                if !json {
+                    println!("Creating snapshot for VM '{vm}'…");
                 }
-                SnapshotCommands::List { vm } => {
-                    let snaps = vm::list_snapshots(db_path, &vm)?
-                        .into_iter()
-                        .map(|s| client::SnapshotResponse {
-                            id: s.id,
-                            vm_name: s.vm_name,
-                            name: s.name,
-                            size_bytes: s.size_bytes,
-                            created_at: s.created_at,
-                        })
-                        .collect::<Vec<_>>();
-                    print_snapshot_list(&vm, &snaps, json);
+                let snap = vm::snapshot(db_path, &vm, name).await?;
+                let client_snap = client::SnapshotResponse {
+                    id: snap.id,
+                    vm_name: snap.vm_name,
+                    name: snap.name,
+                    size_bytes: snap.size_bytes,
+                    created_at: snap.created_at,
+                };
+                print_snapshot(&client_snap, json);
+            }
+            SnapshotCommands::List { vm } => {
+                let snaps = vm::list_snapshots(db_path, &vm)?
+                    .into_iter()
+                    .map(|s| client::SnapshotResponse {
+                        id: s.id,
+                        vm_name: s.vm_name,
+                        name: s.name,
+                        size_bytes: s.size_bytes,
+                        created_at: s.created_at,
+                    })
+                    .collect::<Vec<_>>();
+                print_snapshot_list(&vm, &snaps, json);
+            }
+            SnapshotCommands::Restore { vm, snapshot } => {
+                if !json {
+                    println!("Restoring VM '{vm}' from snapshot '{snapshot}'…");
                 }
-                SnapshotCommands::Restore { vm, snapshot } => {
-                    if !json { println!("Restoring VM '{vm}' from snapshot '{snapshot}'…"); }
-                    vm::restore_snapshot(db_path, &vm, &snapshot).await?;
-                    if json {
-                        println!("{}", serde_json::json!({ "message": format!("VM '{vm}' restored from '{snapshot}'") }));
-                    } else {
-                        println!("✓ VM '{vm}' restored from snapshot '{snapshot}'");
-                    }
-                }
-                SnapshotCommands::Delete { vm, snapshot } => {
-                    if !json { println!("Deleting snapshot '{snapshot}' for VM '{vm}'…"); }
-                    vm::delete_snapshot(db_path, &vm, &snapshot).await?;
-                    if json {
-                        println!("{}", serde_json::json!({ "message": format!("Snapshot '{snapshot}' deleted") }));
-                    } else {
-                        println!("✓ Snapshot '{snapshot}' deleted");
-                    }
+                vm::restore_snapshot(db_path, &vm, &snapshot).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "message": format!("VM '{vm}' restored from '{snapshot}'") })
+                    );
+                } else {
+                    println!("✓ VM '{vm}' restored from snapshot '{snapshot}'");
                 }
             }
-        }
+            SnapshotCommands::Delete { vm, snapshot } => {
+                if !json {
+                    println!("Deleting snapshot '{snapshot}' for VM '{vm}'…");
+                }
+                vm::delete_snapshot(db_path, &vm, &snapshot).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "message": format!("Snapshot '{snapshot}' deleted") })
+                    );
+                } else {
+                    println!("✓ Snapshot '{snapshot}' deleted");
+                }
+            }
+        },
 
         _ => unreachable!(),
     }
@@ -729,12 +845,13 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
 
 async fn cmd_ssh(db_path: &str, name: &str) -> Result<()> {
     let conn = db::open(db_path).context("open state database")?;
-    let vm_rec = db::get_vm(&conn, name)?
-        .with_context(|| format!("VM '{name}' not found"))?;
+    let vm_rec = db::get_vm(&conn, name)?.with_context(|| format!("VM '{name}' not found"))?;
 
     let mut ssh_args: Vec<String> = vec![
-        "-o".into(), "StrictHostKeyChecking=no".into(),
-        "-o".into(), "UserKnownHostsFile=/dev/null".into(),
+        "-o".into(),
+        "StrictHostKeyChecking=no".into(),
+        "-o".into(),
+        "UserKnownHostsFile=/dev/null".into(),
     ];
     if let Some(key_path) = find_ssh_identity_path() {
         ssh_args.push("-i".into());
@@ -742,7 +859,10 @@ async fn cmd_ssh(db_path: &str, name: &str) -> Result<()> {
     }
     ssh_args.push(format!("root@{}", vm_rec.ip));
 
-    let status = Command::new("ssh").args(&ssh_args).status().context("exec ssh")?;
+    let status = Command::new("ssh")
+        .args(&ssh_args)
+        .status()
+        .context("exec ssh")?;
     std::process::exit(status.code().unwrap_or(1));
 }
 
@@ -759,7 +879,11 @@ fn resolve_copy_name(source: &str, new_name: Option<String>) -> String {
     }
     // Truncate source to leave room for "-copy" suffix (5 chars → max 6 source chars)
     let max_base = 11 - 5; // 6
-    let base = if source.len() > max_base { &source[..max_base] } else { source };
+    let base = if source.len() > max_base {
+        &source[..max_base]
+    } else {
+        source
+    };
     format!("{base}-copy")
 }
 

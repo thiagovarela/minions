@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use russh::{ChannelId, Pty};
 use russh::client;
+use russh::{ChannelId, Pty};
 use russh_keys::key::{KeyPair, PublicKey};
 use tokio::io::AsyncReadExt;
 use tracing::debug;
@@ -90,14 +90,19 @@ impl ConnectedVm {
         modes: &[(Pty, u32)],
     ) -> Result<()> {
         self.channel
-            .request_pty(true, term, col_width, row_height, pix_width, pix_height, modes)
+            .request_pty(
+                true, term, col_width, row_height, pix_width, pix_height, modes,
+            )
             .await
             .context("pty_request to VM")
     }
 
     /// Request an interactive shell on the VM.
     pub async fn request_shell(&mut self) -> Result<()> {
-        self.channel.request_shell(true).await.context("shell_request to VM")
+        self.channel
+            .request_shell(true)
+            .await
+            .context("shell_request to VM")
     }
 
     /// Execute a command on the VM.

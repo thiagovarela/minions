@@ -74,8 +74,7 @@ fn cleanup_orphan_sockets(conn: &rusqlite::Connection) -> Result<()> {
     }
 
     let vms = db::list_vms(conn)?;
-    let known_names: std::collections::HashSet<String> =
-        vms.into_iter().map(|v| v.name).collect();
+    let known_names: std::collections::HashSet<String> = vms.into_iter().map(|v| v.name).collect();
 
     for entry in std::fs::read_dir(run_dir)? {
         let entry = entry?;
@@ -138,8 +137,13 @@ pub async fn serve(
     }
 
     match &ssh_pubkey {
-        Some(key) => info!("✓ SSH public key loaded ({} chars) — will be injected into new VMs", key.len()),
-        None => warn!("⚠️  No SSH public key found — VMs will require manual key setup\n   Set MINIONS_SSH_PUBKEY_PATH=/path/to/key.pub or run 'minions init' to auto-detect"),
+        Some(key) => info!(
+            "✓ SSH public key loaded ({} chars) — will be injected into new VMs",
+            key.len()
+        ),
+        None => warn!(
+            "⚠️  No SSH public key found — VMs will require manual key setup\n   Set MINIONS_SSH_PUBKEY_PATH=/path/to/key.pub or run 'minions init' to auto-detect"
+        ),
     }
 
     // ── Metrics store + background collector ──────────────────────────────────
@@ -165,7 +169,10 @@ pub async fn serve(
     let app = api::router(state.clone())
         .merge(dashboard::router().with_state(state))
         // Redirect bare root to dashboard
-        .route("/", axum::routing::get(|| async { axum::response::Redirect::to("/dashboard/login") }));
+        .route(
+            "/",
+            axum::routing::get(|| async { axum::response::Redirect::to("/dashboard/login") }),
+        );
 
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
@@ -212,7 +219,9 @@ pub async fn serve(
             "localhost".to_string()
         });
 
-        let http_addr = http_bind.clone().unwrap_or_else(|| "0.0.0.0:80".to_string());
+        let http_addr = http_bind
+            .clone()
+            .unwrap_or_else(|| "0.0.0.0:80".to_string());
         let email = acme_email.clone().unwrap_or_else(|| {
             warn!("⚠️  --acme-email not set; using noreply@{}", base_domain);
             format!("noreply@{}", base_domain)
@@ -235,7 +244,10 @@ pub async fn serve(
             public_ip: public_ip.clone(),
         };
 
-        info!("HTTPS proxy starting on https://{} + http://{} (domain: {})", https_addr, http_addr, base_domain);
+        info!(
+            "HTTPS proxy starting on https://{} + http://{} (domain: {})",
+            https_addr, http_addr, base_domain
+        );
         tokio::spawn(async move {
             if let Err(e) = minions_proxy::serve(proxy_config, &https_addr, &http_addr).await {
                 tracing::error!("Proxy error: {:#}", e);

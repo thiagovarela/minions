@@ -4,10 +4,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
-use russh::{Channel, ChannelId, CryptoVec, Pty};
 use russh::server::{Auth, Handler, Msg, Session};
-use russh_keys::key::PublicKey;
+use russh::{Channel, ChannelId, CryptoVec, Pty};
 use russh_keys::PublicKeyBase64;
+use russh_keys::key::PublicKey;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, info};
 
@@ -24,11 +24,16 @@ enum SessionMode {
     /// Not yet determined (between auth and first channel request).
     Pending,
     /// Collecting the user's email for first-time registration.
-    Registration { after: AfterRegistration, email_buf: String },
+    Registration {
+        after: AfterRegistration,
+        email_buf: String,
+    },
     /// Registered user in interactive command mode.
     Command { line_buf: String },
     /// Proxy mode: stdin bytes go to the VM via this writer.
-    Proxy { vm_stdin: tokio::io::WriteHalf<russh::ChannelStream<russh::client::Msg>> },
+    Proxy {
+        vm_stdin: tokio::io::WriteHalf<russh::ChannelStream<russh::client::Msg>>,
+    },
 }
 
 #[derive(Clone)]
@@ -89,7 +94,10 @@ impl ConnectionHandler {
     }
 
     fn api(&self) -> ApiClient {
-        ApiClient::new(self.config.api_base_url.clone(), self.config.api_key.clone())
+        ApiClient::new(
+            self.config.api_base_url.clone(),
+            self.config.api_key.clone(),
+        )
     }
 
     fn fingerprint(key: &PublicKey) -> String {
@@ -137,7 +145,11 @@ impl ConnectionHandler {
         }
 
         if vm.status != "running" {
-            anyhow::bail!("VM '{}' is {} — it must be running to SSH into it", vm_name, vm.status);
+            anyhow::bail!(
+                "VM '{}' is {} — it must be running to SSH into it",
+                vm_name,
+                vm.status
+            );
         }
         Ok(vm.ip)
     }
@@ -241,23 +253,23 @@ impl ConnectionHandler {
 
         match after {
             AfterRegistration::Command => {
-                self.mode = SessionMode::Command { line_buf: String::new() };
+                self.mode = SessionMode::Command {
+                    line_buf: String::new(),
+                };
                 session.data(
                     channel,
                     CryptoVec::from(b"Type 'help' for available commands.\r\n\r\n$ ".to_vec()),
                 );
             }
-            AfterRegistration::Proxy { vm_name } => {
-                match self.start_proxy_shell(&vm_name).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        session.data(
-                            channel,
-                            CryptoVec::from(format!("error: {}\r\n", e).into_bytes()),
-                        );
-                    }
+            AfterRegistration::Proxy { vm_name } => match self.start_proxy_shell(&vm_name).await {
+                Ok(()) => {}
+                Err(e) => {
+                    session.data(
+                        channel,
+                        CryptoVec::from(format!("error: {}\r\n", e).into_bytes()),
+                    );
                 }
-            }
+            },
         }
         Ok(())
     }
@@ -336,11 +348,16 @@ impl Handler for ConnectionHandler {
         // Unregistered user → prompt for email.
         if self.authed_user.is_none() {
             let after = if is_proxy {
-                AfterRegistration::Proxy { vm_name: self.ssh_username.clone() }
+                AfterRegistration::Proxy {
+                    vm_name: self.ssh_username.clone(),
+                }
             } else {
                 AfterRegistration::Command
             };
-            self.mode = SessionMode::Registration { after, email_buf: String::new() };
+            self.mode = SessionMode::Registration {
+                after,
+                email_buf: String::new(),
+            };
             session.data(
                 channel,
                 CryptoVec::from(
@@ -360,7 +377,9 @@ impl Handler for ConnectionHandler {
             }
         } else {
             // Command mode: interactive shell.
-            self.mode = SessionMode::Command { line_buf: String::new() };
+            self.mode = SessionMode::Command {
+                line_buf: String::new(),
+            };
             let banner = format!(
                 "MINICLANKERS.COM — logged in as {}\r\nType 'help' for commands.\r\n\r\n$ ",
                 user.email
@@ -448,7 +467,8 @@ impl Handler for ConnectionHandler {
             }
         }; // ← mutable borrow released here
         if let Some((email, after)) = reg_action {
-            self.complete_registration(email, after, session, channel).await?;
+            self.complete_registration(email, after, session, channel)
+                .await?;
             return Ok(());
         }
         if matches!(self.mode, SessionMode::Registration { .. }) {
@@ -490,10 +510,7 @@ impl Handler for ConnectionHandler {
                             }
                             c => {
                                 line_buf.push(c);
-                                session.data(
-                                    channel,
-                                    CryptoVec::from(c.to_string().into_bytes()),
-                                );
+                                session.data(channel, CryptoVec::from(c.to_string().into_bytes()));
                             }
                         }
                     }

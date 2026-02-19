@@ -54,8 +54,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
 
 pub fn open(path: &str) -> Result<Connection> {
     if let Some(parent) = std::path::Path::new(path).parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create db dir {:?}", parent))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create db dir {:?}", parent))?;
     }
     let conn = Connection::open(path).context("open sqlite db")?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
@@ -119,13 +118,16 @@ pub fn create_user(
         params![sub_id, user_id, now],
     );
 
-    Ok(User { id: user_id, email: email.to_string(), created_at: now })
+    Ok(User {
+        id: user_id,
+        email: email.to_string(),
+        created_at: now,
+    })
 }
 
 /// Get a user by their ID.
 pub fn get_user(conn: &Connection, id: &str) -> Result<Option<User>> {
-    let mut stmt =
-        conn.prepare("SELECT id, email, created_at FROM users WHERE id = ?1")?;
+    let mut stmt = conn.prepare("SELECT id, email, created_at FROM users WHERE id = ?1")?;
     let mut rows = stmt.query(params![id])?;
     match rows.next()? {
         Some(row) => Ok(Some(User {
@@ -153,7 +155,8 @@ pub fn list_ssh_keys(conn: &Connection, user_id: &str) -> Result<Vec<SshKey>> {
             created_at: row.get(5)?,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().context("list ssh keys")
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("list ssh keys")
 }
 
 /// Add an additional SSH key to an existing user.
