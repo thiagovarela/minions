@@ -970,16 +970,13 @@ async fn add_custom_domain(
         Err(e) => return internal(e).into_response(),
     };
 
-    // For Cloudflare proxied setups (TLS terminated at edge), mark as verified immediately
-    // since the proxy doesn't need per-domain certs at the origin.
-    // For direct TLS setups, full ACME (tls.rs) would handle provisioning.
-    let _ = db::mark_domain_verified(&conn, &req.domain);
-
+    // The proxy's background ACME task will provision the certificate
+    // and mark the domain as verified once provisioning succeeds.
     let domain_record = db::CustomDomain {
         id,
         vm_name: name.clone(),
         domain: req.domain.clone(),
-        verified: true, // Marked verified for Cloudflare proxied setups
+        verified: false, // Will be set to true by proxy after cert provisioning
         created_at: chrono::Utc::now().to_rfc3339(),
     };
 

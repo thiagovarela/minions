@@ -17,19 +17,17 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use instant_acme::{
-    Account, AuthorizationStatus, ChallengeType, Identifier, KeyAuthorization, LetsEncrypt,
-    NewAccount, NewOrder, OrderStatus,
+    Account, AccountCredentials, ChallengeType, Identifier, LetsEncrypt, NewAccount, NewOrder,
+    OrderStatus, RetryPolicy,
 };
-use rcgen::{Certificate, CertificateParams, DistinguishedName};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
-use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// ACME account file (stores account private key + URL).
+/// ACME account file (stores account credentials).
 const ACME_ACCOUNT_FILE: &str = "acme_account.json";
 
 /// Days before expiry to trigger renewal.
@@ -40,6 +38,7 @@ pub type ChallengeMap = Arc<DashMap<String, String>>;
 
 // ── Certificate Storage ───────────────────────────────────────────────────────
 
+#[derive(Debug)]
 pub struct CertStore {
     certs_dir: PathBuf,
 }
@@ -57,7 +56,10 @@ impl CertStore {
     }
 
     /// Load certificate chain + private key from disk.
-    pub fn load_cert(&self, domain: &str) -> Result<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>> {
+    pub fn load_cert(
+        &self,
+        domain: &str,
+    ) -> Result<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>> {
         let dir = self.domain_dir(domain);
         let fullchain_path = dir.join("fullchain.pem");
         let privkey_path = dir.join("privkey.pem");
@@ -82,15 +84,17 @@ impl CertStore {
     }
 
     /// Store certificate chain + private key to disk.
-    pub fn store_cert(&self, domain: &str, fullchain_pem: &[u8], privkey_pem: &[u8]) -> Result<()> {
+    pub fn store_cert(
+        &self,
+        domain: &str,
+        fullchain_pem: &[u8],
+        privkey_pem: &[u8],
+    ) -> Result<()> {
         let dir = self.domain_dir(domain);
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("create {}", dir.display()))?;
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
 
-        std::fs::write(dir.join("fullchain.pem"), fullchain_pem)
-            .context("write fullchain.pem")?;
-        std::fs::write(dir.join("privkey.pem"), privkey_pem)
-            .context("write privkey.pem")?;
+        std::fs::write(dir.join("fullchain.pem"), fullchain_pem).context("write fullchain.pem")?;
+        std::fs::write(dir.join("privkey.pem"), privkey_pem).context("write privkey.pem")?;
 
         info!(domain, "certificate stored");
         Ok(())
@@ -101,7 +105,7 @@ impl CertStore {
         match self.load_cert(domain) {
             Ok(Some((certs, _))) => {
                 if let Some(cert) = certs.first() {
-                    if let Ok(parsed) = x509_parser::parse_x509_certificate(&cert) {
+                    if let Ok(parsed) = x509_parser::parse_x509_certificate(cert) {
                         let validity = parsed.1.validity();
                         let not_after = validity.not_after.timestamp();
                         let now = chrono::Utc::now().timestamp();
@@ -113,30 +117,6 @@ impl CertStore {
             }
             _ => true, // No cert or error loading → needs renewal
         }
-    }
-
-    /// List all managed domains with their expiry dates.
-    pub fn list_managed_domains(&self) -> Vec<(String, Option<chrono::DateTime<chrono::Utc>>)> {
-        let mut domains = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&self.certs_dir) {
-            for entry in entries.flatten() {
-                if entry.path().is_dir() {
-                    if let Some(domain) = entry.file_name().to_str() {
-                        let expiry = self.get_cert_expiry(domain);
-                        domains.push((domain.to_string(), expiry));
-                    }
-                }
-            }
-        }
-        domains
-    }
-
-    fn get_cert_expiry(&self, domain: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-        let (certs, _) = self.load_cert(domain).ok()??;
-        let cert = certs.first()?;
-        let parsed = x509_parser::parse_x509_certificate(cert).ok()?.1;
-        let not_after = parsed.validity().not_after.timestamp();
-        Some(chrono::DateTime::from_timestamp(not_after, 0)?)
     }
 }
 
@@ -166,7 +146,12 @@ impl AcmeClient {
         let account = if account_path.exists() {
             info!("loading ACME account from {}", account_path.display());
             let json = std::fs::read_to_string(&account_path)?;
-            serde_json::from_str(&json).context("parse ACME account")?
+            let credentials: AccountCredentials =
+                serde_json::from_str(&json).context("parse ACME account credentials")?;
+            Account::builder()?
+                .from_credentials(credentials)
+                .await
+                .context("restore ACME account from credentials")?
         } else {
             info!("creating new ACME account with email: {}", email);
             let server_url = if staging {
@@ -174,19 +159,21 @@ impl AcmeClient {
             } else {
                 LetsEncrypt::Production.url()
             };
-            let (account, _credentials) = Account::create(
-                &NewAccount {
-                    contact: &[&format!("mailto:{}", email)],
-                    terms_of_service_agreed: true,
-                    only_return_existing: false,
-                },
-                server_url,
-                None,
-            )
-            .await
-            .context("create ACME account")?;
 
-            let json = serde_json::to_string_pretty(&account)?;
+            let (account, credentials) = Account::builder()?
+                .create(
+                    &NewAccount {
+                        contact: &[&format!("mailto:{}", email)],
+                        terms_of_service_agreed: true,
+                        only_return_existing: false,
+                    },
+                    server_url.to_string(),
+                    None,
+                )
+                .await
+                .context("create ACME account")?;
+
+            let json = serde_json::to_string_pretty(&credentials)?;
             std::fs::write(&account_path, json)?;
             info!("ACME account saved to {}", account_path.display());
             account
@@ -204,50 +191,69 @@ impl AcmeClient {
     pub async fn provision_http01(&self, domain: &str) -> Result<()> {
         info!(domain, "provisioning certificate via HTTP-01");
 
+        let identifiers = vec![Identifier::Dns(domain.to_string())];
         let mut order = self
             .account
-            .new_order(&NewOrder {
-                identifiers: &[Identifier::Dns(domain.to_string())],
-            })
+            .new_order(&NewOrder::new(&identifiers))
             .await
             .context("create ACME order")?;
 
-        let authorizations = order.authorizations().await?;
-        let authorization = &authorizations[0];
+        // Get authorizations (async iterator)
+        let mut authorizations = order.authorizations();
+        let mut auth_handle = authorizations
+            .next()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("no authorizations in order"))?
+            .context("fetch authorization")?;
 
-        let challenge = authorization
-            .challenges
-            .iter()
-            .find(|c| c.r#type == ChallengeType::Http01)
-            .context("no HTTP-01 challenge found")?;
+        // Get HTTP-01 challenge
+        let token = {
+            let mut challenge_handle = auth_handle
+                .challenge(ChallengeType::Http01)
+                .ok_or_else(|| anyhow::anyhow!("no HTTP-01 challenge found"))?;
 
-        let key_auth = order.key_authorization(challenge);
-        let token = challenge.token.clone();
+            let key_auth = challenge_handle.key_authorization();
+            let token = challenge_handle.token.clone();
 
-        // Store challenge response in shared map (port 80 handler serves it).
-        self.challenges.insert(token.clone(), key_auth.as_str().to_string());
+            // Store challenge response in shared map (port 80 handler serves it).
+            self.challenges
+                .insert(token.clone(), key_auth.as_str().to_string());
 
-        // Tell ACME server to validate.
-        order.set_challenge_ready(&challenge.url).await?;
+            // Tell ACME server to validate.
+            challenge_handle
+                .set_ready()
+                .await
+                .context("set challenge ready")?;
 
-        // Wait for validation (poll every 2 seconds, max 2 minutes).
-        for _ in 0..60 {
-            sleep(Duration::from_secs(2)).await;
-            let auth = order.refresh_authorization(&authorization.url).await?;
-            match auth.status {
-                AuthorizationStatus::Valid => break,
-                AuthorizationStatus::Invalid => {
-                    self.challenges.remove(&token);
-                    anyhow::bail!("HTTP-01 challenge failed for {}", domain);
-                }
-                _ => continue,
-            }
-        }
+            token
+            // challenge_handle dropped here, releasing borrow of auth_handle
+        };
+        // auth_handle and authorizations dropped here, releasing borrow of order
 
+        // Wait for order to be ready (poll with retry policy).
+        let retries = RetryPolicy::new().timeout(Duration::from_secs(120));
+        let status = order.poll_ready(&retries).await.context("poll order ready")?;
+
+        // Clean up challenge token.
         self.challenges.remove(&token);
 
-        // Finalize order (generate CSR, submit, download cert).
-        self.finalize_order(domain, &mut order).await?;
+        if status != OrderStatus::Ready {
+            anyhow::bail!("order not ready after polling: {:?}", status);
+        }
+
+        // Finalize order (generates CSR + key pair automatically via rcgen).
+        let private_key_pem = order.finalize().await.context("finalize order")?;
+
+        // Poll for certificate.
+        let cert_pem = order
+            .poll_certificate(&retries)
+            .await
+            .context("poll certificate")?;
+
+        // Store to disk.
+        self.store
+            .store_cert(domain, cert_pem.as_bytes(), private_key_pem.as_bytes())?;
+
         Ok(())
     }
 
@@ -261,90 +267,68 @@ impl AcmeClient {
             .as_ref()
             .context("DNS-01 requires MINIONS_CF_DNS_TOKEN env var")?;
 
+        let identifiers = vec![Identifier::Dns(wildcard_domain.clone())];
         let mut order = self
             .account
-            .new_order(&NewOrder {
-                identifiers: &[Identifier::Dns(wildcard_domain.clone())],
-            })
+            .new_order(&NewOrder::new(&identifiers))
             .await
             .context("create ACME order")?;
 
-        let authorizations = order.authorizations().await?;
-        let authorization = &authorizations[0];
+        let mut authorizations = order.authorizations();
+        let txt_record_name = {
+            let mut auth_handle = authorizations
+                .next()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("no authorizations in order"))?
+                .context("fetch authorization")?;
 
-        let challenge = authorization
-            .challenges
-            .iter()
-            .find(|c| c.r#type == ChallengeType::Dns01)
-            .context("no DNS-01 challenge found")?;
+            let mut challenge_handle = auth_handle
+                .challenge(ChallengeType::Dns01)
+                .ok_or_else(|| anyhow::anyhow!("no DNS-01 challenge found"))?;
 
-        let key_auth = order.key_authorization(challenge);
-        let txt_value = instant_acme::dns_digest(&key_auth)?;
-        let txt_record_name = format!("_acme-challenge.{}", base_domain);
+            let key_auth = challenge_handle.key_authorization();
+            let txt_value = key_auth.dns_value();
+            let txt_record_name = format!("_acme-challenge.{}", base_domain);
 
-        // Create TXT record via Cloudflare API.
-        self.cloudflare_create_txt(cf_token, base_domain, &txt_record_name, &txt_value)
-            .await?;
+            // Create TXT record via Cloudflare API.
+            self.cloudflare_create_txt(cf_token, base_domain, &txt_record_name, &txt_value)
+                .await?;
 
-        // Tell ACME server to validate.
-        order.set_challenge_ready(&challenge.url).await?;
+            // Tell ACME server to validate.
+            challenge_handle
+                .set_ready()
+                .await
+                .context("set challenge ready")?;
 
-        // Wait for validation.
-        for _ in 0..60 {
-            sleep(Duration::from_secs(5)).await;
-            let auth = order.refresh_authorization(&authorization.url).await?;
-            match auth.status {
-                AuthorizationStatus::Valid => break,
-                AuthorizationStatus::Invalid => {
-                    // Clean up TXT record before bailing.
-                    let _ = self
-                        .cloudflare_delete_txt(cf_token, base_domain, &txt_record_name)
-                        .await;
-                    anyhow::bail!("DNS-01 challenge failed for {}", wildcard_domain);
-                }
-                _ => continue,
-            }
+            txt_record_name
+            // challenge_handle, auth_handle, and authorizations dropped here
+        };
+
+        // Wait for order to be ready.
+        let retries = RetryPolicy::new().timeout(Duration::from_secs(300)); // 5 min for DNS propagation
+        let status = order.poll_ready(&retries).await;
+
+        // Clean up TXT record regardless of success/failure.
+        let _ = self
+            .cloudflare_delete_txt(cf_token, base_domain, &txt_record_name)
+            .await;
+
+        let status = status.context("poll order ready")?;
+        if status != OrderStatus::Ready {
+            anyhow::bail!("order not ready after polling: {:?}", status);
         }
-
-        // Clean up TXT record.
-        self.cloudflare_delete_txt(cf_token, base_domain, &txt_record_name)
-            .await?;
 
         // Finalize order.
-        self.finalize_order(&wildcard_domain, &mut order).await?;
-        Ok(())
-    }
-
-    /// Finalize ACME order: generate CSR, submit, download cert, store to disk.
-    async fn finalize_order(&self, domain: &str, order: &mut instant_acme::Order) -> Result<()> {
-        // Generate CSR.
-        let mut params = CertificateParams::new(vec![domain.to_string()])?;
-        params.distinguished_name = DistinguishedName::new();
-        let cert = Certificate::from_params(params)?;
-        let csr = cert.serialize_request_der()?;
-
-        // Submit CSR.
-        order.finalize(&csr).await?;
-
-        // Poll for cert (max 2 minutes).
-        for _ in 0..60 {
-            sleep(Duration::from_secs(2)).await;
-            let state = order.refresh().await?;
-            if let OrderStatus::Valid = state.status {
-                break;
-            }
-        }
-
-        // Download cert.
+        let private_key_pem = order.finalize().await.context("finalize order")?;
         let cert_pem = order
-            .certificate()
-            .await?
-            .context("order valid but no certificate available")?;
-
-        let privkey_pem = cert.serialize_private_key_pem();
+            .poll_certificate(&retries)
+            .await
+            .context("poll certificate")?;
 
         // Store to disk.
-        self.store.store_cert(domain, cert_pem.as_bytes(), privkey_pem.as_bytes())?;
+        self.store
+            .store_cert(&wildcard_domain, cert_pem.as_bytes(), private_key_pem.as_bytes())?;
+
         Ok(())
     }
 
@@ -393,7 +377,9 @@ impl AcmeClient {
         record_name: &str,
     ) -> Result<()> {
         let zone_id = self.cloudflare_get_zone_id(token, base_domain).await?;
-        let record_id = self.cloudflare_get_txt_record_id(token, &zone_id, record_name).await?;
+        let record_id = self
+            .cloudflare_get_txt_record_id(token, &zone_id, record_name)
+            .await?;
 
         let client = reqwest::Client::new();
         let resp = client
@@ -470,7 +456,8 @@ impl AcmeClient {
 
         info!(domain, "certificate needs renewal");
         if is_wildcard {
-            self.provision_dns01_wildcard(domain.trim_start_matches("*.")).await
+            self.provision_dns01_wildcard(domain.trim_start_matches("*."))
+                .await
         } else {
             self.provision_http01(domain).await
         }
@@ -479,6 +466,7 @@ impl AcmeClient {
 
 // ── SNI-based Certificate Resolver ────────────────────────────────────────────
 
+#[derive(Debug)]
 pub struct SniResolver {
     /// Base domain (e.g. "miniclankers.com").
     base_domain: String,
@@ -546,6 +534,14 @@ impl ResolvesServerCert for SniResolver {
             }
         }
 
+        // Support apex domain with wildcard cert (for Cloudflare Full mode).
+        if sni == self.base_domain {
+            let wildcard = format!("*.{}", self.base_domain);
+            if let Ok(cert) = self.load_and_cache(&wildcard) {
+                return Some(cert);
+            }
+        }
+
         // No matching cert.
         warn!(sni, "no certificate found");
         None
@@ -554,7 +550,7 @@ impl ResolvesServerCert for SniResolver {
 
 // ── Renewal Task ──────────────────────────────────────────────────────────────
 
-/// Spawn a background task that renews certificates every 12 hours.
+/// Spawn a background task that provisions pending certs and renews expiring ones.
 pub fn spawn_renewal_task(
     acme: Arc<AcmeClient>,
     sni_resolver: Arc<SniResolver>,
@@ -562,42 +558,118 @@ pub fn spawn_renewal_task(
     db_path: String,
 ) {
     tokio::spawn(async move {
+        // Initial provisioning pass — run immediately on startup.
+        provision_pending_domains(&acme, &sni_resolver, &db_path).await;
+
+        // Then check every 60 seconds for new pending domains
+        // and every 12 hours for renewals.
+        let mut renewal_interval = tokio::time::interval(Duration::from_secs(12 * 3600));
+        let mut provision_interval = tokio::time::interval(Duration::from_secs(60));
+
         loop {
-            sleep(Duration::from_secs(12 * 3600)).await;
-            info!("starting certificate renewal check");
-
-            // Renew wildcard cert.
-            let wildcard = format!("*.{}", base_domain);
-            if let Err(e) = acme.renew_if_needed(&wildcard, true).await {
-                error!(domain = %wildcard, "renewal failed: {:#}", e);
-            } else if let Err(e) = sni_resolver.reload(&wildcard) {
-                error!(domain = %wildcard, "reload failed: {:#}", e);
-            }
-
-            // Renew custom domain certs.
-            let domains = match crate::db::open(&db_path) {
-                Ok(conn) => match crate::db::list_all_verified_domains(&conn) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        error!("failed to list domains: {:#}", e);
-                        continue;
-                    }
-                },
-                Err(e) => {
-                    error!("failed to open db: {:#}", e);
-                    continue;
+            tokio::select! {
+                _ = provision_interval.tick() => {
+                    provision_pending_domains(&acme, &sni_resolver, &db_path).await;
                 }
-            };
-
-            for domain in domains {
-                if let Err(e) = acme.renew_if_needed(&domain, false).await {
-                    error!(domain, "renewal failed: {:#}", e);
-                } else if let Err(e) = sni_resolver.reload(&domain) {
-                    error!(domain, "reload failed: {:#}", e);
+                _ = renewal_interval.tick() => {
+                    renew_expiring_certs(&acme, &sni_resolver, &base_domain, &db_path).await;
                 }
             }
-
-            info!("certificate renewal check complete");
         }
     });
+}
+
+/// Provision certificates for unverified domains.
+async fn provision_pending_domains(
+    acme: &Arc<AcmeClient>,
+    sni_resolver: &Arc<SniResolver>,
+    db_path: &str,
+) {
+    let conn = match crate::db::open(db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("failed to open db for provisioning: {:#}", e);
+            return;
+        }
+    };
+
+    let pending = match crate::db::list_unverified_domains(&conn) {
+        Ok(p) => p,
+        Err(e) => {
+            error!("failed to list unverified domains: {:#}", e);
+            return;
+        }
+    };
+
+    if pending.is_empty() {
+        return;
+    }
+
+    info!(count = pending.len(), "provisioning pending domains");
+
+    for domain_name in pending {
+        info!(domain = %domain_name, "attempting to provision certificate");
+        match acme.provision_http01(&domain_name).await {
+            Ok(()) => {
+                info!(domain = %domain_name, "certificate provisioned successfully");
+                // Mark as verified in DB.
+                if let Err(e) = crate::db::mark_domain_verified(&conn, &domain_name) {
+                    error!(domain = %domain_name, "failed to mark domain verified: {:#}", e);
+                }
+                // Load into SNI resolver.
+                if let Err(e) = sni_resolver.reload(&domain_name) {
+                    error!(domain = %domain_name, "failed to load cert into SNI resolver: {:#}", e);
+                }
+            }
+            Err(e) => {
+                warn!(domain = %domain_name, "failed to provision certificate: {:#}", e);
+                // Will retry on next iteration.
+            }
+        }
+    }
+}
+
+/// Renew expiring certificates.
+async fn renew_expiring_certs(
+    acme: &Arc<AcmeClient>,
+    sni_resolver: &Arc<SniResolver>,
+    base_domain: &str,
+    db_path: &str,
+) {
+    info!("starting certificate renewal check");
+
+    // Renew wildcard cert.
+    let wildcard = format!("*.{}", base_domain);
+    if let Err(e) = acme.renew_if_needed(&wildcard, true).await {
+        error!(domain = %wildcard, "renewal failed: {:#}", e);
+    } else if let Err(e) = sni_resolver.reload(&wildcard) {
+        error!(domain = %wildcard, "reload failed: {:#}", e);
+    }
+
+    // Renew custom domain certs.
+    let conn = match crate::db::open(db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("failed to open db for renewal: {:#}", e);
+            return;
+        }
+    };
+
+    let domains = match crate::db::list_all_verified_domains(&conn) {
+        Ok(d) => d,
+        Err(e) => {
+            error!("failed to list domains: {:#}", e);
+            return;
+        }
+    };
+
+    for domain in domains {
+        if let Err(e) = acme.renew_if_needed(&domain, false).await {
+            error!(domain, "renewal failed: {:#}", e);
+        } else if let Err(e) = sni_resolver.reload(&domain) {
+            error!(domain, "reload failed: {:#}", e);
+        }
+    }
+
+    info!("certificate renewal check complete");
 }

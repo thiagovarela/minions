@@ -199,3 +199,11 @@ pub fn list_all_verified_domains(conn: &Connection) -> Result<Vec<String>> {
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .context("list verified domains")
 }
+
+/// List all unverified domains (for cert provisioning).
+pub fn list_unverified_domains(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT domain FROM custom_domains WHERE verified = 0")?;
+    let rows = stmt.query_map([], |row| row.get(0))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("list unverified domains")
+}
