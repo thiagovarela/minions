@@ -16,7 +16,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
-use crate::{agent, auth, db, metrics, server::AppState, storage, vm};
+use crate::{auth, db, metrics, server::AppState, vm};
 use minions_proto::{Request as AgentRequest, Response as AgentResponse, ResponseData};
 
 // ── Router ────────────────────────────────────────────────────────────────────
@@ -521,7 +521,7 @@ async fn exec_vm(
         }
     }; // conn dropped
 
-    let response = match agent::send_request(
+    let response = match minions_node::agent::send_request(
         &vsock_socket,
         AgentRequest::Exec {
             command: req.command,
@@ -569,7 +569,7 @@ async fn vm_status(State(state): State<AppState>, Path(name): Path<String>) -> i
         }
     }; // conn dropped
 
-    match agent::send_request(&vsock_socket, AgentRequest::ReportStatus).await {
+    match minions_node::agent::send_request(&vsock_socket, AgentRequest::ReportStatus).await {
         Ok(r) => Json(r).into_response(),
         Err(e) => internal(e).into_response(),
     }
@@ -581,7 +581,7 @@ async fn vm_logs(State(_state): State<AppState>, Path(name): Path<String>) -> im
     if let Err(e) = validate_name_param(&name) {
         return e.into_response();
     }
-    let log_path = storage::serial_log_path(&name);
+    let log_path = minions_node::storage::serial_log_path(&name);
     match std::fs::read_to_string(&log_path) {
         Ok(content) => (
             StatusCode::OK,

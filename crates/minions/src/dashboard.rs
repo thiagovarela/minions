@@ -791,9 +791,8 @@ fn build_metrics_fields(vm_name: &str, store: &MetricsStore) -> (bool, MetricsFi
 }
 
 /// Returns snapshot size in MiB by checking the rootfs file on disk.
-fn snapshot_size_mb(db_path: &str, vm_name: &str, snap_name: &str) -> u64 {
-    use crate::storage;
-    let path = storage::snapshot_rootfs_path(vm_name, snap_name);
+fn snapshot_size_mb(_db_path: &str, vm_name: &str, snap_name: &str) -> u64 {
+    let path = minions_node::storage::snapshot_rootfs_path(vm_name, snap_name);
     std::fs::metadata(path)
         .map(|m| m.len() / (1024 * 1024))
         .unwrap_or(0)

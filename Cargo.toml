@@ -3,7 +3,9 @@ resolver = "2"
 members = [
     "crates/minions-proto",
     "crates/minions-agent",
-    "crates/minions-host",
+    "crates/minions-vsock-cli",
+    "crates/minions-db",
+    "crates/minions-node",
     "crates/minions",
     "crates/minions-ssh",
     "crates/minions-proxy",
