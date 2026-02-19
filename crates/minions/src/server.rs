@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use crate::{api, auth, dashboard, db, hypervisor, metrics, network};
+use crate::{api, auth, dashboard, db, metrics};
 
 /// Shared state passed to every HTTP handler.
 #[derive(Clone)]
@@ -40,14 +40,14 @@ pub fn reconcile(db_path: &str) -> Result<()> {
     for vm in &vms {
         match vm.status.as_str() {
             "running" | "starting" | "creating" | "stopping" => {
-                if !hypervisor::is_alive_pid(vm.ch_pid) {
+                if !minions_node::hypervisor::is_alive_pid(vm.ch_pid) {
                     warn!(
                         name = %vm.name,
                         status = %vm.status,
                         "CH process dead — marking stopped and cleaning up"
                     );
                     // Best-effort cleanup — use stored paths, not derived from name.
-                    let _ = network::destroy_tap_device(&vm.tap_device);
+                    let _ = minions_node::network::destroy_tap_device(&vm.tap_device);
                     for sock in [&vm.ch_api_socket, &vm.ch_vsock_socket] {
                         let _ = std::fs::remove_file(sock);
                     }
@@ -68,7 +68,7 @@ pub fn reconcile(db_path: &str) -> Result<()> {
 }
 
 fn cleanup_orphan_sockets(conn: &rusqlite::Connection) -> Result<()> {
-    let run_dir = std::path::Path::new(hypervisor::RUN_DIR);
+    let run_dir = std::path::Path::new(minions_node::hypervisor::RUN_DIR);
     if !run_dir.exists() {
         return Ok(());
     }

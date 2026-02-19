@@ -14,7 +14,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tracing::{debug, warn};
 
-use crate::{agent, db};
+use crate::db;
 use minions_proto::{Request, Response, ResponseData};
 
 // ── Per-VM snapshot ───────────────────────────────────────────────────────────
@@ -152,7 +152,7 @@ async fn collect_once(db_path: &str, store: &MetricsStore) {
             tokio::spawn(async move {
                 let result = tokio::time::timeout(
                     Duration::from_secs(5),
-                    agent::send_request(&vsock, Request::ReportStatus),
+                    minions_node::agent::send_request(&vsock, Request::ReportStatus),
                 )
                 .await;
 

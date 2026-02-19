@@ -1,0 +1,38 @@
+[package]
+name = "minions-node"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "minions_node"
+path = "src/lib.rs"
+
+[[bin]]
+name = "minions-node"
+path = "src/main.rs"
+required-features = ["standalone"]
+
+[dependencies]
+minions-proto = { path = "../minions-proto" }
+minions-ssh = { path = "../minions-ssh" }
+minions-db = { path = "../minions-db" }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+libc = "0.2"
+nix = { version = "0.30", features = ["signal"] }
+
+# For standalone binary HTTP server
+axum = { version = "0.7", optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.6", features = ["trace"], optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+[features]
+default = []
+standalone = ["axum", "tower", "tower-http", "tracing-subscriber"]

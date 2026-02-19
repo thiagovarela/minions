@@ -6,19 +6,17 @@ use serde::Serialize;
 use std::process::Command;
 use tabled::{Table, Tabled};
 
-mod agent;
 mod api;
 mod auth;
 mod client;
 mod dashboard;
 mod db;
 mod dns;
-mod hypervisor;
+mod host_client;
 mod init;
 mod metrics;
-mod network;
+mod scheduler;
 mod server;
-mod storage;
 mod vm;
 
 use minions_proto::{Request, Response, ResponseData};
@@ -723,7 +721,7 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
                 std::path::PathBuf::from(vm_rec.ch_vsock_socket)
             };
 
-            let response = agent::send_request(
+            let response = minions_node::agent::send_request(
                 &vsock_socket,
                 Request::Exec {
                     command: cmd[0].clone(),
@@ -765,12 +763,12 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
                     db::get_vm(&conn, &name)?.with_context(|| format!("VM '{name}' not found"))?;
                 std::path::PathBuf::from(vm_rec.ch_vsock_socket)
             };
-            let response = agent::send_request(&vsock_socket, Request::ReportStatus).await?;
+            let response = minions_node::agent::send_request(&vsock_socket, Request::ReportStatus).await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
 
         Commands::Logs { name } => {
-            let log_path = storage::serial_log_path(&name);
+            let log_path = minions_node::storage::serial_log_path(&name);
             if !log_path.exists() {
                 anyhow::bail!("no serial log found at {}", log_path.display());
             }
