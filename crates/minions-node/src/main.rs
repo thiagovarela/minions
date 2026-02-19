@@ -10,15 +10,13 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use minions_db as db;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::info;
 
-mod agent;
-mod hypervisor;
-mod network;
-mod storage;
-mod vm;
+// Import modules from the library
+use minions_node::{agent, vm};
 
 #[derive(Clone)]
 struct AppState {
@@ -70,7 +68,7 @@ struct StatusResponse {
     vm_count: usize,
 }
 
-async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusResponse>, AppError> {
+async fn status(State(_state): State<Arc<AppState>>) -> Result<Json<StatusResponse>, AppError> {
     // TODO: Implement actual resource tracking
     // For now, return hardcoded capacity
     Ok(Json(StatusResponse {
@@ -96,7 +94,7 @@ struct CreateVmRequest {
 async fn create_vm(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateVmRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<db::Vm>, AppError> {
     info!("Creating VM: {}", req.name);
     let vm = vm::create(
         &state.db_path,
@@ -107,7 +105,7 @@ async fn create_vm(
         req.owner_id,
     )
     .await?;
-    Ok(Json(serde_json::json!(vm)))
+    Ok(Json(vm))
 }
 
 async fn destroy_vm(
@@ -122,28 +120,28 @@ async fn destroy_vm(
 async fn stop_vm(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<db::Vm>, AppError> {
     info!("Stopping VM: {}", name);
     let vm = vm::stop(&state.db_path, &name).await?;
-    Ok(Json(serde_json::json!(vm)))
+    Ok(Json(vm))
 }
 
 async fn start_vm(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<db::Vm>, AppError> {
     info!("Starting VM: {}", name);
     let vm = vm::start(&state.db_path, &name).await?;
-    Ok(Json(serde_json::json!(vm)))
+    Ok(Json(vm))
 }
 
 async fn restart_vm(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<db::Vm>, AppError> {
     info!("Restarting VM: {}", name);
     let vm = vm::restart(&state.db_path, &name).await?;
-    Ok(Json(serde_json::json!(vm)))
+    Ok(Json(vm))
 }
 
 #[derive(Deserialize)]
@@ -155,10 +153,10 @@ async fn snapshot_vm(
     State(state): State<Arc<AppState>>,
     Path(vm_name): Path<String>,
     Json(req): Json<SnapshotRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<db::Snapshot>, AppError> {
     info!("Creating snapshot for VM: {}", vm_name);
     let snapshot = vm::snapshot(&state.db_path, &vm_name, req.name).await?;
-    Ok(Json(serde_json::json!(snapshot)))
+    Ok(Json(snapshot))
 }
 
 #[derive(Deserialize)]
@@ -171,14 +169,13 @@ async fn exec_vm(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Json(req): Json<ExecRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<minions_proto::Response>, AppError> {
     info!("Executing command in VM {}: {} {:?}", name, req.command, req.args);
     
     // Get VM vsock socket
     let vsock_socket = {
-        use rusqlite::Connection;
-        let conn = Connection::open(&state.db_path)?;
-        let vm = crate::db::get_vm(&conn, &name)?
+        let conn = db::open(&state.db_path)?;
+        let vm = db::get_vm(&conn, &name)?
             .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", name))?;
         std::path::PathBuf::from(vm.ch_vsock_socket)
     };
@@ -192,7 +189,7 @@ async fn exec_vm(
     )
     .await?;
 
-    Ok(Json(serde_json::json!(response)))
+    Ok(Json(response))
 }
 
 // Error handling
@@ -214,32 +211,5 @@ where
 {
     fn from(err: E) -> Self {
         Self(err.into())
-    }
-}
-
-// Stub database functions (will be moved/shared later)
-mod db {
-    use anyhow::{Context, Result};
-    use rusqlite::Connection;
-
-    pub struct Vm {
-        pub ch_vsock_socket: String,
-    }
-
-    pub fn get_vm(conn: &Connection, name: &str) -> Result<Option<Vm>> {
-        let mut stmt = conn
-            .prepare("SELECT ch_vsock_socket FROM vms WHERE name = ?1")
-            .context("prepare get_vm")?;
-        
-        let vm = stmt
-            .query_row([name], |row| {
-                Ok(Vm {
-                    ch_vsock_socket: row.get(0)?,
-                })
-            })
-            .optional()
-            .context("query get_vm")?;
-        
-        Ok(vm)
     }
 }

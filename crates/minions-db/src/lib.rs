@@ -9,7 +9,7 @@ use uuid::Uuid;
 pub const DB_PATH: &str = "/var/lib/minions/state.db";
 
 /// Represents a VM record in the database.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Vm {
     pub name: String,
     pub status: String,
@@ -663,7 +663,7 @@ pub fn get_user_usage(conn: &Connection, owner_id: &str) -> Result<UserUsage> {
 // ── Snapshots ─────────────────────────────────────────────────────────────────
 
 /// A snapshot record stored in the database.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot {
     pub id: String,
     pub vm_name: String,
