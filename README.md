@@ -38,17 +38,17 @@ curl -sSL https://raw.githubusercontent.com/thiagovarela/minions/main/scripts/in
 
 ```bash
 # Build all binaries for Linux
-make build
+mise run build
 
 # Create a release tarball (dist/minions-<version>-x86_64-unknown-linux-musl.tar.gz)
-make release
+mise run release
 ```
 
 ### Publish a Release
 
 ```bash
 # Build + create GitHub Release with binaries attached
-make publish VERSION=v0.2.0
+mise run publish VERSION=v0.2.0
 ```
 
 This will:
@@ -86,7 +86,7 @@ This injects `minions-agent` into `/var/lib/minions/images/base-ubuntu.ext4` so 
 git checkout -b feat/my-feature
 
 # 2. Build locally (macOS)
-make build
+mise run build
 
 # 3. Test on Linux server
 scp target/x86_64-unknown-linux-musl/release/minions user@server:/tmp/
@@ -101,7 +101,7 @@ git push origin feat/my-feature
 # 6. Publish release
 git checkout main
 git pull
-make publish VERSION=v0.3.0
+mise run publish VERSION=v0.3.0
 ```
 
 ## Architecture

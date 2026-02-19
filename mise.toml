@@ -1,2 +1,103 @@
-# No build tools required in mise — use musl-cross from Homebrew
-# Install: brew install FiloSottile/musl-cross/musl-cross
+# Minions build and release automation
+# Cross-compiles from macOS (aarch64-apple-darwin) to Linux (x86_64-unknown-linux-musl)
+#
+# Prerequisites:
+#   brew install FiloSottile/musl-cross/musl-cross
+#   rustup target add x86_64-unknown-linux-musl
+#
+# Usage:
+#   mise run build                    # Build all binaries for Linux
+#   mise run release                  # Build + create tarball
+#   mise run publish VERSION=v0.1.0   # Build + create GitHub release
+
+[env]
+TARGET = "x86_64-unknown-linux-musl"
+RELEASE_DIR = "target/x86_64-unknown-linux-musl/release"
+
+[tasks.check-musl-cross]
+description = "Check if musl-cross is installed"
+run = """
+#!/bin/bash
+if ! which x86_64-linux-musl-gcc > /dev/null 2>&1; then
+    echo "Error: x86_64-linux-musl-gcc not found. Install musl-cross:"
+    echo "  brew install FiloSottile/musl-cross/musl-cross"
+    exit 1
+fi
+"""
+
+[tasks.build]
+description = "Build all binaries for Linux (x86_64-unknown-linux-musl)"
+depends = ["check-musl-cross"]
+run = """
+#!/bin/bash
+set -euo pipefail
+echo "Building for $TARGET..."
+cargo build --release --target $TARGET \
+    -p minions \
+    -p minions-agent \
+    -p minions-node \
+    -p minions-vsock-cli
+echo "✓ Build complete. Binaries in $RELEASE_DIR/"
+ls -lh $RELEASE_DIR/minions*
+"""
+
+[tasks.release]
+description = "Build + create release tarball"
+depends = ["build"]
+run = """
+#!/bin/bash
+set -euo pipefail
+VERSION="${VERSION:-$(git describe --tags --always)}"
+TARBALL="minions-${VERSION}-${TARGET}.tar.gz"
+echo "Creating release tarball $TARBALL..."
+mkdir -p dist
+rm -f "dist/$TARBALL"
+tar -czf "dist/$TARBALL" -C $RELEASE_DIR minions minions-agent minions-node minions-vsock-cli
+echo "✓ Tarball created: dist/$TARBALL"
+ls -lh "dist/$TARBALL"
+echo ""
+echo "Contents:"
+tar -tzf "dist/$TARBALL"
+"""
+
+[tasks.publish]
+description = "Build + create GitHub release (requires VERSION env var)"
+depends = ["release"]
+run = """
+#!/bin/bash
+set -euo pipefail
+
+if [ -z "${VERSION:-}" ]; then
+    echo "Error: VERSION not set. Usage: mise run publish VERSION=v0.1.0"
+    exit 1
+fi
+
+TARBALL="minions-${VERSION}-${TARGET}.tar.gz"
+
+echo "Publishing GitHub release $VERSION..."
+if git rev-parse "$VERSION" >/dev/null 2>&1; then
+    echo "Tag $VERSION already exists. Skipping tag creation."
+else
+    echo "Creating tag $VERSION..."
+    git tag -a "$VERSION" -m "Release $VERSION"
+    git push origin "$VERSION"
+fi
+
+echo "Creating GitHub release..."
+gh release create "$VERSION" \
+    "dist/$TARBALL" \
+    --title "Release $VERSION" \
+    --notes "Automated release for $VERSION. See CHANGELOG for details."
+
+echo "✓ Release published: https://github.com/thiagovarela/minions/releases/tag/$VERSION"
+"""
+
+[tasks.clean]
+description = "Clean build artifacts"
+run = """
+#!/bin/bash
+echo "Cleaning build artifacts..."
+cargo clean
+rm -rf dist/
+echo "✓ Clean complete"
+"""
