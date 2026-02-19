@@ -17,8 +17,7 @@ pub fn rootfs_path(name: &str) -> PathBuf {
 /// The base image must already contain the minions-agent binary + systemd unit.
 pub fn create_rootfs(name: &str) -> Result<PathBuf> {
     let vm_dir = PathBuf::from(VMS_DIR).join(name);
-    std::fs::create_dir_all(&vm_dir)
-        .with_context(|| format!("create VM dir {:?}", vm_dir))?;
+    std::fs::create_dir_all(&vm_dir).with_context(|| format!("create VM dir {:?}", vm_dir))?;
 
     let dst = vm_dir.join("rootfs.ext4");
     let base = Path::new(BASE_IMAGE);
@@ -60,18 +59,25 @@ pub fn copy_rootfs(source_rootfs: &str, dest_name: &str) -> Result<PathBuf> {
     }
 
     let vm_dir = PathBuf::from(VMS_DIR).join(dest_name);
-    std::fs::create_dir_all(&vm_dir)
-        .with_context(|| format!("create VM dir {:?}", vm_dir))?;
+    std::fs::create_dir_all(&vm_dir).with_context(|| format!("create VM dir {:?}", vm_dir))?;
 
     let dst = vm_dir.join("rootfs.ext4");
 
     let status = std::process::Command::new("cp")
-        .args(["--sparse=always", src.to_str().unwrap(), dst.to_str().unwrap()])
+        .args([
+            "--sparse=always",
+            src.to_str().unwrap(),
+            dst.to_str().unwrap(),
+        ])
         .status()
         .context("spawn cp")?;
 
     if !status.success() {
-        anyhow::bail!("cp rootfs from '{}' to '{}' failed", src.display(), dst.display());
+        anyhow::bail!(
+            "cp rootfs from '{}' to '{}' failed",
+            src.display(),
+            dst.display()
+        );
     }
 
     Ok(dst)
@@ -81,9 +87,69 @@ pub fn copy_rootfs(source_rootfs: &str, dest_name: &str) -> Result<PathBuf> {
 pub fn destroy_rootfs(name: &str) -> Result<()> {
     let vm_dir = PathBuf::from(VMS_DIR).join(name);
     if vm_dir.exists() {
-        std::fs::remove_dir_all(&vm_dir)
-            .with_context(|| format!("remove {:?}", vm_dir))?;
+        std::fs::remove_dir_all(&vm_dir).with_context(|| format!("remove {:?}", vm_dir))?;
     }
+    Ok(())
+}
+
+/// Resize an ext4 rootfs image (grow only).
+///
+/// The VM **must be stopped** before calling this. This function:
+/// 1. Validates new_size_gb is >= current size
+/// 2. Extends the file using `truncate`
+/// 3. Grows the ext4 filesystem using `resize2fs`
+///
+/// Only growing is supported (ext4 cannot be shrunk online).
+pub fn resize_rootfs(rootfs_path: &str, new_size_gb: u32) -> Result<()> {
+    let path = Path::new(rootfs_path);
+    if !path.exists() {
+        anyhow::bail!("rootfs not found at '{}'", rootfs_path);
+    }
+
+    // Get current size in bytes
+    let current_bytes = std::fs::metadata(path)
+        .context("read rootfs metadata")?
+        .len();
+    let current_gb = (current_bytes as f64 / (1024.0 * 1024.0 * 1024.0)).ceil() as u32;
+
+    // Validate: can only grow, not shrink
+    if new_size_gb < current_gb {
+        anyhow::bail!(
+            "cannot shrink disk from {}GB to {}GB (ext4 only supports growing)",
+            current_gb,
+            new_size_gb
+        );
+    }
+
+    if new_size_gb == current_gb {
+        // Already at target size, no-op
+        return Ok(());
+    }
+
+    // Step 1: Extend the file using truncate
+    let status = std::process::Command::new("truncate")
+        .args(["--size", &format!("{}G", new_size_gb), rootfs_path])
+        .status()
+        .context("spawn truncate")?;
+
+    if !status.success() {
+        anyhow::bail!("truncate failed for '{}'", rootfs_path);
+    }
+
+    // Step 2: Grow the ext4 filesystem
+    let status = std::process::Command::new("resize2fs")
+        .arg(rootfs_path)
+        .status()
+        .context("spawn resize2fs")?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "resize2fs failed for '{}' — file extended to {}GB but filesystem not grown",
+            rootfs_path,
+            new_size_gb
+        );
+    }
+
     Ok(())
 }
 
@@ -109,7 +175,11 @@ pub fn snapshot_rootfs_path(vm_name: &str, snap_name: &str) -> PathBuf {
 ///
 /// Returns `(snapshot_rootfs_path, size_bytes)`.
 /// The source `vm_rootfs_path` is the stored path from the DB record.
-pub fn create_snapshot(vm_rootfs_path: &str, vm_name: &str, snap_name: &str) -> Result<(PathBuf, u64)> {
+pub fn create_snapshot(
+    vm_rootfs_path: &str,
+    vm_name: &str,
+    snap_name: &str,
+) -> Result<(PathBuf, u64)> {
     let src = Path::new(vm_rootfs_path);
     if !src.exists() {
         anyhow::bail!(
@@ -119,8 +189,7 @@ pub fn create_snapshot(vm_rootfs_path: &str, vm_name: &str, snap_name: &str) -> 
     }
 
     let dir = snapshot_dir(vm_name, snap_name);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create snapshot dir {:?}", dir))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create snapshot dir {:?}", dir))?;
 
     let dst = dir.join("rootfs.ext4");
 
@@ -132,13 +201,12 @@ pub fn create_snapshot(vm_rootfs_path: &str, vm_name: &str, snap_name: &str) -> 
     if !status.success() {
         anyhow::bail!(
             "cp failed when creating snapshot '{}' for VM '{}'",
-            snap_name, vm_name
+            snap_name,
+            vm_name
         );
     }
 
-    let size_bytes = std::fs::metadata(&dst)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let size_bytes = std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
 
     Ok((dst, size_bytes))
 }
@@ -168,7 +236,8 @@ pub fn restore_snapshot(vm_rootfs_path: &str, vm_name: &str, snap_name: &str) ->
     if !status.success() {
         anyhow::bail!(
             "cp failed when restoring snapshot '{}' for VM '{}'",
-            snap_name, vm_name
+            snap_name,
+            vm_name
         );
     }
 
@@ -179,8 +248,7 @@ pub fn restore_snapshot(vm_rootfs_path: &str, vm_name: &str, snap_name: &str) ->
 pub fn delete_snapshot_files(vm_name: &str, snap_name: &str) -> Result<()> {
     let dir = snapshot_dir(vm_name, snap_name);
     if dir.exists() {
-        std::fs::remove_dir_all(&dir)
-            .with_context(|| format!("remove snapshot dir {:?}", dir))?;
+        std::fs::remove_dir_all(&dir).with_context(|| format!("remove snapshot dir {:?}", dir))?;
     }
     Ok(())
 }

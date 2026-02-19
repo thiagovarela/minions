@@ -34,6 +34,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/vms/{name}/stop", post(stop_vm))
         .route("/api/vms/{name}/restart", post(restart_vm))
         .route("/api/vms/{name}/rename", post(rename_vm))
+        .route("/api/vms/{name}/resize", post(resize_vm))
         .route("/api/vms/{name}/copy", post(copy_vm))
         .route("/api/vms/{name}/exec", post(exec_vm))
         .route("/api/vms/{name}/status", get(vm_status))
@@ -44,11 +45,17 @@ pub fn router(state: AppState) -> Router {
         // Custom domain routes
         .route("/api/vms/{name}/domains", post(add_custom_domain))
         .route("/api/vms/{name}/domains", get(list_custom_domains))
-        .route("/api/vms/{name}/domains/{domain}", delete(remove_custom_domain))
+        .route(
+            "/api/vms/{name}/domains/{domain}",
+            delete(remove_custom_domain),
+        )
         // Snapshot routes
         .route("/api/vms/{name}/snapshots", post(create_snapshot))
         .route("/api/vms/{name}/snapshots", get(list_snapshots))
-        .route("/api/vms/{name}/snapshots/{snap}/restore", post(restore_snapshot))
+        .route(
+            "/api/vms/{name}/snapshots/{snap}/restore",
+            post(restore_snapshot),
+        )
         .route("/api/vms/{name}/snapshots/{snap}", delete(delete_snapshot))
         // Resource / billing routes
         .route("/api/billing/plans", get(billing_plans))
@@ -78,7 +85,10 @@ pub fn router(state: AppState) -> Router {
                     axum::http::Method::POST,
                     axum::http::Method::DELETE,
                 ])
-                .allow_headers([axum::http::header::AUTHORIZATION, axum::http::header::CONTENT_TYPE]),
+                .allow_headers([
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::CONTENT_TYPE,
+                ]),
         );
     }
 
@@ -106,8 +116,12 @@ pub struct CreateRequest {
     pub owner_id: Option<String>,
 }
 
-fn default_cpus() -> u32 { 2 }
-fn default_memory() -> u32 { 1024 }
+fn default_cpus() -> u32 {
+    2
+}
+fn default_memory() -> u32 {
+    1024
+}
 
 #[derive(Debug, Serialize)]
 pub struct VmResponse {
@@ -146,6 +160,13 @@ impl From<db::Vm> for VmResponse {
 #[derive(Debug, Deserialize)]
 pub struct RenameRequest {
     pub new_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResizeRequest {
+    pub vcpus: Option<u32>,
+    pub memory_mb: Option<u32>,
+    pub disk_gb: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,21 +228,27 @@ fn validate_name_param(name: &str) -> Result<(), (StatusCode, Json<ErrorResponse
 fn internal(e: impl std::fmt::Display) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse { error: e.to_string() }),
+        Json(ErrorResponse {
+            error: e.to_string(),
+        }),
     )
 }
 
 fn not_found(name: &str) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::NOT_FOUND,
-        Json(ErrorResponse { error: format!("VM '{name}' not found") }),
+        Json(ErrorResponse {
+            error: format!("VM '{name}' not found"),
+        }),
     )
 }
 
 fn bad_request(msg: impl std::fmt::Display) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::BAD_REQUEST,
-        Json(ErrorResponse { error: msg.to_string() }),
+        Json(ErrorResponse {
+            error: msg.to_string(),
+        }),
     )
 }
 
@@ -238,7 +265,16 @@ async fn create_vm(
     let db_path = state.db_path.as_str().to_string();
     let owner_id = req.owner_id.clone();
 
-    match vm::create(&db_path, &req.name, req.cpus, req.memory_mb, ssh_pubkey, owner_id).await {
+    match vm::create(
+        &db_path,
+        &req.name,
+        req.cpus,
+        req.memory_mb,
+        ssh_pubkey,
+        owner_id,
+    )
+    .await
+    {
         Ok(v) => (StatusCode::CREATED, Json(VmResponse::from(v))).into_response(),
         Err(e) => {
             let msg = e.to_string();
@@ -283,10 +319,7 @@ async fn list_vms(
 }
 
 /// `GET /api/vms/:name` — Get VM details.
-async fn get_vm(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> impl IntoResponse {
+async fn get_vm(State(state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
     let conn = match db::open(&state.db_path) {
         Ok(c) => c,
         Err(e) => return internal(e).into_response(),
@@ -300,10 +333,7 @@ async fn get_vm(
 }
 
 /// `DELETE /api/vms/:name` — Destroy a VM.
-async fn destroy_vm(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> impl IntoResponse {
+async fn destroy_vm(State(state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
     info!(name = %name, "destroy VM");
 
     // Check VM exists (sync, connection dropped before await).
@@ -321,17 +351,15 @@ async fn destroy_vm(
 
     let db_path = state.db_path.as_str().to_string();
     match vm::destroy(&db_path, &name).await {
-        Ok(()) => Json(serde_json::json!({ "message": format!("VM '{name}' destroyed") }))
-            .into_response(),
+        Ok(()) => {
+            Json(serde_json::json!({ "message": format!("VM '{name}' destroyed") })).into_response()
+        }
         Err(e) => internal(e).into_response(),
     }
 }
 
 /// `POST /api/vms/:name/stop` — Halt a VM (CH process + TAP), keep rootfs + DB record.
-async fn stop_vm(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> impl IntoResponse {
+async fn stop_vm(State(state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
     info!(name = %name, "stop VM");
     let db_path = state.db_path.as_str().to_string();
     match vm::stop(&db_path, &name).await {
@@ -351,10 +379,7 @@ async fn stop_vm(
 }
 
 /// `POST /api/vms/:name/start` — Start a stopped VM using its existing rootfs.
-async fn start_vm(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> impl IntoResponse {
+async fn start_vm(State(state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
     info!(name = %name, "start VM");
     let db_path = state.db_path.as_str().to_string();
     match vm::start(&db_path, &name).await {
@@ -373,10 +398,7 @@ async fn start_vm(
 }
 
 /// `POST /api/vms/:name/restart` — Reboot a running VM via ACPI signal.
-async fn restart_vm(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> impl IntoResponse {
+async fn restart_vm(State(state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
     info!(name = %name, "restart VM");
     let db_path = state.db_path.as_str().to_string();
     match vm::restart(&db_path, &name).await {
@@ -387,6 +409,34 @@ async fn restart_vm(
             if msg.contains("VM '") && msg.contains("' not found") {
                 not_found(&name).into_response()
             } else if msg.contains("not running") {
+                bad_request(msg).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
+    }
+}
+
+/// `POST /api/vms/:name/resize` — Resize a stopped VM's resources (CPU, memory, disk).
+async fn resize_vm(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<ResizeRequest>,
+) -> impl IntoResponse {
+    info!(name = %name, vcpus = ?req.vcpus, memory_mb = ?req.memory_mb, disk_gb = ?req.disk_gb, "resize VM");
+    let db_path = state.db_path.as_str().to_string();
+    match vm::resize(&db_path, &name, req.vcpus, req.memory_mb, req.disk_gb).await {
+        Ok(v) => Json(VmResponse::from(v)).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("VM '") && msg.contains("' not found") {
+                not_found(&name).into_response()
+            } else if msg.contains("must be stopped")
+                || msg.contains("at least one")
+                || msg.contains("must be between")
+                || msg.contains("cannot shrink")
+                || msg.contains("quota")
+            {
                 bad_request(msg).into_response()
             } else {
                 internal(msg).into_response()
@@ -412,7 +462,10 @@ async fn rename_vm(
             let msg = e.to_string();
             if msg.contains("VM '") && msg.contains("' not found") {
                 not_found(&name).into_response()
-            } else if msg.contains("already exists") || msg.contains("must only contain") || msg.contains("characters or fewer") {
+            } else if msg.contains("already exists")
+                || msg.contains("must only contain")
+                || msg.contains("characters or fewer")
+            {
                 bad_request(msg).into_response()
             } else {
                 internal(msg).into_response()
@@ -437,7 +490,10 @@ async fn copy_vm(
             let msg = e.to_string();
             if msg.contains("VM '") && msg.contains("' not found") {
                 not_found(&name).into_response()
-            } else if msg.contains("already exists") || msg.contains("must only contain") || msg.contains("characters or fewer") {
+            } else if msg.contains("already exists")
+                || msg.contains("must only contain")
+                || msg.contains("characters or fewer")
+            {
                 bad_request(msg).into_response()
             } else {
                 internal(msg).into_response()
@@ -467,7 +523,10 @@ async fn exec_vm(
 
     let response = match agent::send_request(
         &vsock_socket,
-        AgentRequest::Exec { command: req.command, args: req.args },
+        AgentRequest::Exec {
+            command: req.command,
+            args: req.args,
+        },
     )
     .await
     {
@@ -477,19 +536,26 @@ async fn exec_vm(
 
     match response {
         AgentResponse::Ok {
-            data: Some(ResponseData::Exec { exit_code, stdout, stderr }),
+            data:
+                Some(ResponseData::Exec {
+                    exit_code,
+                    stdout,
+                    stderr,
+                }),
             ..
-        } => Json(ExecResponse { exit_code, stdout, stderr }).into_response(),
+        } => Json(ExecResponse {
+            exit_code,
+            stdout,
+            stderr,
+        })
+        .into_response(),
         AgentResponse::Error { message } => internal(message).into_response(),
         other => internal(format!("unexpected response: {other:?}")).into_response(),
     }
 }
 
 /// `GET /api/vms/:name/status` — Agent status.
-async fn vm_status(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> impl IntoResponse {
+async fn vm_status(State(state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
     // Sync: look up VM, then drop connection before await.
     let vsock_socket = {
         let conn = match db::open(&state.db_path) {
@@ -510,10 +576,7 @@ async fn vm_status(
 }
 
 /// `GET /api/vms/:name/logs` — Serial console log.
-async fn vm_logs(
-    State(_state): State<AppState>,
-    Path(name): Path<String>,
-) -> impl IntoResponse {
+async fn vm_logs(State(_state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
     // Validate the name to prevent path traversal before filesystem access.
     if let Err(e) = validate_name_param(&name) {
         return e.into_response();
@@ -522,13 +585,18 @@ async fn vm_logs(
     match std::fs::read_to_string(&log_path) {
         Ok(content) => (
             StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
             content,
         )
             .into_response(),
         Err(_) => (
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse { error: format!("no logs found for VM '{name}'") }),
+            Json(ErrorResponse {
+                error: format!("no logs found for VM '{name}'"),
+            }),
         )
             .into_response(),
     }
@@ -554,7 +622,9 @@ async fn expose_vm(
     if !(1..=65535).contains(&params.port) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse { error: "port must be between 1 and 65535".into() }),
+            Json(ErrorResponse {
+                error: "port must be between 1 and 65535".into(),
+            }),
         )
             .into_response();
     }
@@ -566,7 +636,9 @@ async fn expose_vm(
             .into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse { error: format!("VM '{name}' not found") }),
+            Json(ErrorResponse {
+                error: format!("VM '{name}' not found"),
+            }),
         )
             .into_response(),
         Err(e) => internal(e).into_response(),
@@ -583,8 +655,18 @@ async fn set_vm_public(
         Err(e) => return internal(e).into_response(),
     };
     match db::set_proxy_public(&conn, &name, true) {
-        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "name": name, "proxy_public": true }))).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("VM '{name}' not found") })).into_response(),
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "name": name, "proxy_public": true })),
+        )
+            .into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("VM '{name}' not found"),
+            }),
+        )
+            .into_response(),
         Err(e) => internal(e).into_response(),
     }
 }
@@ -599,8 +681,18 @@ async fn set_vm_private(
         Err(e) => return internal(e).into_response(),
     };
     match db::set_proxy_public(&conn, &name, false) {
-        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "name": name, "proxy_public": false }))).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, Json(ErrorResponse { error: format!("VM '{name}' not found") })).into_response(),
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "name": name, "proxy_public": false })),
+        )
+            .into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("VM '{name}' not found"),
+            }),
+        )
+            .into_response(),
         Err(e) => internal(e).into_response(),
     }
 }
@@ -622,10 +714,14 @@ struct PlanResponse {
 impl From<db::Plan> for PlanResponse {
     fn from(p: db::Plan) -> Self {
         PlanResponse {
-            id: p.id, name: p.name,
-            max_vms: p.max_vms, max_vcpus: p.max_vcpus,
-            max_memory_mb: p.max_memory_mb, max_disk_gb: p.max_disk_gb,
-            max_snapshots: p.max_snapshots, price_cents: p.price_cents,
+            id: p.id,
+            name: p.name,
+            max_vms: p.max_vms,
+            max_vcpus: p.max_vcpus,
+            max_memory_mb: p.max_memory_mb,
+            max_disk_gb: p.max_disk_gb,
+            max_snapshots: p.max_snapshots,
+            price_cents: p.price_cents,
         }
     }
 }
@@ -658,7 +754,13 @@ async fn billing_plans(State(state): State<AppState>) -> impl IntoResponse {
         Err(e) => return internal(e).into_response(),
     };
     match db::list_plans(&conn) {
-        Ok(plans) => Json(plans.into_iter().map(PlanResponse::from).collect::<Vec<_>>()).into_response(),
+        Ok(plans) => Json(
+            plans
+                .into_iter()
+                .map(PlanResponse::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
         Err(e) => internal(e).into_response(),
     }
 }
@@ -693,7 +795,8 @@ async fn billing_subscription(
             total_memory_mb: usage.total_memory_mb,
             snapshot_count: usage.snapshot_count,
         },
-    }).into_response()
+    })
+    .into_response()
 }
 
 /// `POST /api/billing/plan` — Manually set a user's plan (admin use / future billing hook).
@@ -712,7 +815,11 @@ async fn billing_set_plan(
         Ok(Some(_)) => {}
     }
     // Ensure user has a subscription row first.
-    if db::get_subscription(&conn, &req.owner_id).ok().flatten().is_none() {
+    if db::get_subscription(&conn, &req.owner_id)
+        .ok()
+        .flatten()
+        .is_none()
+    {
         let _ = db::create_subscription(&conn, &req.owner_id, &req.plan_id);
     } else {
         match db::set_user_plan(&conn, &req.owner_id, &req.plan_id) {
@@ -724,7 +831,8 @@ async fn billing_set_plan(
         "owner_id": req.owner_id,
         "plan_id": req.plan_id,
         "message": format!("plan updated to '{}'", req.plan_id)
-    })).into_response()
+    }))
+    .into_response()
 }
 
 // ── Custom Domain types & handlers ────────────────────────────────────────────
@@ -761,11 +869,11 @@ fn validate_custom_domain(domain: &str, base_domain: Option<&str>) -> Result<(),
     if domain.is_empty() || domain.len() > 253 {
         return Err("domain must be 1-253 characters".to_string());
     }
-    
+
     if domain.starts_with('.') || domain.ends_with('.') || domain.contains("..") {
         return Err("invalid domain format".to_string());
     }
-    
+
     // Labels must be alphanumeric + hyphens, not starting/ending with hyphen
     for label in domain.split('.') {
         if label.is_empty() || label.len() > 63 {
@@ -778,7 +886,7 @@ fn validate_custom_domain(domain: &str, base_domain: Option<&str>) -> Result<(),
             return Err("domain labels cannot start or end with hyphen".to_string());
         }
     }
-    
+
     // Reject if it's a subdomain of base_domain (those use wildcard cert)
     if let Some(base) = base_domain {
         let suffix = format!(".{}", base);
@@ -789,7 +897,7 @@ fn validate_custom_domain(domain: &str, base_domain: Option<&str>) -> Result<(),
             ));
         }
     }
-    
+
     Ok(())
 }
 
@@ -800,37 +908,38 @@ async fn add_custom_domain(
     Json(req): Json<AddCustomDomainRequest>,
 ) -> impl IntoResponse {
     info!(vm = %name, domain = %req.domain, "add custom domain");
-    
+
     // Validate domain format
     let base_domain_str = state.domain.as_ref().map(|s| s.as_str());
     if let Err(e) = validate_custom_domain(&req.domain, base_domain_str) {
         return bad_request(e).into_response();
     }
-    
+
     let conn = match db::open(&state.db_path) {
         Ok(c) => c,
         Err(e) => return internal(e).into_response(),
     };
-    
+
     // Check VM exists
     match db::get_vm(&conn, &name) {
         Ok(None) => return not_found(&name).into_response(),
         Err(e) => return internal(e).into_response(),
         Ok(Some(_)) => {}
     }
-    
+
     // Check domain not already registered
     match db::get_custom_domain_by_name(&conn, &req.domain) {
         Ok(Some(existing)) => {
             return bad_request(format!(
                 "domain '{}' is already registered to VM '{}'",
                 req.domain, existing.vm_name
-            )).into_response();
+            ))
+            .into_response();
         }
         Err(e) => return internal(e).into_response(),
         Ok(None) => {}
     }
-    
+
     // DNS verification (if base_domain and public_ip are configured)
     if let Some(base) = base_domain_str {
         let public_ip = state.public_ip.as_ref().map(|s| s.as_str());
@@ -849,22 +958,23 @@ async fn add_custom_domain(
                 return bad_request(format!(
                     "DNS lookup failed: {} (check that the domain exists and is accessible)",
                     e
-                )).into_response();
+                ))
+                .into_response();
             }
         }
     }
-    
+
     // Add to DB (initially unverified — the proxy will provision certs and mark verified)
     let id = match db::add_custom_domain(&conn, &name, &req.domain) {
         Ok(id) => id,
         Err(e) => return internal(e).into_response(),
     };
-    
+
     // For Cloudflare proxied setups (TLS terminated at edge), mark as verified immediately
     // since the proxy doesn't need per-domain certs at the origin.
     // For direct TLS setups, full ACME (tls.rs) would handle provisioning.
     let _ = db::mark_domain_verified(&conn, &req.domain);
-    
+
     let domain_record = db::CustomDomain {
         id,
         vm_name: name.clone(),
@@ -872,8 +982,12 @@ async fn add_custom_domain(
         verified: true, // Marked verified for Cloudflare proxied setups
         created_at: chrono::Utc::now().to_rfc3339(),
     };
-    
-    (StatusCode::CREATED, Json(CustomDomainResponse::from(domain_record))).into_response()
+
+    (
+        StatusCode::CREATED,
+        Json(CustomDomainResponse::from(domain_record)),
+    )
+        .into_response()
 }
 
 /// `GET /api/vms/:name/domains` — List custom domains for a VM.
@@ -885,16 +999,22 @@ async fn list_custom_domains(
         Ok(c) => c,
         Err(e) => return internal(e).into_response(),
     };
-    
+
     // Check VM exists
     match db::get_vm(&conn, &name) {
         Ok(None) => return not_found(&name).into_response(),
         Err(e) => return internal(e).into_response(),
         Ok(Some(_)) => {}
     }
-    
+
     match db::list_custom_domains(&conn, &name) {
-        Ok(domains) => Json(domains.into_iter().map(CustomDomainResponse::from).collect::<Vec<_>>()).into_response(),
+        Ok(domains) => Json(
+            domains
+                .into_iter()
+                .map(CustomDomainResponse::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
         Err(e) => internal(e).into_response(),
     }
 }
@@ -905,20 +1025,24 @@ async fn remove_custom_domain(
     Path((name, domain)): Path<(String, String)>,
 ) -> impl IntoResponse {
     info!(vm = %name, domain = %domain, "remove custom domain");
-    
+
     let conn = match db::open(&state.db_path) {
         Ok(c) => c,
         Err(e) => return internal(e).into_response(),
     };
-    
+
     match db::remove_custom_domain(&conn, &name, &domain) {
         Ok(true) => Json(serde_json::json!({
             "message": format!("domain '{}' removed from VM '{}'", domain, name)
-        })).into_response(),
+        }))
+        .into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse { error: format!("domain '{}' not found for VM '{}'", domain, name) }),
-        ).into_response(),
+            Json(ErrorResponse {
+                error: format!("domain '{}' not found for VM '{}'", domain, name),
+            }),
+        )
+            .into_response(),
         Err(e) => internal(e).into_response(),
     }
 }
@@ -968,7 +1092,11 @@ async fn create_snapshot(
             let msg = e.to_string();
             if msg.contains("not found") {
                 not_found(&name).into_response()
-            } else if msg.contains("already exists") || msg.contains("limit reached") || msg.contains("must be") || msg.contains("still starting") {
+            } else if msg.contains("already exists")
+                || msg.contains("limit reached")
+                || msg.contains("must be")
+                || msg.contains("still starting")
+            {
                 bad_request(msg).into_response()
             } else {
                 internal(msg).into_response()
@@ -984,10 +1112,20 @@ async fn list_snapshots(
 ) -> impl IntoResponse {
     let db_path = state.db_path.as_str().to_string();
     match vm::list_snapshots(&db_path, &name) {
-        Ok(snaps) => Json(snaps.into_iter().map(SnapshotResponse::from).collect::<Vec<_>>()).into_response(),
+        Ok(snaps) => Json(
+            snaps
+                .into_iter()
+                .map(SnapshotResponse::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("not found") { not_found(&name).into_response() } else { internal(msg).into_response() }
+            if msg.contains("not found") {
+                not_found(&name).into_response()
+            } else {
+                internal(msg).into_response()
+            }
         }
     }
 }
@@ -1002,7 +1140,8 @@ async fn restore_snapshot(
     match vm::restore_snapshot(&db_path, &name, &snap).await {
         Ok(()) => Json(serde_json::json!({
             "message": format!("VM '{name}' restored from snapshot '{snap}'")
-        })).into_response(),
+        }))
+        .into_response(),
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("not found") {
@@ -1026,7 +1165,8 @@ async fn delete_snapshot(
     match vm::delete_snapshot(&db_path, &name, &snap).await {
         Ok(()) => Json(serde_json::json!({
             "message": format!("snapshot '{snap}' deleted for VM '{name}'")
-        })).into_response(),
+        }))
+        .into_response(),
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("not found") {
@@ -1045,16 +1185,16 @@ async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse 
     let body = metrics::prometheus_text(&state.metrics);
     (
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         body,
     )
 }
 
 /// `GET /api/vms/:name/metrics` — Per-VM metrics snapshot as JSON.
-async fn vm_metrics(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> impl IntoResponse {
+async fn vm_metrics(State(state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
     match state.metrics.get_vm(&name) {
         Some(m) => Json(m).into_response(),
         None => (
@@ -1062,6 +1202,7 @@ async fn vm_metrics(
             Json(ErrorResponse {
                 error: format!("no metrics collected yet for VM '{name}' (is it running?)"),
             }),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }

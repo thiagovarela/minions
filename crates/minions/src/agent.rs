@@ -1,7 +1,7 @@
 //! VSOCK client: connect, handshake, send requests.
 
 use anyhow::{Context, Result};
-use minions_proto::{read_frame, write_frame, Request, Response};
+use minions_proto::{Request, Response, read_frame, write_frame};
 use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -52,7 +52,10 @@ pub async fn wait_ready(vsock_socket: &Path, timeout: Duration) -> Result<()> {
     let mut backoff = Duration::from_millis(100);
 
     loop {
-        if send_request(vsock_socket, Request::HealthCheck).await.is_ok() {
+        if send_request(vsock_socket, Request::HealthCheck)
+            .await
+            .is_ok()
+        {
             return Ok(());
         }
 

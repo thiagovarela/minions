@@ -86,13 +86,17 @@ impl MetricsStore {
 
     /// All VM snapshots (for Prometheus scrape).
     pub fn all_vms(&self) -> Vec<VmMetrics> {
-        self.0.read().ok()
+        self.0
+            .read()
+            .ok()
             .map(|inner| inner.vms.values().cloned().collect())
             .unwrap_or_default()
     }
 
     pub fn host(&self) -> HostMetrics {
-        self.0.read().ok()
+        self.0
+            .read()
+            .ok()
             .map(|inner| inner.host.clone())
             .unwrap_or_default()
     }
@@ -153,12 +157,21 @@ async fn collect_once(db_path: &str, store: &MetricsStore) {
                 .await;
 
                 match result {
-                    Ok(Ok(Response::Ok { data: Some(ResponseData::Status {
-                        uptime_secs, memory_total_mb, memory_used_mb,
-                        disk_total_gb, disk_used_gb,
-                        cpu_usage_percent, network_rx_bytes, network_tx_bytes,
-                        load_avg_1m,
-                    }), .. })) => {
+                    Ok(Ok(Response::Ok {
+                        data:
+                            Some(ResponseData::Status {
+                                uptime_secs,
+                                memory_total_mb,
+                                memory_used_mb,
+                                disk_total_gb,
+                                disk_used_gb,
+                                cpu_usage_percent,
+                                network_rx_bytes,
+                                network_tx_bytes,
+                                load_avg_1m,
+                            }),
+                        ..
+                    })) => {
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -202,35 +215,84 @@ pub fn prometheus_text(store: &MetricsStore) -> String {
     let host = store.host();
 
     // Host-level gauges.
-    metric(&mut out, "minions_vms_total", "gauge", "Number of VMs by status",
+    metric(
+        &mut out,
+        "minions_vms_total",
+        "gauge",
+        "Number of VMs by status",
         &[
             (vec![("status", "running")], host.vm_count_running as f64),
             (vec![("status", "stopped")], host.vm_count_stopped as f64),
-            (vec![("status", "error")],   host.vm_count_error as f64),
+            (vec![("status", "error")], host.vm_count_error as f64),
         ],
     );
 
     // Per-VM gauges.
     let vms = store.all_vms();
 
-    per_vm_gauge(&mut out, &vms, "minions_vm_cpu_percent",
-        "CPU usage percentage", |m| m.cpu_usage_percent);
-    per_vm_gauge(&mut out, &vms, "minions_vm_memory_used_bytes",
-        "Memory used in bytes", |m| (m.memory_used_mb * 1024 * 1024) as f64);
-    per_vm_gauge(&mut out, &vms, "minions_vm_memory_total_bytes",
-        "Memory total in bytes", |m| (m.memory_total_mb * 1024 * 1024) as f64);
-    per_vm_gauge(&mut out, &vms, "minions_vm_disk_used_bytes",
-        "Disk used in bytes", |m| (m.disk_used_gb * 1024 * 1024 * 1024) as f64);
-    per_vm_gauge(&mut out, &vms, "minions_vm_disk_total_bytes",
-        "Disk total in bytes", |m| (m.disk_total_gb * 1024 * 1024 * 1024) as f64);
-    per_vm_gauge(&mut out, &vms, "minions_vm_network_rx_bytes_total",
-        "Network bytes received", |m| m.network_rx_bytes as f64);
-    per_vm_gauge(&mut out, &vms, "minions_vm_network_tx_bytes_total",
-        "Network bytes transmitted", |m| m.network_tx_bytes as f64);
-    per_vm_gauge(&mut out, &vms, "minions_vm_uptime_seconds",
-        "VM uptime in seconds", |m| m.uptime_secs as f64);
-    per_vm_gauge(&mut out, &vms, "minions_vm_load_avg_1m",
-        "1-minute load average", |m| m.load_avg_1m);
+    per_vm_gauge(
+        &mut out,
+        &vms,
+        "minions_vm_cpu_percent",
+        "CPU usage percentage",
+        |m| m.cpu_usage_percent,
+    );
+    per_vm_gauge(
+        &mut out,
+        &vms,
+        "minions_vm_memory_used_bytes",
+        "Memory used in bytes",
+        |m| (m.memory_used_mb * 1024 * 1024) as f64,
+    );
+    per_vm_gauge(
+        &mut out,
+        &vms,
+        "minions_vm_memory_total_bytes",
+        "Memory total in bytes",
+        |m| (m.memory_total_mb * 1024 * 1024) as f64,
+    );
+    per_vm_gauge(
+        &mut out,
+        &vms,
+        "minions_vm_disk_used_bytes",
+        "Disk used in bytes",
+        |m| (m.disk_used_gb * 1024 * 1024 * 1024) as f64,
+    );
+    per_vm_gauge(
+        &mut out,
+        &vms,
+        "minions_vm_disk_total_bytes",
+        "Disk total in bytes",
+        |m| (m.disk_total_gb * 1024 * 1024 * 1024) as f64,
+    );
+    per_vm_gauge(
+        &mut out,
+        &vms,
+        "minions_vm_network_rx_bytes_total",
+        "Network bytes received",
+        |m| m.network_rx_bytes as f64,
+    );
+    per_vm_gauge(
+        &mut out,
+        &vms,
+        "minions_vm_network_tx_bytes_total",
+        "Network bytes transmitted",
+        |m| m.network_tx_bytes as f64,
+    );
+    per_vm_gauge(
+        &mut out,
+        &vms,
+        "minions_vm_uptime_seconds",
+        "VM uptime in seconds",
+        |m| m.uptime_secs as f64,
+    );
+    per_vm_gauge(
+        &mut out,
+        &vms,
+        "minions_vm_load_avg_1m",
+        "1-minute load average",
+        |m| m.load_avg_1m,
+    );
 
     out
 }
@@ -245,7 +307,8 @@ fn metric(
     out.push_str(&format!("# HELP {name} {help}\n"));
     out.push_str(&format!("# TYPE {name} {kind}\n"));
     for (labels, value) in samples {
-        let label_str = labels.iter()
+        let label_str = labels
+            .iter()
             .map(|(k, v)| format!("{k}=\"{v}\""))
             .collect::<Vec<_>>()
             .join(",");

@@ -44,9 +44,11 @@ pub async fn create(
         let tap = network::create_tap(name).context("create TAP device")?;
 
         // Any failure after TAP creation must remove the TAP device.
-        let rootfs = storage::create_rootfs(name).context("copy base rootfs").inspect_err(|_| {
-            let _ = network::destroy_tap(name);
-        })?;
+        let rootfs = storage::create_rootfs(name)
+            .context("copy base rootfs")
+            .inspect_err(|_| {
+                let _ = network::destroy_tap(name);
+            })?;
 
         let api_socket = hypervisor::api_socket_path(name);
         let vsock_socket = hypervisor::vsock_socket_path(name);
@@ -71,10 +73,12 @@ pub async fn create(
             proxy_public: false,
             owner_id: owner_id.clone(),
         };
-        db::insert_vm(&conn, &vm_row).context("insert VM into DB").inspect_err(|_| {
-            let _ = network::destroy_tap(name);
-            let _ = storage::destroy_rootfs(name);
-        })?;
+        db::insert_vm(&conn, &vm_row)
+            .context("insert VM into DB")
+            .inspect_err(|_| {
+                let _ = network::destroy_tap(name);
+                let _ = storage::destroy_rootfs(name);
+            })?;
 
         let cfg = hypervisor::VmConfig {
             name: name.to_string(),
@@ -119,7 +123,7 @@ pub async fn create(
 
         if let Some(pubkey) = ssh_pubkey {
             info!("injecting SSH public key into VM");
-            
+
             // Validate SSH key format (basic sanity check)
             let pubkey = pubkey.trim();
             if !pubkey.starts_with("ssh-") && !pubkey.starts_with("ecdsa-") {
@@ -156,7 +160,8 @@ pub async fn create(
         info!("create failed ({e:#}), rolling back…");
         let pid = {
             let conn = db::open(db_path).ok();
-            conn.and_then(|c| db::get_vm(&c, name).ok().flatten()).and_then(|v| v.ch_pid)
+            conn.and_then(|c| db::get_vm(&c, name).ok().flatten())
+                .and_then(|v| v.ch_pid)
         };
         let _ = hypervisor::shutdown(name, pid);
         let _ = network::destroy_tap(name);
@@ -169,8 +174,7 @@ pub async fn create(
 
     // ── Sync: mark running, return record ────────────────────────────────────
     let conn = db::open(db_path)?;
-    db::update_vm_status(&conn, name, "running", None)
-        .context("update VM status to running")?;
+    db::update_vm_status(&conn, name, "running", None).context("update VM status to running")?;
     db::get_vm(&conn, name)?.context("VM vanished after create")
 }
 
@@ -182,19 +186,22 @@ pub async fn stop(db_path: &str, name: &str) -> Result<db::Vm> {
     // ── Sync: look up VM ─────────────────────────────────────────────────────
     let (ch_pid, api_socket, vsock_socket, tap_device) = {
         let conn = db::open(db_path)?;
-        let vm = db::get_vm(&conn, name)?
-            .with_context(|| format!("VM '{name}' not found"))?;
+        let vm = db::get_vm(&conn, name)?.with_context(|| format!("VM '{name}' not found"))?;
         if vm.status == "stopped" {
             anyhow::bail!("VM '{name}' is already stopped");
         }
         db::update_vm_status(&conn, name, "stopping", None)?;
-        (vm.ch_pid, vm.ch_api_socket, vm.ch_vsock_socket, vm.tap_device)
+        (
+            vm.ch_pid,
+            vm.ch_api_socket,
+            vm.ch_vsock_socket,
+            vm.tap_device,
+        )
         // conn dropped here
     };
 
     // ── Shutdown CH process using stored socket paths ─────────────────────────
-    hypervisor::shutdown_vm(&api_socket, &vsock_socket, ch_pid)
-        .context("shutdown hypervisor")?;
+    hypervisor::shutdown_vm(&api_socket, &vsock_socket, ch_pid).context("shutdown hypervisor")?;
     network::destroy_tap_device(&tap_device).context("destroy TAP")?;
 
     // ── Mark stopped (keep DB record and rootfs) ──────────────────────────────
@@ -213,8 +220,7 @@ pub async fn start(db_path: &str, name: &str) -> Result<db::Vm> {
     // ── Sync: validate + build config from stored state ───────────────────────
     let (ip, vsock_socket, tap, cfg) = {
         let conn = db::open(db_path)?;
-        let vm = db::get_vm(&conn, name)?
-            .with_context(|| format!("VM '{name}' not found"))?;
+        let vm = db::get_vm(&conn, name)?.with_context(|| format!("VM '{name}' not found"))?;
 
         if vm.status != "stopped" {
             anyhow::bail!("VM '{name}' is not stopped (status: {})", vm.status);
@@ -284,7 +290,8 @@ pub async fn start(db_path: &str, name: &str) -> Result<db::Vm> {
         info!("start failed ({e:#}), rolling back…");
         let pid = {
             let conn = db::open(db_path).ok();
-            conn.and_then(|c| db::get_vm(&c, name).ok().flatten()).and_then(|v| v.ch_pid)
+            conn.and_then(|c| db::get_vm(&c, name).ok().flatten())
+                .and_then(|v| v.ch_pid)
         };
         let _ = hypervisor::shutdown(name, pid);
         let _ = network::destroy_tap_device(&tap);
@@ -308,16 +315,19 @@ pub async fn destroy(db_path: &str, name: &str) -> Result<()> {
     // ── Sync: look up VM, collect stored paths ────────────────────────────────
     let (ch_pid, api_socket, vsock_socket, tap_device) = {
         let conn = db::open(db_path)?;
-        let vm = db::get_vm(&conn, name)?
-            .with_context(|| format!("VM '{name}' not found"))?;
+        let vm = db::get_vm(&conn, name)?.with_context(|| format!("VM '{name}' not found"))?;
         db::update_vm_status(&conn, name, "stopping", None)?;
-        (vm.ch_pid, vm.ch_api_socket, vm.ch_vsock_socket, vm.tap_device)
+        (
+            vm.ch_pid,
+            vm.ch_api_socket,
+            vm.ch_vsock_socket,
+            vm.tap_device,
+        )
         // conn dropped here
     };
 
     // ── Shutdown CH using stored socket paths ─────────────────────────────────
-    hypervisor::shutdown_vm(&api_socket, &vsock_socket, ch_pid)
-        .context("shutdown hypervisor")?;
+    hypervisor::shutdown_vm(&api_socket, &vsock_socket, ch_pid).context("shutdown hypervisor")?;
     network::destroy_tap_device(&tap_device).context("destroy TAP")?;
     storage::destroy_rootfs(name).context("destroy rootfs")?;
 
@@ -344,8 +354,7 @@ pub async fn restart(db_path: &str, name: &str) -> Result<db::Vm> {
     // Verify the VM exists and is running; capture stored socket path.
     let api_socket = {
         let conn = db::open(db_path)?;
-        let vm = db::get_vm(&conn, name)?
-            .with_context(|| format!("VM '{name}' not found"))?;
+        let vm = db::get_vm(&conn, name)?.with_context(|| format!("VM '{name}' not found"))?;
         if vm.status != "running" {
             anyhow::bail!("VM '{name}' is not running (status: {})", vm.status);
         }
@@ -359,13 +368,15 @@ pub async fn restart(db_path: &str, name: &str) -> Result<db::Vm> {
     // (e.g. SSH authorized_keys injected during create).
     let vsock_path_for_sync = {
         let conn = db::open(db_path)?;
-        let vm = db::get_vm(&conn, name)?
-            .with_context(|| format!("VM '{name}' not found"))?;
+        let vm = db::get_vm(&conn, name)?.with_context(|| format!("VM '{name}' not found"))?;
         std::path::PathBuf::from(vm.ch_vsock_socket)
     };
     let _ = agent::send_request(
         &vsock_path_for_sync,
-        Request::Exec { command: "sync".to_string(), args: vec![] },
+        Request::Exec {
+            command: "sync".to_string(),
+            args: vec![],
+        },
     )
     .await;
 
@@ -396,6 +407,102 @@ pub async fn restart(db_path: &str, name: &str) -> Result<db::Vm> {
     db::get_vm(&conn, name)?.with_context(|| format!("VM '{name}' vanished after restart"))
 }
 
+/// Resize a stopped VM's resources (CPU, memory, disk).
+///
+/// The VM **must be stopped** before resizing. On the next `start`, Cloud
+/// Hypervisor will use the updated values from the DB.
+///
+/// Disk resizing uses `truncate` and `resize2fs` to grow the ext4 image.
+/// Disk can only be grown, not shrunk.
+pub async fn resize(
+    db_path: &str,
+    name: &str,
+    vcpus: Option<u32>,
+    memory_mb: Option<u32>,
+    disk_gb: Option<u32>,
+) -> Result<db::Vm> {
+    // Validate at least one field is being updated
+    if vcpus.is_none() && memory_mb.is_none() && disk_gb.is_none() {
+        anyhow::bail!("at least one of vcpus, memory_mb, or disk_gb must be specified");
+    }
+
+    // ── Sync: validate VM state and values ───────────────────────────────────
+    let rootfs_path = {
+        let conn = db::open(db_path)?;
+        let vm = db::get_vm(&conn, name)?.with_context(|| format!("VM '{name}' not found"))?;
+
+        if vm.status != "stopped" {
+            anyhow::bail!(
+                "VM '{name}' must be stopped before resizing (current status: {})",
+                vm.status
+            );
+        }
+
+        // Validate resource values
+        if let Some(v) = vcpus {
+            if !(1..=16).contains(&v) {
+                anyhow::bail!("vcpus must be between 1 and 16 (got {})", v);
+            }
+        }
+        if let Some(m) = memory_mb {
+            if !(128..=16384).contains(&m) {
+                anyhow::bail!("memory_mb must be between 128 and 16384 (got {})", m);
+            }
+        }
+
+        // Check quota if VM has an owner
+        if let Some(ref owner_id) = vm.owner_id {
+            let (_, plan) = db::get_user_plan(&conn, owner_id)?;
+            let mut usage = db::get_user_usage(&conn, owner_id)?;
+
+            // Subtract current VM's resources from usage before checking new limits
+            usage.total_vcpus = usage.total_vcpus.saturating_sub(vm.vcpus);
+            usage.total_memory_mb = usage.total_memory_mb.saturating_sub(vm.memory_mb);
+
+            // Add new resources
+            let new_vcpus = vcpus.unwrap_or(vm.vcpus);
+            let new_memory = memory_mb.unwrap_or(vm.memory_mb);
+
+            if usage.total_vcpus + new_vcpus > plan.max_vcpus {
+                anyhow::bail!(
+                    "resizing would exceed vCPU quota: {} + {} > {} (plan: {})",
+                    usage.total_vcpus,
+                    new_vcpus,
+                    plan.max_vcpus,
+                    plan.name
+                );
+            }
+            if usage.total_memory_mb + new_memory > plan.max_memory_mb {
+                anyhow::bail!(
+                    "resizing would exceed memory quota: {} + {} > {} MB (plan: {})",
+                    usage.total_memory_mb,
+                    new_memory,
+                    plan.max_memory_mb,
+                    plan.name
+                );
+            }
+        }
+
+        vm.rootfs_path.clone()
+        // conn dropped here
+    };
+
+    // ── Disk resize (if requested) ────────────────────────────────────────────
+    if let Some(new_disk_gb) = disk_gb {
+        storage::resize_rootfs(&rootfs_path, new_disk_gb).context("resize rootfs")?;
+    }
+
+    // ── Update DB (CPU/memory) ────────────────────────────────────────────────
+    {
+        let conn = db::open(db_path)?;
+        db::set_vm_resources(&conn, name, vcpus, memory_mb)?;
+    }
+
+    // ── Return updated VM record ──────────────────────────────────────────────
+    let conn = db::open(db_path)?;
+    db::get_vm(&conn, name)?.with_context(|| format!("VM '{name}' vanished after resize"))
+}
+
 /// Rename a VM.
 ///
 /// Works on VMs in **any** state (running or stopped).
@@ -414,8 +521,8 @@ pub async fn rename(db_path: &str, old_name: &str, new_name: &str) -> Result<()>
         let conn = db::open(db_path)?;
 
         // Source must exist.
-        let vm = db::get_vm(&conn, old_name)?
-            .with_context(|| format!("VM '{old_name}' not found"))?;
+        let vm =
+            db::get_vm(&conn, old_name)?.with_context(|| format!("VM '{old_name}' not found"))?;
 
         // Destination name must not exist.
         if db::get_vm(&conn, new_name)?.is_some() {
@@ -441,8 +548,12 @@ pub async fn rename(db_path: &str, old_name: &str, new_name: &str) -> Result<()>
             .status();
 
         let new_rootfs = old_rootfs.replace(old_name, new_name);
-        let new_api = hypervisor::api_socket_path(new_name).to_string_lossy().to_string();
-        let new_vsock = hypervisor::vsock_socket_path(new_name).to_string_lossy().to_string();
+        let new_api = hypervisor::api_socket_path(new_name)
+            .to_string_lossy()
+            .to_string();
+        let new_vsock = hypervisor::vsock_socket_path(new_name)
+            .to_string_lossy()
+            .to_string();
         (new_tap, new_api, new_vsock, new_rootfs)
     } else {
         // Running VM: keep all stored paths unchanged; only the name changes.
@@ -539,10 +650,12 @@ pub async fn copy(
             proxy_public: source.proxy_public,
             owner_id: owner_id.clone(),
         };
-        db::insert_vm(&conn, &vm_row).context("insert copied VM into DB").inspect_err(|_| {
-            let _ = network::destroy_tap(new_name);
-            let _ = storage::destroy_rootfs(new_name);
-        })?;
+        db::insert_vm(&conn, &vm_row)
+            .context("insert copied VM into DB")
+            .inspect_err(|_| {
+                let _ = network::destroy_tap(new_name);
+                let _ = storage::destroy_rootfs(new_name);
+            })?;
 
         let cfg = hypervisor::VmConfig {
             name: new_name.to_string(),
@@ -656,18 +769,21 @@ pub const MAX_SNAPSHOTS_PER_VM: u32 = 10;
 /// without pausing.
 ///
 /// `snap_name` — user-provided name, or a timestamp if None.
-pub async fn snapshot(db_path: &str, vm_name: &str, snap_name: Option<String>) -> Result<db::Snapshot> {
+pub async fn snapshot(
+    db_path: &str,
+    vm_name: &str,
+    snap_name: Option<String>,
+) -> Result<db::Snapshot> {
     // ── Resolve snapshot name ─────────────────────────────────────────────────
-    let snap_name = snap_name.unwrap_or_else(|| {
-        chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string()
-    });
+    let snap_name =
+        snap_name.unwrap_or_else(|| chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string());
     validate_snapshot_name(&snap_name)?;
 
     // ── Look up VM and check limits ───────────────────────────────────────────
     let (status, api_socket, rootfs_path) = {
         let conn = db::open(db_path)?;
-        let vm = db::get_vm(&conn, vm_name)?
-            .with_context(|| format!("VM '{vm_name}' not found"))?;
+        let vm =
+            db::get_vm(&conn, vm_name)?.with_context(|| format!("VM '{vm_name}' not found"))?;
         if vm.status == "creating" || vm.status == "starting" {
             anyhow::bail!("VM '{vm_name}' is still starting — wait until it is running or stopped");
         }
@@ -695,7 +811,10 @@ pub async fn snapshot(db_path: &str, vm_name: &str, snap_name: Option<String>) -
         };
         let _ = agent::send_request(
             &vsock_socket,
-            minions_proto::Request::Exec { command: "sync".to_string(), args: vec![] },
+            minions_proto::Request::Exec {
+                command: "sync".to_string(),
+                args: vec![],
+            },
         )
         .await;
 
@@ -741,8 +860,7 @@ pub async fn snapshot(db_path: &str, vm_name: &str, snap_name: Option<String>) -
 pub fn list_snapshots(db_path: &str, vm_name: &str) -> Result<Vec<db::Snapshot>> {
     let conn = db::open(db_path)?;
     // Verify VM exists.
-    db::get_vm(&conn, vm_name)?
-        .with_context(|| format!("VM '{vm_name}' not found"))?;
+    db::get_vm(&conn, vm_name)?.with_context(|| format!("VM '{vm_name}' not found"))?;
     db::list_snapshots(&conn, vm_name)
 }
 
@@ -754,8 +872,8 @@ pub async fn restore_snapshot(db_path: &str, vm_name: &str, snap_name: &str) -> 
     // ── Validate state ────────────────────────────────────────────────────────
     let rootfs_path = {
         let conn = db::open(db_path)?;
-        let vm = db::get_vm(&conn, vm_name)?
-            .with_context(|| format!("VM '{vm_name}' not found"))?;
+        let vm =
+            db::get_vm(&conn, vm_name)?.with_context(|| format!("VM '{vm_name}' not found"))?;
         if vm.status != "stopped" {
             anyhow::bail!(
                 "VM '{vm_name}' must be stopped before restoring a snapshot (status: {}). \
@@ -785,8 +903,7 @@ pub async fn restore_snapshot(db_path: &str, vm_name: &str, snap_name: &str) -> 
 /// Delete a snapshot (files + DB record).
 pub async fn delete_snapshot(db_path: &str, vm_name: &str, snap_name: &str) -> Result<()> {
     let conn = db::open(db_path)?;
-    db::get_vm(&conn, vm_name)?
-        .with_context(|| format!("VM '{vm_name}' not found"))?;
+    db::get_vm(&conn, vm_name)?.with_context(|| format!("VM '{vm_name}' not found"))?;
     db::get_snapshot(&conn, vm_name, snap_name)?
         .with_context(|| format!("snapshot '{snap_name}' not found for VM '{vm_name}'"))?;
 
@@ -822,19 +939,24 @@ pub fn check_quota(
     if usage.vm_count >= plan.max_vms {
         anyhow::bail!(
             "VM limit reached ({}/{}). Destroy or stop an existing VM, or upgrade your plan.",
-            usage.vm_count, plan.max_vms
+            usage.vm_count,
+            plan.max_vms
         );
     }
     if usage.total_vcpus + requested_vcpus > plan.max_vcpus {
         anyhow::bail!(
             "vCPU limit would be exceeded ({} + {} > {}). Stop a VM or upgrade your plan.",
-            usage.total_vcpus, requested_vcpus, plan.max_vcpus
+            usage.total_vcpus,
+            requested_vcpus,
+            plan.max_vcpus
         );
     }
     if usage.total_memory_mb + requested_memory_mb > plan.max_memory_mb {
         anyhow::bail!(
             "Memory limit would be exceeded ({} MiB + {} MiB > {} MiB). Stop a VM or upgrade your plan.",
-            usage.total_memory_mb, requested_memory_mb, plan.max_memory_mb
+            usage.total_memory_mb,
+            requested_memory_mb,
+            plan.max_memory_mb
         );
     }
     Ok(())
@@ -847,8 +969,13 @@ fn validate_snapshot_name(name: &str) -> Result<()> {
     if name.len() > 64 {
         anyhow::bail!("snapshot name must be 64 characters or fewer");
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
-        anyhow::bail!("snapshot name must only contain alphanumeric characters, hyphens, underscores, and dots");
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        anyhow::bail!(
+            "snapshot name must only contain alphanumeric characters, hyphens, underscores, and dots"
+        );
     }
     Ok(())
 }

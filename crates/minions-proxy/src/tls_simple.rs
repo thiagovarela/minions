@@ -32,7 +32,10 @@ impl CertStore {
     }
 
     /// Load certificate chain + private key from disk.
-    pub fn load_cert(&self, domain: &str) -> Result<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>> {
+    pub fn load_cert(
+        &self,
+        domain: &str,
+    ) -> Result<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>> {
         let dir = self.domain_dir(domain);
         let fullchain_path = dir.join("fullchain.pem");
         let privkey_path = dir.join("privkey.pem");
@@ -81,7 +84,9 @@ impl AcmeClient {
     ) -> Result<Self> {
         let store = CertStore::new(certs_dir);
         info!("ACME client initialized (manual cert mode - auto-provisioning not yet implemented)");
-        warn!("Place certificates manually at /var/lib/minions/certs/{{domain}}/{{fullchain.pem,privkey.pem}}");
+        warn!(
+            "Place certificates manually at /var/lib/minions/certs/{{domain}}/{{fullchain.pem,privkey.pem}}"
+        );
         Ok(Self { store })
     }
 
@@ -97,7 +102,9 @@ impl AcmeClient {
                  1. Obtain cert via certbot: certbot certonly --manual --preferred-challenges dns -d '*.{}'\n\
                  2. Copy fullchain.pem and privkey.pem to /var/lib/minions/certs/{}/\n\
                  3. Restart minions",
-                wildcard, base_domain, wildcard
+                wildcard,
+                base_domain,
+                wildcard
             )
         }
     }
@@ -113,7 +120,9 @@ impl AcmeClient {
                  1. Obtain cert via certbot: certbot certonly --standalone -d {}\n\
                  2. Copy fullchain.pem and privkey.pem to /var/lib/minions/certs/{}/\n\
                  3. Restart minions",
-                domain, domain, domain
+                domain,
+                domain,
+                domain
             )
         }
     }

@@ -51,8 +51,8 @@ pub const PROXY_PUBKEY_PATH: &str = "/var/lib/minions/proxy_key.pub";
 /// Returns `(host_key, proxy_key, proxy_pubkey_openssh)`.
 pub fn ensure_keys() -> Result<(KeyPair, KeyPair, String)> {
     let host_key = ensure_key(HOST_KEY_PATH).context("host key")?;
-    let (proxy_key, proxy_pubkey) = ensure_proxy_key(PROXY_KEY_PATH, PROXY_PUBKEY_PATH)
-        .context("proxy key")?;
+    let (proxy_key, proxy_pubkey) =
+        ensure_proxy_key(PROXY_KEY_PATH, PROXY_PUBKEY_PATH).context("proxy key")?;
     Ok((host_key, proxy_key, proxy_pubkey))
 }
 
@@ -124,11 +124,7 @@ pub fn public_key_openssh_line(kp: &KeyPair) -> String {
 /// `proxy_key`  — key used by the gateway to authenticate to VMs
 /// `bind`       — address + port to listen on (e.g. "0.0.0.0:22")
 /// `config`     — gateway config
-pub async fn serve(
-    host_key: KeyPair,
-    config: GatewayConfig,
-    bind: &str,
-) -> Result<()> {
+pub async fn serve(host_key: KeyPair, config: GatewayConfig, bind: &str) -> Result<()> {
     let russh_config = Arc::new(russh::server::Config {
         keys: vec![host_key],
         inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
@@ -137,9 +133,12 @@ pub async fn serve(
         ..Default::default()
     });
 
-    let mut srv = server::SshServer { config: Arc::new(config) };
+    let mut srv = server::SshServer {
+        config: Arc::new(config),
+    };
 
-    let addr: std::net::SocketAddr = bind.parse()
+    let addr: std::net::SocketAddr = bind
+        .parse()
         .with_context(|| format!("parse bind address: {}", bind))?;
 
     info!("SSH gateway listening on {}", bind);

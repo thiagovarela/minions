@@ -19,16 +19,13 @@ pub enum Request {
 
     /// Configure VM networking.
     ConfigureNetwork {
-        ip: String,      // e.g. "10.0.0.2/16"
-        gateway: String, // e.g. "10.0.0.1"
+        ip: String,       // e.g. "10.0.0.2/16"
+        gateway: String,  // e.g. "10.0.0.1"
         dns: Vec<String>, // e.g. ["1.1.1.1", "8.8.8.8"]
     },
 
     /// Execute a command inside the VM.
-    Exec {
-        command: String,
-        args: Vec<String>,
-    },
+    Exec { command: String, args: Vec<String> },
 
     /// Report system status (uptime, memory, disk).
     ReportStatus,
@@ -38,8 +35,8 @@ pub enum Request {
     WriteFile {
         path: String,
         content: String,
-        mode: u32,      // Unix file permissions (e.g., 0o600)
-        append: bool,   // If true, append; if false, overwrite
+        mode: u32,    // Unix file permissions (e.g., 0o600)
+        append: bool, // If true, append; if false, overwrite
     },
 }
 

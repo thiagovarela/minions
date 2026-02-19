@@ -32,12 +32,10 @@ pub struct CustomDomain {
 pub fn migrate(conn: &Connection) -> Result<()> {
     // SQLite returns an error if you ADD a column that already exists.
     // We ignore those errors so this is safe to run repeatedly.
-    let _ = conn.execute_batch(
-        "ALTER TABLE vms ADD COLUMN proxy_port   INTEGER NOT NULL DEFAULT 80;",
-    );
-    let _ = conn.execute_batch(
-        "ALTER TABLE vms ADD COLUMN proxy_public  INTEGER NOT NULL DEFAULT 0;",
-    );
+    let _ =
+        conn.execute_batch("ALTER TABLE vms ADD COLUMN proxy_port   INTEGER NOT NULL DEFAULT 80;");
+    let _ =
+        conn.execute_batch("ALTER TABLE vms ADD COLUMN proxy_public  INTEGER NOT NULL DEFAULT 0;");
 
     // Create custom_domains table for user-provided domains
     conn.execute_batch(
@@ -61,7 +59,8 @@ pub fn open(path: &str) -> Result<Connection> {
         std::fs::create_dir_all(parent)?;
     }
     let conn = Connection::open(path).context("open sqlite db")?;
-    conn.execute_batch("PRAGMA journal_mode=WAL;").context("WAL")?;
+    conn.execute_batch("PRAGMA journal_mode=WAL;")
+        .context("WAL")?;
     migrate(&conn)?;
     Ok(conn)
 }
@@ -171,7 +170,8 @@ pub fn list_custom_domains(conn: &Connection, vm_name: &str) -> Result<Vec<Custo
             created_at: row.get(4)?,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().context("list custom domains")
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("list custom domains")
 }
 
 /// Remove a custom domain.
@@ -196,5 +196,6 @@ pub fn mark_domain_verified(conn: &Connection, domain: &str) -> Result<bool> {
 pub fn list_all_verified_domains(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT domain FROM custom_domains WHERE verified = 1")?;
     let rows = stmt.query_map([], |row| row.get(0))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().context("list verified domains")
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("list verified domains")
 }

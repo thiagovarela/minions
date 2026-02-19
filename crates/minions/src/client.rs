@@ -109,15 +109,18 @@ impl Client {
     }
 
     pub async fn start_vm(&self, name: &str) -> Result<VmResponse> {
-        self.auth(self.http.post(format!("{}/api/vms/{name}/start", self.base)))
-            .send()
-            .await
-            .context("send start request")?
-            .error_for_status()
-            .context("start VM")?
-            .json()
-            .await
-            .context("decode start response")
+        self.auth(
+            self.http
+                .post(format!("{}/api/vms/{name}/start", self.base)),
+        )
+        .send()
+        .await
+        .context("send start request")?
+        .error_for_status()
+        .context("start VM")?
+        .json()
+        .await
+        .context("decode start response")
     }
 
     pub async fn stop_vm(&self, name: &str) -> Result<VmResponse> {
@@ -133,15 +136,44 @@ impl Client {
     }
 
     pub async fn restart_vm(&self, name: &str) -> Result<VmResponse> {
-        self.auth(self.http.post(format!("{}/api/vms/{name}/restart", self.base)))
-            .send()
-            .await
-            .context("send restart request")?
-            .error_for_status()
-            .context("restart VM")?
-            .json()
-            .await
-            .context("decode restart response")
+        self.auth(
+            self.http
+                .post(format!("{}/api/vms/{name}/restart", self.base)),
+        )
+        .send()
+        .await
+        .context("send restart request")?
+        .error_for_status()
+        .context("restart VM")?
+        .json()
+        .await
+        .context("decode restart response")
+    }
+
+    pub async fn resize_vm(
+        &self,
+        name: &str,
+        vcpus: Option<u32>,
+        memory_mb: Option<u32>,
+        disk_gb: Option<u32>,
+    ) -> Result<VmResponse> {
+        self.auth(
+            self.http
+                .post(format!("{}/api/vms/{name}/resize", self.base))
+                .json(&serde_json::json!({
+                    "vcpus": vcpus,
+                    "memory_mb": memory_mb,
+                    "disk_gb": disk_gb,
+                })),
+        )
+        .send()
+        .await
+        .context("send resize request")?
+        .error_for_status()
+        .context("resize VM")?
+        .json()
+        .await
+        .context("decode resize response")
     }
 
     pub async fn rename_vm(&self, name: &str, new_name: &str) -> Result<()> {
@@ -191,15 +223,18 @@ impl Client {
     }
 
     pub async fn vm_status(&self, name: &str) -> Result<serde_json::Value> {
-        self.auth(self.http.get(format!("{}/api/vms/{name}/status", self.base)))
-            .send()
-            .await
-            .context("send status request")?
-            .error_for_status()
-            .context("VM status")?
-            .json()
-            .await
-            .context("decode status response")
+        self.auth(
+            self.http
+                .get(format!("{}/api/vms/{name}/status", self.base)),
+        )
+        .send()
+        .await
+        .context("send status request")?
+        .error_for_status()
+        .context("VM status")?
+        .json()
+        .await
+        .context("decode status response")
     }
 
     pub async fn vm_logs(&self, name: &str) -> Result<String> {
@@ -226,7 +261,11 @@ pub struct SnapshotResponse {
 }
 
 impl Client {
-    pub async fn create_snapshot(&self, vm: &str, name: Option<String>) -> Result<SnapshotResponse> {
+    pub async fn create_snapshot(
+        &self,
+        vm: &str,
+        name: Option<String>,
+    ) -> Result<SnapshotResponse> {
         self.auth(
             self.http
                 .post(format!("{}/api/vms/{vm}/snapshots", self.base))
@@ -243,22 +282,25 @@ impl Client {
     }
 
     pub async fn list_snapshots(&self, vm: &str) -> Result<Vec<SnapshotResponse>> {
-        self.auth(self.http.get(format!("{}/api/vms/{vm}/snapshots", self.base)))
-            .send()
-            .await
-            .context("send list snapshots request")?
-            .error_for_status()
-            .context("list snapshots")?
-            .json()
-            .await
-            .context("decode snapshots response")
+        self.auth(
+            self.http
+                .get(format!("{}/api/vms/{vm}/snapshots", self.base)),
+        )
+        .send()
+        .await
+        .context("send list snapshots request")?
+        .error_for_status()
+        .context("list snapshots")?
+        .json()
+        .await
+        .context("decode snapshots response")
     }
 
     pub async fn restore_snapshot(&self, vm: &str, snapshot: &str) -> Result<()> {
-        self.auth(
-            self.http
-                .post(format!("{}/api/vms/{vm}/snapshots/{snapshot}/restore", self.base)),
-        )
+        self.auth(self.http.post(format!(
+            "{}/api/vms/{vm}/snapshots/{snapshot}/restore",
+            self.base
+        )))
         .send()
         .await
         .context("send restore snapshot request")?

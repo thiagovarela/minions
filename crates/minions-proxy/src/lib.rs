@@ -145,7 +145,10 @@ pub async fn serve(config: ProxyConfig, https_bind: &str, http_bind: &str) -> Re
 
     // HTTP app (port 80) — ACME challenges + redirect to HTTPS.
     let http_app = Router::new()
-        .route("/.well-known/acme-challenge/{token}", get(proxy::acme_challenge))
+        .route(
+            "/.well-known/acme-challenge/{token}",
+            get(proxy::acme_challenge),
+        )
         .fallback(any(proxy::http_redirect))
         .with_state(state);
 
@@ -165,7 +168,10 @@ pub async fn serve(config: ProxyConfig, https_bind: &str, http_bind: &str) -> Re
     // Spawn HTTP listener (port 80).
     let http_bind_clone = http_bind.to_string();
     let http_task = tokio::spawn(async move {
-        info!("HTTP listener on http://{} (ACME + redirect)", http_bind_clone);
+        info!(
+            "HTTP listener on http://{} (ACME + redirect)",
+            http_bind_clone
+        );
         let listener = tokio::net::TcpListener::bind(&http_bind_clone)
             .await
             .expect("bind HTTP listener");

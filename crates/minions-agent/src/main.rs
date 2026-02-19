@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use minions_proto::{read_frame, write_frame, Request, Response, ResponseData};
-use tokio_vsock::{VsockAddr, VsockListener, VMADDR_CID_ANY};
+use minions_proto::{Request, Response, ResponseData, read_frame, write_frame};
+use tokio_vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener};
 use tracing::{error, info};
 
 mod exec;
@@ -88,13 +88,11 @@ async fn handle_request(request: Request) -> Response {
         }
 
         Request::Exec { command, args } => match exec::run(&command, &args).await {
-            Ok((exit_code, stdout, stderr)) => {
-                Response::ok_with_data(ResponseData::Exec {
-                    exit_code,
-                    stdout,
-                    stderr,
-                })
-            }
+            Ok((exit_code, stdout, stderr)) => Response::ok_with_data(ResponseData::Exec {
+                exit_code,
+                stdout,
+                stderr,
+            }),
             Err(e) => Response::error(format!("failed to execute command: {:#}", e)),
         },
 
@@ -125,7 +123,9 @@ async fn handle_request(request: Request) -> Response {
             mode,
             append,
         } => match file::write_file(&path, &content, mode, append) {
-            Ok(_) => Response::ok_with_message(format!("wrote {} bytes to {}", content.len(), path)),
+            Ok(_) => {
+                Response::ok_with_message(format!("wrote {} bytes to {}", content.len(), path))
+            }
             Err(e) => Response::error(format!("failed to write file: {:#}", e)),
         },
     }

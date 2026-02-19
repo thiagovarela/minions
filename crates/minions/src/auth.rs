@@ -1,11 +1,11 @@
 //! API authentication via bearer tokens.
 
 use axum::{
+    Json,
     extract::{Request, State},
-    http::{header::AUTHORIZATION, StatusCode},
+    http::{StatusCode, header::AUTHORIZATION},
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Serialize;
 use std::sync::Arc;

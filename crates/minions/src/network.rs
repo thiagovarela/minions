@@ -28,8 +28,7 @@ pub fn create_tap(name: &str) -> Result<String> {
     run("bridge", &["link", "set", "dev", &tap, "isolated", "on"])
         .with_context(|| format!("set bridge port isolation on {tap}"))?;
 
-    run("ip", &["link", "set", &tap, "up"])
-        .with_context(|| format!("bring up {tap}"))?;
+    run("ip", &["link", "set", &tap, "up"]).with_context(|| format!("bring up {tap}"))?;
 
     Ok(tap)
 }
@@ -43,8 +42,7 @@ pub fn create_tap_named(tap: &str) -> Result<String> {
         .with_context(|| format!("attach {tap} to br0"))?;
     run("bridge", &["link", "set", "dev", tap, "isolated", "on"])
         .with_context(|| format!("set bridge port isolation on {tap}"))?;
-    run("ip", &["link", "set", tap, "up"])
-        .with_context(|| format!("bring up {tap}"))?;
+    run("ip", &["link", "set", tap, "up"]).with_context(|| format!("bring up {tap}"))?;
     Ok(tap.to_string())
 }
 
