@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+  <h1 class="text-xl font-bold text-white">Virtual Machines</h1>
+  <span class="text-sm text-gray-500">auto-refresh every 30s</span>
+</div>
+
+{% include "vms_fragment.html" %}
+{% endblock %}

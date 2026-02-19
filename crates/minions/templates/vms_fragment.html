@@ -1,0 +1,67 @@
+<div
+  id="vm-table"
+  hx-get="/dashboard/vms-fragment"
+  hx-trigger="every 30s"
+  hx-swap="outerHTML"
+>
+{% if vms.is_empty() %}
+  <div class="rounded-xl border border-gray-800 bg-gray-900 px-6 py-12 text-center text-gray-500">
+    No virtual machines yet.
+  </div>
+{% else %}
+  <div class="overflow-hidden rounded-xl border border-gray-800">
+    <table class="w-full text-sm">
+      <thead class="bg-gray-900 text-gray-400 text-xs uppercase tracking-wide">
+        <tr>
+          <th class="px-4 py-3 text-left">Name</th>
+          <th class="px-4 py-3 text-left">Status</th>
+          <th class="px-4 py-3 text-left">Owner</th>
+          <th class="px-4 py-3 text-left">IP</th>
+          <th class="px-4 py-3 text-left">vCPUs</th>
+          <th class="px-4 py-3 text-left">Memory</th>
+          <th class="px-4 py-3 text-left">CPU%</th>
+          <th class="px-4 py-3 text-left"></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-800 bg-gray-950">
+        {% for vm in vms %}
+        <tr class="hover:bg-gray-900 transition">
+          <td class="px-4 py-3 font-mono font-medium text-white">{{ vm.name }}</td>
+          <td class="px-4 py-3">
+            {% if vm.status == "running" %}
+              <span class="inline-flex items-center gap-1.5 rounded-full bg-green-900/40 px-2.5 py-0.5 text-xs font-medium text-green-400 border border-green-800">
+                <span class="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse"></span>running
+              </span>
+            {% else if vm.status == "stopped" %}
+              <span class="inline-flex items-center gap-1.5 rounded-full bg-gray-800 px-2.5 py-0.5 text-xs font-medium text-gray-400 border border-gray-700">
+                stopped
+              </span>
+            {% else %}
+              <span class="inline-flex items-center gap-1.5 rounded-full bg-yellow-900/40 px-2.5 py-0.5 text-xs font-medium text-yellow-400 border border-yellow-800">
+                {{ vm.status }}
+              </span>
+            {% endif %}
+          </td>
+          <td class="px-4 py-3 text-gray-400 font-mono text-xs">{{ vm.owner }}</td>
+          <td class="px-4 py-3 font-mono text-gray-300">{{ vm.ip }}</td>
+          <td class="px-4 py-3 text-gray-300">{{ vm.vcpus }}</td>
+          <td class="px-4 py-3 text-gray-300">{{ vm.memory_mb }} MiB</td>
+          <td class="px-4 py-3 text-gray-300">
+            {% if vm.cpu_percent > 0.0 %}
+              {{ vm.cpu_percent_str }}%
+            {% else %}
+              <span class="text-gray-600">—</span>
+            {% endif %}
+          </td>
+          <td class="px-4 py-3 text-right">
+            <a href="/dashboard/vms/{{ vm.name }}" class="text-indigo-400 hover:text-indigo-300 text-xs transition">
+              Details →
+            </a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+</div>

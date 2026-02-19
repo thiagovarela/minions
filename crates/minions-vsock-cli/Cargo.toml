@@ -1,0 +1,15 @@
+[package]
+name = "minions-vsock-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "minions-vsock-cli"
+path = "src/main.rs"
+
+[dependencies]
+minions-proto = { path = "../minions-proto" }
+tokio = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
