@@ -97,7 +97,8 @@ pub fn destroy_rootfs(name: &str) -> Result<()> {
 /// The VM **must be stopped** before calling this. This function:
 /// 1. Validates new_size_gb is >= current size
 /// 2. Extends the file using `truncate`
-/// 3. Grows the ext4 filesystem using `resize2fs`
+/// 3. Checks filesystem integrity using `e2fsck -f -y`
+/// 4. Grows the ext4 filesystem using `resize2fs`
 ///
 /// Only growing is supported (ext4 cannot be shrunk online).
 pub fn resize_rootfs(rootfs_path: &str, new_size_gb: u32) -> Result<()> {
@@ -136,7 +137,26 @@ pub fn resize_rootfs(rootfs_path: &str, new_size_gb: u32) -> Result<()> {
         anyhow::bail!("truncate failed for '{}'", rootfs_path);
     }
 
-    // Step 2: Grow the ext4 filesystem
+    // Step 2: Check filesystem integrity before resizing
+    // resize2fs requires this check to be run first
+    let status = std::process::Command::new("e2fsck")
+        .args(["-f", "-y", rootfs_path])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("spawn e2fsck")?;
+
+    // e2fsck returns 0 (no errors) or 1 (errors corrected) on success
+    let exit_code = status.code().unwrap_or(255);
+    if exit_code > 1 {
+        anyhow::bail!(
+            "e2fsck failed for '{}' with exit code {} — filesystem may be corrupted",
+            rootfs_path,
+            exit_code
+        );
+    }
+
+    // Step 3: Grow the ext4 filesystem
     let status = std::process::Command::new("resize2fs")
         .arg(rootfs_path)
         .status()
