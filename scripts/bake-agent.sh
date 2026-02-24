@@ -2,7 +2,7 @@
 # bake-agent.sh — Inject minions-agent (+ systemd unit) into the base Ubuntu
 # rootfs image so every subsequent `minions create` gets the agent for free.
 #
-# Must be run as root on vps-2b1e18f2 (or any Linux host with loop-mount support).
+# Must be run as root on a Linux host with loop-mount support.
 #
 # Prerequisites:
 #   - Pre-built binaries installed (run install.sh first or set BINARIES_DIR)
@@ -49,7 +49,7 @@ trap cleanup EXIT
 [[ $EUID -eq 0 ]] || fail "must be run as root (sudo $0)"
 
 [[ -f "$BASE_IMAGE" ]] || fail "base image not found: $BASE_IMAGE
-  Build it first with docs/phase-1-setup.md"
+  Build it first: sudo ./scripts/build-base-image.sh"
 
 # ── Step 1: Verify binaries ───────────────────────────────────────────────────
 info "verifying pre-built binaries in $BINARIES_DIR…"
@@ -137,16 +137,6 @@ done
 ln -sf /dev/null "$MOUNT_DIR/etc/systemd/system/serial-getty@ttyS0.service"
 ok "getty services disabled (saves ~13 MB RAM)"
 
-info "removing nginx (save ~7 MB RAM)…"
-# Use chroot to run apt-get inside the mounted image
-if chroot "$MOUNT_DIR" dpkg -l | grep -q nginx; then
-    chroot "$MOUNT_DIR" apt-get remove -y --purge nginx nginx-common 2>/dev/null || true
-    chroot "$MOUNT_DIR" apt-get autoremove -y 2>/dev/null || true
-    ok "nginx removed"
-else
-    info "nginx not installed, skipping"
-fi
-
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo "────────────────────────────────────────────"
@@ -155,7 +145,7 @@ echo ""
 echo "  Agent binary : /usr/local/bin/minions-agent (inside image)"
 echo "  Systemd unit : /etc/systemd/system/minions-agent.service (inside image)"
 echo "  Host CLI     : /usr/local/bin/minions"
-echo "  Optimizations: getty services disabled, nginx removed (~20 MB RAM saved per VM)"
+echo "  Optimizations: getty services disabled (~13 MB RAM saved per VM)"
 echo ""
 echo "  You can now run:  sudo minions create myvm"
 echo "────────────────────────────────────────────"
