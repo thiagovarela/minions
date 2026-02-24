@@ -80,11 +80,11 @@ sudo ./scripts/build-base-image.sh
 This script automates the full Docker → ext4 pipeline:
 1. Builds the Docker image from `images/Dockerfile`
 2. Exports the container filesystem to a tarball
-3. Creates a 2GB sparse ext4 image at `/var/lib/minions/images/base-ubuntu.ext4`
+3. Creates a 5GB sparse ext4 image at `/var/lib/minions/images/base-ubuntu.ext4`
 4. Mounts the image and extracts the tarball into it
 5. Unmounts and cleans up
 
-The script accepts an optional `--image-size` flag (default: `2G`):
+The script accepts an optional `--image-size` flag (default: `5G`):
 
 ```bash
 sudo ./scripts/build-base-image.sh --image-size 4G
@@ -150,7 +150,7 @@ sudo minions destroy test
 
 /var/lib/minions/
 ├── kernel/vmlinux            # Guest kernel (~46 MB)
-├── images/base-ubuntu.ext4   # Base rootfs (2 GB sparse, ~150 MB actual)
+├── images/base-ubuntu.ext4   # Base rootfs (5 GB sparse, ~600 MB actual)
 ├── vms/                      # Per-VM rootfs copies
 └── minions.db                # SQLite state database
 

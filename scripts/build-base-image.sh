@@ -7,7 +7,7 @@
 #   sudo ./scripts/build-base-image.sh [--image-size SIZE]
 #
 # Options:
-#   --image-size SIZE    Size for the ext4 image (default: 2G)
+#   --image-size SIZE    Size for the ext4 image (default: 5G)
 #
 # What it does:
 #   1. Builds the Dockerfile at images/Dockerfile → minions-base Docker image
@@ -23,7 +23,7 @@
 set -euo pipefail
 
 # ── Configuration ────────────────────────────────────────────────────────────
-IMAGE_SIZE="${IMAGE_SIZE:-2G}"
+IMAGE_SIZE="${IMAGE_SIZE:-5G}"
 BASE_IMAGE="${BASE_IMAGE:-/var/lib/minions/images/base-ubuntu.ext4}"
 MOUNT_DIR="${MOUNT_DIR:-/tmp/minions-rootfs-mount}"
 DOCKERFILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/images"
