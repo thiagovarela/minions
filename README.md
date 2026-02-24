@@ -25,13 +25,16 @@ sudo minions init          # bridge, iptables, directories
 sudo minions init --persist # also persist networking across reboots
 ```
 
-### Bake the guest agent into the base image
+### Build the base image and bake in the agent
 
 ```bash
-sudo minions bake-agent
+sudo ./scripts/build-base-image.sh  # Build Ubuntu 24.04 rootfs
+sudo ./scripts/bake-agent.sh        # Inject minions-agent
 ```
 
-This injects the `minions-agent` binary into the base Ubuntu rootfs so every new VM starts with the agent running.
+The first script builds a base Ubuntu 24.04 LTS rootfs with common dev tools (git, vim, htop, build-essential, etc.). The second injects the `minions-agent` binary so every new VM starts with the agent running.
+
+> See [INSTALL.md](docs/INSTALL.md) for full setup details.
 
 ## Using Minions
 

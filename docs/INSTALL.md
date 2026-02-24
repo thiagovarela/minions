@@ -61,76 +61,57 @@ sudo wget -O /var/lib/minions/kernel/vmlinux \
 
 ## 5. Build the base rootfs image
 
-### Create the Dockerfile
+The base Ubuntu rootfs is built from `images/Dockerfile` in this repository. The Dockerfile includes:
+
+- **Ubuntu 24.04 LTS** base image
+- **System packages**: systemd, openssh-server, iproute2, iputils-ping, ca-certificates, sudo, dbus, dbus-user-session
+- **Development tools**: git, curl, wget, vim, nano, htop, unzip, build-essential
+- **SSH configuration**: key-based auth only, root login via SSH keys
+- **Serial console** for debugging (accessible via `minions logs`)
+
+To build the image, clone this repository and run:
 
 ```bash
-mkdir -p ~/minions-build
-cat > ~/minions-build/Dockerfile << 'EOF'
-FROM ubuntu:24.04
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    systemd \
-    systemd-sysv \
-    openssh-server \
-    iproute2 \
-    iputils-ping \
-    curl \
-    ca-certificates \
-    sudo \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN mkdir -p /run/sshd
-RUN systemctl enable ssh
-
-# SSH: key-based auth only
-RUN passwd -l root
-RUN sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
-RUN sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-RUN sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
-
-# Serial console for debugging (accessible via `minions logs`)
-RUN mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
-RUN echo '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root --noclear %I 115200 linux' \
-    > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
-RUN systemctl enable serial-getty@ttyS0.service
-
-RUN echo 'minion' > /etc/hostname
-EOF
+git clone https://github.com/thiagovarela/minions.git
+cd minions
+sudo ./scripts/build-base-image.sh
 ```
 
-### Build and export
+This script automates the full Docker → ext4 pipeline:
+1. Builds the Docker image from `images/Dockerfile`
+2. Exports the container filesystem to a tarball
+3. Creates a 2GB sparse ext4 image at `/var/lib/minions/images/base-ubuntu.ext4`
+4. Mounts the image and extracts the tarball into it
+5. Unmounts and cleans up
+
+The script accepts an optional `--image-size` flag (default: `2G`):
 
 ```bash
-cd ~/minions-build
-docker build -t minions-base .
-docker create --name minions-export minions-base /bin/true
-docker export minions-export > rootfs.tar
-docker rm minions-export
+sudo ./scripts/build-base-image.sh --image-size 4G
 ```
 
-### Create the ext4 image
-
-```bash
-sudo mkdir -p /var/lib/minions/images
-
-ROOTFS=/var/lib/minions/images/base-ubuntu.ext4
-truncate -s 2G $ROOTFS
-mkfs.ext4 -F -L rootfs $ROOTFS
-
-sudo mkdir -p /tmp/minions-rootfs-mount
-sudo mount -o loop $ROOTFS /tmp/minions-rootfs-mount
-sudo tar xf ~/minions-build/rootfs.tar -C /tmp/minions-rootfs-mount
-sudo umount /tmp/minions-rootfs-mount
-sudo rmdir /tmp/minions-rootfs-mount
-```
+> **Note**: If you already have a base image, it will be backed up to `base-ubuntu.ext4.backup-<timestamp>` before being replaced.
 
 ## 6. Bake the agent into the image
+
+After building the base image, inject the `minions-agent` binary and systemd service:
+
+```bash
+sudo ./scripts/bake-agent.sh
+```
+
+Or, if you've already installed the `minions` CLI:
 
 ```bash
 sudo minions bake-agent
 ```
 
-This injects the `minions-agent` binary and its systemd service into the base image so every VM starts with the agent running.
+This mounts the base image and:
+- Copies the `minions-agent` binary to `/usr/local/bin/minions-agent`
+- Installs the `minions-agent.service` systemd unit
+- Disables unnecessary getty services (saves ~13 MB RAM per VM)
+
+After this step, every VM created with `minions create` will have the agent running from first boot.
 
 ## 7. Initialize the host
 
