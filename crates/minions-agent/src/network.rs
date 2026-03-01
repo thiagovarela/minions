@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::net::IpAddr;
+use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
 use tracing::info;
@@ -17,20 +18,22 @@ pub async fn configure(ip: &str, gateway: &str, dns_servers: &[String]) -> Resul
 
     // Find the first ethernet interface (e.g. eth0, enp0s3)
     let interface = find_ethernet_interface().await?;
+    let ip_cmd = resolve_ip_command();
 
     info!("found ethernet interface: {}", interface);
+    info!("using ip command: {}", ip_cmd);
 
     // Flush existing IP addresses on the interface
-    run_command("ip", &["addr", "flush", "dev", &interface]).await?;
+    run_command(ip_cmd, &["addr", "flush", "dev", &interface]).await?;
 
     // Assign IP address
-    run_command("ip", &["addr", "add", ip, "dev", &interface]).await?;
+    run_command(ip_cmd, &["addr", "add", ip, "dev", &interface]).await?;
 
     // Bring interface up
-    run_command("ip", &["link", "set", &interface, "up"]).await?;
+    run_command(ip_cmd, &["link", "set", &interface, "up"]).await?;
 
     // Set default gateway
-    run_command("ip", &["route", "add", "default", "via", gateway]).await?;
+    run_command(ip_cmd, &["route", "add", "default", "via", gateway]).await?;
 
     // Write DNS servers to /etc/resolv.conf
     write_resolv_conf(dns_servers)?;
@@ -62,6 +65,24 @@ async fn find_ethernet_interface() -> Result<String> {
     }
 
     anyhow::bail!("no ethernet interface found")
+}
+
+fn resolve_ip_command() -> &'static str {
+    const CANDIDATES: &[&str] = &[
+        "/usr/sbin/ip",
+        "/usr/bin/ip",
+        "/run/current-system/sw/bin/ip",     // NixOS
+        "/nix/var/nix/profiles/system/sw/bin/ip", // NixOS fallback
+    ];
+
+    for candidate in CANDIDATES {
+        if Path::new(candidate).exists() {
+            return candidate;
+        }
+    }
+
+    // Fallback to PATH lookup (works on Ubuntu/Fedora).
+    "ip"
 }
 
 async fn run_command(cmd: &str, args: &[&str]) -> Result<()> {
