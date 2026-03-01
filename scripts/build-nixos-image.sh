@@ -9,10 +9,11 @@
 # What it does:
 #   1. Checks for Nix installation
 #   2. Builds the NixOS image via flake in images/nixos/
-#   3. Extracts the vmlinux kernel from the NixOS build
+#   3. Extracts the vmlinux kernel and initramfs from the NixOS build
 #   4. Copies the image to /var/lib/minions/images/base-nixos.ext4
 #   5. Copies the kernel to /var/lib/minions/kernel/vmlinux-nixos
-#   6. Injects the minions-agent binary into the image
+#   6. Copies the initramfs to /var/lib/minions/kernel/initrd-nixos
+#   7. Injects the minions-agent binary into the image
 #
 # Unlike Ubuntu/Fedora, NixOS does NOT require a separate bake-agent.sh step.
 # The agent service is defined in the NixOS configuration, and the binary is
@@ -27,6 +28,7 @@ BINARIES_DIR="${BINARIES_DIR:-/usr/local/bin}"
 NIXOS_FLAKE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../images/nixos" && pwd)"
 BASE_IMAGE="$IMAGES_DIR/base-nixos.ext4"
 KERNEL_PATH="$KERNEL_DIR/vmlinux-nixos"
+INITRD_PATH="$KERNEL_DIR/initrd-nixos"
 AGENT_BIN="$BINARIES_DIR/minions-agent"
 MOUNT_DIR="${MOUNT_DIR:-/tmp/minions-nixos-mount}"
 
@@ -102,6 +104,17 @@ fi
 cp "$RESULT/vmlinux-nixos" "$KERNEL_PATH" || fail "failed to copy kernel"
 ok "kernel installed at $KERNEL_PATH ($(du -sh "$KERNEL_PATH" | cut -f1))"
 
+# ── Step 3b: Copy initramfs ──────────────────────────────────────────────────
+info "installing NixOS initramfs…"
+if [[ -f "$INITRD_PATH" ]]; then
+    BACKUP="${INITRD_PATH}.backup-$(date +%s)"
+    info "backing up existing initramfs to $BACKUP"
+    mv "$INITRD_PATH" "$BACKUP"
+fi
+
+cp "$RESULT/initrd-nixos" "$INITRD_PATH" || fail "failed to copy initramfs"
+ok "initramfs installed at $INITRD_PATH ($(du -sh "$INITRD_PATH" | cut -f1))"
+
 # ── Step 4: Inject minions-agent binary ──────────────────────────────────────
 info "injecting minions-agent binary into image…"
 mkdir -p "$MOUNT_DIR"
@@ -123,9 +136,10 @@ echo ""
 echo "────────────────────────────────────────────"
 ok "NixOS base image built successfully!"
 echo ""
-echo "  Image:  $BASE_IMAGE"
-echo "  Kernel: $KERNEL_PATH"
-echo "  Actual: $(du -sh "$BASE_IMAGE" | cut -f1) (image), $(du -sh "$KERNEL_PATH" | cut -f1) (kernel)"
+echo "  Image:     $BASE_IMAGE"
+echo "  Kernel:    $KERNEL_PATH"
+echo "  Initramfs: $INITRD_PATH"
+echo "  Actual:    $(du -sh "$BASE_IMAGE" | cut -f1) (image), $(du -sh "$KERNEL_PATH" | cut -f1) (kernel), $(du -sh "$INITRD_PATH" | cut -f1) (initrd)"
 echo ""
 echo "  The minions-agent is already baked in — no separate bake step needed."
 echo ""

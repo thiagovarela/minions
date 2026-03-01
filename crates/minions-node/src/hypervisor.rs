@@ -22,6 +22,7 @@ pub struct VmConfig {
     pub cid: u32,
     pub rootfs: PathBuf,
     pub kernel: PathBuf,
+    pub initramfs: Option<PathBuf>,
     pub tap: String,
     pub api_socket: PathBuf,
     pub vsock_socket: PathBuf,
@@ -47,11 +48,19 @@ pub fn vsock_socket_path(name: &str) -> PathBuf {
 pub fn spawn(cfg: &VmConfig) -> Result<u32> {
     // Safety: setsid() is safe to call in a single-threaded child context.
     let mut cmd = Command::new("cloud-hypervisor");
+
     cmd.args([
         "--api-socket",
         cfg.api_socket.to_str().unwrap(),
         "--kernel",
         cfg.kernel.to_str().unwrap(),
+    ]);
+
+    if let Some(initramfs) = &cfg.initramfs {
+        cmd.args(["--initramfs", initramfs.to_str().unwrap()]);
+    }
+
+    cmd.args([
         "--disk",
         &format!("path={}", cfg.rootfs.display()),
         "--cpus",

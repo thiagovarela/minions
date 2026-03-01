@@ -57,6 +57,17 @@ impl OsType {
         }
     }
 
+    /// Optional initramfs path for this OS.
+    ///
+    /// Ubuntu/Fedora images currently boot without an initramfs.
+    /// NixOS uses an initramfs generated alongside the kernel.
+    pub fn initramfs_path(&self) -> Option<PathBuf> {
+        match self {
+            OsType::Ubuntu | OsType::Fedora => None,
+            OsType::NixOS => Some(PathBuf::from("/var/lib/minions/kernel/initrd-nixos")),
+        }
+    }
+
     /// String representation for storage/display.
     pub fn as_str(&self) -> &'static str {
         match self {
