@@ -6,6 +6,10 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+/// Default kernel path (Ubuntu/Fedora).
+///
+/// **Deprecated:** Use `OsType::kernel_path()` instead for per-OS kernel selection.
+/// This constant remains for backward compatibility and documentation purposes.
 pub const KERNEL_PATH: &str = "/var/lib/minions/kernel/vmlinux";
 pub const RUN_DIR: &str = "/run/minions";
 
@@ -17,6 +21,7 @@ pub struct VmConfig {
     pub mac: String,
     pub cid: u32,
     pub rootfs: PathBuf,
+    pub kernel: PathBuf,
     pub tap: String,
     pub api_socket: PathBuf,
     pub vsock_socket: PathBuf,
@@ -46,7 +51,7 @@ pub fn spawn(cfg: &VmConfig) -> Result<u32> {
         "--api-socket",
         cfg.api_socket.to_str().unwrap(),
         "--kernel",
-        KERNEL_PATH,
+        cfg.kernel.to_str().unwrap(),
         "--disk",
         &format!("path={}", cfg.rootfs.display()),
         "--cpus",

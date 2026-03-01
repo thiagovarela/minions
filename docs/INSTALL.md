@@ -49,15 +49,19 @@ curl -sSL https://raw.githubusercontent.com/thiagovarela/minions/main/scripts/in
 
 This installs `minions`, `minions-agent`, `minions-node`, and `minions-vsock-cli` to `/usr/local/bin/`.
 
-## 4. Download the guest kernel
+## 4. Download the guest kernel (Ubuntu/Fedora)
 
 Cloud Hypervisor boots an uncompressed `vmlinux` kernel directly — no bootloader or initramfs needed.
+
+**For Ubuntu and Fedora VMs**, download the Cloud Hypervisor project kernel:
 
 ```bash
 sudo mkdir -p /var/lib/minions/kernel
 sudo wget -O /var/lib/minions/kernel/vmlinux \
   https://github.com/cloud-hypervisor/linux/releases/download/ch-release-v6.16.9-20251112/vmlinux-x86_64
 ```
+
+> **Note**: NixOS VMs use their own kernel extracted from the NixOS build (`vmlinux-nixos`). If you only plan to use NixOS VMs, you can skip this step.
 
 ## 5. Build the base rootfs image
 
@@ -92,7 +96,34 @@ sudo ./scripts/build-base-image.sh --image-size 4G
 
 > **Note**: If you already have a base image, it will be backed up to `base-ubuntu.ext4.backup-<timestamp>` before being replaced.
 
-## 6. Bake the agent into the image
+### Alternative: Build a NixOS base image
+
+NixOS requires a different build process and Nix to be installed. If you want NixOS VMs:
+
+**Prerequisites:**
+```bash
+# Install Nix (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install
+# Or: sh <(curl -L https://nixos.org/nix/install) --daemon
+```
+
+**Build the NixOS image:**
+```bash
+sudo ./scripts/build-nixos-image.sh
+```
+
+This single script:
+1. Builds the NixOS VM configuration from `images/nixos/flake.nix`
+2. Extracts the matching `vmlinux` kernel from the NixOS build
+3. Copies the image to `/var/lib/minions/images/base-nixos.ext4`
+4. Copies the kernel to `/var/lib/minions/kernel/vmlinux-nixos`
+5. Injects the `minions-agent` binary into the image
+
+**No separate bake-agent step is needed** — the agent service is defined in the NixOS configuration and the binary is injected during the build script.
+
+NixOS VMs use their own matched kernel (`vmlinux-nixos`), while Ubuntu/Fedora VMs share the Cloud Hypervisor kernel (`vmlinux`).
+
+## 6. Bake the agent into the image (Ubuntu/Fedora only)
 
 After building the base image, inject the `minions-agent` binary and systemd service:
 
@@ -149,8 +180,13 @@ sudo minions destroy test
 └── minions-vsock-cli         # VSOCK debug tool
 
 /var/lib/minions/
-├── kernel/vmlinux            # Guest kernel (~46 MB)
-├── images/base-ubuntu.ext4   # Base rootfs (5 GB sparse, ~600 MB actual)
+├── kernel/
+│   ├── vmlinux               # Ubuntu/Fedora kernel (~46 MB)
+│   └── vmlinux-nixos         # NixOS kernel (if built)
+├── images/
+│   ├── base-ubuntu.ext4      # Ubuntu rootfs (5 GB sparse, ~600 MB actual)
+│   ├── base-fedora.ext4      # Fedora rootfs (if built)
+│   └── base-nixos.ext4       # NixOS rootfs (if built, ~200-300 MB actual)
 ├── vms/                      # Per-VM rootfs copies
 └── minions.db                # SQLite state database
 

@@ -28,11 +28,31 @@ sudo minions init --persist # also persist networking across reboots
 ### Build the base image and bake in the agent
 
 ```bash
-sudo ./scripts/build-base-image.sh  # Build Ubuntu 24.04 rootfs
+sudo ./scripts/build-base-image.sh  # Build Ubuntu 24.04 rootfs (default)
 sudo ./scripts/bake-agent.sh        # Inject minions-agent
 ```
 
 The first script builds a base Ubuntu 24.04 LTS rootfs with common dev tools (git, vim, htop, build-essential, etc.). The second injects the `minions-agent` binary so every new VM starts with the agent running.
+
+**Multiple OS images:**
+
+You can build and use different operating systems:
+
+```bash
+# Build Ubuntu 24.04 (default)
+sudo ./scripts/build-base-image.sh --os ubuntu
+sudo ./scripts/bake-agent.sh --os ubuntu
+
+# Build Fedora 41
+sudo ./scripts/build-base-image.sh --os fedora
+sudo ./scripts/bake-agent.sh --os fedora
+
+# Build NixOS 24.11 (requires Nix installed)
+sudo ./scripts/build-base-image.sh --os nixos
+# Note: NixOS doesn't need a separate bake-agent step
+```
+
+Images are stored at `/var/lib/minions/images/base-{os}.ext4`.
 
 > See [INSTALL.md](docs/INSTALL.md) for full setup details.
 
@@ -49,6 +69,16 @@ Creates and boots a VM with 2 vCPUs and 1024 MiB RAM (defaults). Your local SSH 
 ```bash
 sudo minions create myvm --cpus 4 --memory 2048
 ```
+
+**Choose an operating system:**
+
+```bash
+sudo minions create myvm --os ubuntu   # Ubuntu 24.04 (default)
+sudo minions create myvm --os fedora   # Fedora 41
+sudo minions create myvm --os nixos    # NixOS 24.11
+```
+
+The base image for the chosen OS must be built first (see "Build the base image" above).
 
 ### List VMs
 

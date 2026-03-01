@@ -3,9 +3,75 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-pub const BASE_IMAGE: &str = "/var/lib/minions/images/base-ubuntu.ext4";
+pub const IMAGES_DIR: &str = "/var/lib/minions/images";
 pub const VMS_DIR: &str = "/var/lib/minions/vms";
 pub const SNAPSHOTS_DIR: &str = "/var/lib/minions/snapshots";
+
+/// Supported operating systems for VM images.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OsType {
+    #[default]
+    Ubuntu,
+    Fedora,
+    NixOS,
+}
+
+impl OsType {
+    /// Parse OS type from string (case-insensitive).
+    pub fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "ubuntu" => Ok(OsType::Ubuntu),
+            "fedora" => Ok(OsType::Fedora),
+            "nixos" => Ok(OsType::NixOS),
+            _ => anyhow::bail!(
+                "unsupported OS '{}' (available: ubuntu, fedora, nixos)",
+                s
+            ),
+        }
+    }
+
+    /// Get the base image filename for this OS.
+    pub fn image_name(&self) -> &'static str {
+        match self {
+            OsType::Ubuntu => "base-ubuntu.ext4",
+            OsType::Fedora => "base-fedora.ext4",
+            OsType::NixOS => "base-nixos.ext4",
+        }
+    }
+
+    /// Get the full path to the base image for this OS.
+    pub fn base_image_path(&self) -> PathBuf {
+        PathBuf::from(IMAGES_DIR).join(self.image_name())
+    }
+
+    /// Get the path to the vmlinux kernel for this OS.
+    ///
+    /// Ubuntu and Fedora share the Cloud Hypervisor project kernel.
+    /// NixOS uses its own kernel extracted from the NixOS build.
+    pub fn kernel_path(&self) -> PathBuf {
+        match self {
+            OsType::Ubuntu | OsType::Fedora => {
+                PathBuf::from("/var/lib/minions/kernel/vmlinux")
+            }
+            OsType::NixOS => PathBuf::from("/var/lib/minions/kernel/vmlinux-nixos"),
+        }
+    }
+
+    /// String representation for storage/display.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OsType::Ubuntu => "ubuntu",
+            OsType::Fedora => "fedora",
+            OsType::NixOS => "nixos",
+        }
+    }
+}
+
+impl std::fmt::Display for OsType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
 
 /// Return the rootfs path for a given VM name.
 #[allow(dead_code)]
@@ -13,25 +79,60 @@ pub fn rootfs_path(name: &str) -> PathBuf {
     PathBuf::from(VMS_DIR).join(name).join("rootfs.ext4")
 }
 
+/// List available OS images that have been built.
+pub fn list_available_os() -> Vec<OsType> {
+    let mut available = Vec::new();
+    for os in [OsType::Ubuntu, OsType::Fedora, OsType::NixOS] {
+        if os.base_image_path().exists() {
+            available.push(os);
+        }
+    }
+    available
+}
+
 /// Copy the base image to a per-VM rootfs.
 /// The base image must already contain the minions-agent binary + systemd unit.
 pub fn create_rootfs(name: &str) -> Result<PathBuf> {
+    create_rootfs_with_os(name, OsType::default())
+}
+
+/// Copy the base image for a specific OS to a per-VM rootfs.
+/// The base image must already contain the minions-agent binary + systemd unit.
+pub fn create_rootfs_with_os(name: &str, os: OsType) -> Result<PathBuf> {
     let vm_dir = PathBuf::from(VMS_DIR).join(name);
     std::fs::create_dir_all(&vm_dir).with_context(|| format!("create VM dir {:?}", vm_dir))?;
 
     let dst = vm_dir.join("rootfs.ext4");
-    let base = Path::new(BASE_IMAGE);
+    let base = os.base_image_path();
 
     if !base.exists() {
-        anyhow::bail!(
-            "base image not found at {BASE_IMAGE}\n\
-             Build it first with the Phase 1/2 setup scripts."
-        );
+        let available = list_available_os();
+        if available.is_empty() {
+            anyhow::bail!(
+                "no base images found at {IMAGES_DIR}\n\
+                 Build one first: sudo ./scripts/build-base-image.sh --os {os}\n\
+                 Then bake the agent: sudo ./scripts/bake-agent.sh --os {os}"
+            );
+        } else {
+            let available_str: Vec<_> = available.iter().map(|o| o.as_str()).collect();
+            anyhow::bail!(
+                "base image for '{os}' not found at {}\n\
+                 Available images: {}\n\
+                 Build it first: sudo ./scripts/build-base-image.sh --os {os}\n\
+                 Then bake the agent: sudo ./scripts/bake-agent.sh --os {os}",
+                base.display(),
+                available_str.join(", ")
+            );
+        }
     }
 
     // Use `cp --sparse=always` for a fast copy that preserves sparse blocks.
     let status = std::process::Command::new("cp")
-        .args(["--sparse=always", BASE_IMAGE, dst.to_str().unwrap()])
+        .args([
+            "--sparse=always",
+            base.to_str().unwrap(),
+            dst.to_str().unwrap(),
+        ])
         .status()
         .context("spawn cp")?;
 

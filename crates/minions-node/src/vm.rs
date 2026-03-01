@@ -17,6 +17,8 @@ use uuid::Uuid;
 ///
 /// `owner_id` — the SSH gateway user who owns this VM, or `None` for
 /// admin/system VMs created directly via the HTTP API.
+///
+/// `os` — the operating system to use (defaults to Ubuntu if None).
 pub async fn create(
     db_path: &str,
     name: &str,
@@ -24,6 +26,36 @@ pub async fn create(
     memory_mb: u32,
     ssh_pubkey: Option<String>,
     owner_id: Option<String>,
+) -> Result<db::Vm> {
+    create_with_os(
+        db_path,
+        name,
+        vcpus,
+        memory_mb,
+        ssh_pubkey,
+        owner_id,
+        storage::OsType::default(),
+    )
+    .await
+}
+
+/// Create a fully networked VM with a specific OS.
+///
+/// Takes `db_path` instead of `&Connection` so the connection is never held
+/// across `.await` points (rusqlite::Connection is !Sync).
+///
+/// `owner_id` — the SSH gateway user who owns this VM, or `None` for
+/// admin/system VMs created directly via the HTTP API.
+///
+/// `os` — the operating system to use for the VM image.
+pub async fn create_with_os(
+    db_path: &str,
+    name: &str,
+    vcpus: u32,
+    memory_mb: u32,
+    ssh_pubkey: Option<String>,
+    owner_id: Option<String>,
+    os: storage::OsType,
 ) -> Result<db::Vm> {
     // ── Sync: validate + allocate resources ──────────────────────────────────
     let (ip, vsock_socket, cfg) = {
@@ -44,7 +76,7 @@ pub async fn create(
         let tap = network::create_tap(name).context("create TAP device")?;
 
         // Any failure after TAP creation must remove the TAP device.
-        let rootfs = storage::create_rootfs(name)
+        let rootfs = storage::create_rootfs_with_os(name, os)
             .context("copy base rootfs")
             .inspect_err(|_| {
                 let _ = network::destroy_tap(name);
@@ -73,6 +105,7 @@ pub async fn create(
             proxy_public: false,
             owner_id: owner_id.clone(),
             host_id: Some("local".to_string()),
+            os_type: os.as_str().to_string(),
         };
         db::insert_vm(&conn, &vm_row)
             .context("insert VM into DB")
@@ -88,6 +121,7 @@ pub async fn create(
             mac,
             cid,
             rootfs,
+            kernel: os.kernel_path(),
             tap,
             api_socket,
             vsock_socket: vsock_socket.clone(),
@@ -238,6 +272,9 @@ pub async fn start(db_path: &str, name: &str) -> Result<db::Vm> {
         let api_socket = std::path::PathBuf::from(&vm.ch_api_socket);
         let vsock_socket = std::path::PathBuf::from(&vm.ch_vsock_socket);
 
+        let os_type = storage::OsType::from_str(&vm.os_type)
+            .unwrap_or_else(|_| storage::OsType::default());
+
         let cfg = hypervisor::VmConfig {
             name: name.to_string(),
             vcpus: vm.vcpus,
@@ -245,6 +282,7 @@ pub async fn start(db_path: &str, name: &str) -> Result<db::Vm> {
             mac: vm.mac_address.clone(),
             cid: vm.vsock_cid,
             rootfs: std::path::PathBuf::from(&vm.rootfs_path),
+            kernel: os_type.kernel_path(),
             tap: tap.clone(),
             api_socket,
             vsock_socket: vsock_socket.clone(),
@@ -646,11 +684,12 @@ pub async fn copy(
             rootfs_path: rootfs.to_string_lossy().to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
             stopped_at: None,
-            // Inherit proxy settings from source VM.
+            // Inherit proxy settings and OS type from source VM.
             proxy_port: source.proxy_port,
             proxy_public: source.proxy_public,
             owner_id: owner_id.clone(),
             host_id: Some("local".to_string()),
+            os_type: source.os_type.clone(),
         };
         db::insert_vm(&conn, &vm_row)
             .context("insert copied VM into DB")
@@ -659,6 +698,9 @@ pub async fn copy(
                 let _ = storage::destroy_rootfs(new_name);
             })?;
 
+        let os_type = storage::OsType::from_str(&source.os_type)
+            .unwrap_or_else(|_| storage::OsType::default());
+
         let cfg = hypervisor::VmConfig {
             name: new_name.to_string(),
             vcpus: source.vcpus,
@@ -666,6 +708,7 @@ pub async fn copy(
             mac,
             cid,
             rootfs,
+            kernel: os_type.kernel_path(),
             tap,
             api_socket,
             vsock_socket: vsock_socket.clone(),

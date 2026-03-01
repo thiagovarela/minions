@@ -15,6 +15,9 @@ pub struct CreateRequest {
     pub name: String,
     pub cpus: u32,
     pub memory_mb: u32,
+    /// Operating system (optional, defaults to "ubuntu" on server).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

@@ -89,20 +89,28 @@ struct CreateVmRequest {
     memory_mb: u32,
     ssh_pubkey: Option<String>,
     owner_id: Option<String>,
+    #[serde(default = "default_os")]
+    os: String,
+}
+
+fn default_os() -> String {
+    "ubuntu".to_string()
 }
 
 async fn create_vm(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateVmRequest>,
 ) -> Result<Json<db::Vm>, AppError> {
-    info!("Creating VM: {}", req.name);
-    let vm = vm::create(
+    info!("Creating VM: {} (os: {})", req.name, req.os);
+    let os_type = minions_node::storage::OsType::from_str(&req.os)?;
+    let vm = vm::create_with_os(
         &state.db_path,
         &req.name,
         req.vcpus,
         req.memory_mb,
         req.ssh_pubkey,
         req.owner_id,
+        os_type,
     )
     .await?;
     Ok(Json(vm))

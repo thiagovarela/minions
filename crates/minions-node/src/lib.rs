@@ -15,6 +15,9 @@ pub use minions_db as db;
 
 // Re-export commonly used types
 pub use vm::{
-    MAX_SNAPSHOTS_PER_VM, check_quota, copy, create, delete_snapshot, destroy, list,
+    MAX_SNAPSHOTS_PER_VM, check_quota, copy, create, create_with_os, delete_snapshot, destroy, list,
     list_snapshots, rename, resize, restart, restore_snapshot, snapshot, start, stop,
 };
+
+// Re-export OsType for convenience
+pub use storage::OsType;
