@@ -126,6 +126,12 @@ mkdir -p "$MOUNT_DIR/usr/local/bin"
 install -m 0755 "$AGENT_BIN" "$MOUNT_DIR/usr/local/bin/minions-agent"
 ok "agent binary injected ($(du -sh "$MOUNT_DIR/usr/local/bin/minions-agent" | cut -f1))"
 
+# NixOS stage-1 expects /init inside the mounted rootfs.
+# make-disk-image does not always create this symlink for our boot flow,
+# so create it explicitly to ensure stage-2 handoff succeeds.
+ln -sfn /nix/var/nix/profiles/system/init "$MOUNT_DIR/init"
+ok "created /init symlink for stage-2 handoff"
+
 info "unmounting…"
 umount "$MOUNT_DIR" || fail "umount failed"
 rmdir "$MOUNT_DIR"
