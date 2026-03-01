@@ -1,38 +1,78 @@
 #!/usr/bin/env bash
-# bake-agent.sh — Inject minions-agent (+ systemd unit) into the base Ubuntu
-# rootfs image so every subsequent `minions create` gets the agent for free.
+# bake-agent.sh — Inject minions-agent (+ systemd unit) into a base
+# rootfs image so every subsequent `minions create --os X` gets the agent for free.
 #
 # Must be run as root on a Linux host with loop-mount support.
 #
 # Prerequisites:
 #   - Pre-built binaries installed (run install.sh first or set BINARIES_DIR)
-#   - Base rootfs image at /var/lib/minions/images/base-ubuntu.ext4
+#   - Base rootfs image at /var/lib/minions/images/base-{os}.ext4
 #
 # Usage:
-#   sudo ./scripts/bake-agent.sh
-#   sudo BINARIES_DIR=/path/to/extracted/release ./scripts/bake-agent.sh
+#   sudo ./scripts/bake-agent.sh [--os OS]
+#   sudo BINARIES_DIR=/path/to/extracted/release ./scripts/bake-agent.sh --os fedora
+#
+# Options:
+#   --os OS    OS image to bake: ubuntu (default), fedora
+#
+# Note: NixOS images do NOT require this step — the agent is baked in during
+#       build-nixos-image.sh. This script only supports ubuntu and fedora.
 #
 # What it does:
 #   1. Verifies minions and minions-agent binaries are available
-#   2. Mounts /var/lib/minions/images/base-ubuntu.ext4 via a loop device
+#   2. Mounts /var/lib/minions/images/base-{os}.ext4 via a loop device
 #   3. Copies the agent binary to /usr/local/bin/minions-agent inside the image
 #   4. Writes the systemd unit /etc/systemd/system/minions-agent.service
 #   5. Creates the multi-user.target.wants symlink to auto-start the agent
 #   6. Removes any leftover Phase-1 static network config that conflicts
 #   7. Unmounts cleanly (even on failure)
 #
-# After this script succeeds, the base image is ready.  Every VM created with
-# `minions create` will have the agent running from first boot.
+# After this script succeeds, the base image is ready. Every VM created with
+# `minions create --os {os}` will have the agent running from first boot.
 
 set -euo pipefail
 
 # ── Configuration ────────────────────────────────────────────────────────────
-BASE_IMAGE="${BASE_IMAGE:-/var/lib/minions/images/base-ubuntu.ext4}"
+OS="${OS:-ubuntu}"
+IMAGES_DIR="${IMAGES_DIR:-/var/lib/minions/images}"
 MOUNT_DIR="${MOUNT_DIR:-/tmp/minions-bake-mount}"
 BINARIES_DIR="${BINARIES_DIR:-/usr/local/bin}"
 
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --os)
+            OS="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            echo "Usage: $0 [--os ubuntu|fedora]" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# Validate OS
+case "$OS" in
+    ubuntu|fedora)
+        ;;
+    nixos)
+        echo "✗ NixOS images do not need a separate bake-agent step." >&2
+        echo "  The agent is already baked in during build-nixos-image.sh" >&2
+        exit 1
+        ;;
+    *)
+        echo "✗ Unknown OS: $OS (supported: ubuntu, fedora)" >&2
+        echo "  Note: nixos does not need this step" >&2
+        exit 1
+        ;;
+esac
+
+BASE_IMAGE="$IMAGES_DIR/base-$OS.ext4"
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
-info()  { echo "  [bake] $*"; }
+info()  { echo "  [bake:$OS] $*"; }
 ok()    { echo "✓ $*"; }
 fail()  { echo "✗ $*" >&2; exit 1; }
 
@@ -49,7 +89,7 @@ trap cleanup EXIT
 [[ $EUID -eq 0 ]] || fail "must be run as root (sudo $0)"
 
 [[ -f "$BASE_IMAGE" ]] || fail "base image not found: $BASE_IMAGE
-  Build it first: sudo ./scripts/build-base-image.sh"
+  Build it first: sudo ./scripts/build-base-image.sh --os $OS"
 
 # ── Step 1: Verify binaries ───────────────────────────────────────────────────
 info "verifying pre-built binaries in $BINARIES_DIR…"
@@ -140,12 +180,12 @@ ok "getty services disabled (saves ~13 MB RAM)"
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo "────────────────────────────────────────────"
-ok "base image baked successfully!"
+ok "base image for $OS baked successfully!"
 echo ""
 echo "  Agent binary : /usr/local/bin/minions-agent (inside image)"
 echo "  Systemd unit : /etc/systemd/system/minions-agent.service (inside image)"
 echo "  Host CLI     : /usr/local/bin/minions"
 echo "  Optimizations: getty services disabled (~13 MB RAM saved per VM)"
 echo ""
-echo "  You can now run:  sudo minions create myvm"
+echo "  You can now run:  sudo minions create myvm --os $OS"
 echo "────────────────────────────────────────────"

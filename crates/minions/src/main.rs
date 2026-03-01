@@ -61,6 +61,9 @@ enum Commands {
         cpus: u32,
         #[arg(long, default_value_t = 1024)]
         memory: u32,
+        /// Operating system: ubuntu (default), fedora, nixos
+        #[arg(long, default_value = "ubuntu")]
+        os: String,
     },
     /// Destroy a running VM (halt + remove rootfs + remove from DB)
     Destroy { name: String },
@@ -473,15 +476,16 @@ async fn run_remote(
     let c = client::Client::new(host, api_key);
 
     match command {
-        Commands::Create { name, cpus, memory } => {
+        Commands::Create { name, cpus, memory, os } => {
             if !json {
-                println!("Creating VM '{name}' via {host}…");
+                println!("Creating VM '{name}' (os: {os}) via {host}…");
             }
             let vm = c
                 .create_vm(client::CreateRequest {
                     name,
                     cpus,
                     memory_mb: memory,
+                    os: Some(os),
                 })
                 .await?;
             print_vm(VmJson::from(vm), json);
@@ -657,15 +661,16 @@ async fn run_remote(
 
 async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> {
     match command {
-        Commands::Create { name, cpus, memory } => {
+        Commands::Create { name, cpus, memory, os } => {
             if !json {
-                println!("Creating VM '{name}'…");
+                println!("Creating VM '{name}' (os: {os})…");
             }
+            let os_type = minions_node::OsType::from_str(&os)?;
             let ssh_pubkey = find_ssh_pubkey();
             if ssh_pubkey.is_some() && !json {
                 println!("  (SSH public key found — key-based SSH will work)");
             }
-            let vm = vm::create(db_path, &name, cpus, memory, ssh_pubkey, None).await?;
+            let vm = vm::create_with_os(db_path, &name, cpus, memory, ssh_pubkey, None, os_type).await?;
             print_vm(VmJson::from(vm), json);
         }
 

@@ -114,6 +114,9 @@ pub struct CreateRequest {
     /// SSH gateway user who will own this VM.
     /// Supplied by the SSH gateway; absent for direct admin API calls.
     pub owner_id: Option<String>,
+    /// Operating system: "ubuntu" (default) or "fedora".
+    #[serde(default = "default_os")]
+    pub os: String,
 }
 
 fn default_cpus() -> u32 {
@@ -121,6 +124,9 @@ fn default_cpus() -> u32 {
 }
 fn default_memory() -> u32 {
     1024
+}
+fn default_os() -> String {
+    "ubuntu".to_string()
 }
 
 #[derive(Debug, Serialize)]
@@ -259,26 +265,33 @@ async fn create_vm(
     State(state): State<AppState>,
     Json(req): Json<CreateRequest>,
 ) -> impl IntoResponse {
-    info!(name = %req.name, cpus = req.cpus, memory_mb = req.memory_mb, "create VM");
+    info!(name = %req.name, cpus = req.cpus, memory_mb = req.memory_mb, os = %req.os, "create VM");
+
+    // Parse OS type (default to ubuntu if invalid)
+    let os_type = match minions_node::OsType::from_str(&req.os) {
+        Ok(os) => os,
+        Err(e) => return bad_request(e.to_string()).into_response(),
+    };
 
     let ssh_pubkey = state.ssh_pubkey.as_deref().map(|s| s.to_string());
     let db_path = state.db_path.as_str().to_string();
     let owner_id = req.owner_id.clone();
 
-    match vm::create(
+    match vm::create_with_os(
         &db_path,
         &req.name,
         req.cpus,
         req.memory_mb,
         ssh_pubkey,
         owner_id,
+        os_type,
     )
     .await
     {
         Ok(v) => (StatusCode::CREATED, Json(VmResponse::from(v))).into_response(),
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("already exists") {
+            if msg.contains("already exists") || msg.contains("unsupported OS") {
                 bad_request(msg).into_response()
             } else {
                 internal(msg).into_response()

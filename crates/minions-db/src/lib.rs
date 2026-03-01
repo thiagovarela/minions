@@ -34,6 +34,8 @@ pub struct Vm {
     pub owner_id: Option<String>,
     /// Host ID where this VM is running (NULL = local host, for backwards compat).
     pub host_id: Option<String>,
+    /// Operating system type (ubuntu, fedora, nixos).
+    pub os_type: String,
 }
 
 /// Represents a host record in the database.
@@ -163,6 +165,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE vms ADD COLUMN proxy_public  INTEGER NOT NULL DEFAULT 0;");
     let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN owner_id      TEXT;");
     let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN host_id       TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN os_type       TEXT NOT NULL DEFAULT 'ubuntu';");
 
     // Index on owner_id — must come after the column exists (idempotent).
     let _ = conn.execute_batch(
@@ -206,10 +209,10 @@ fn migrate(conn: &Connection) -> Result<()> {
 // Indices: 0=name 1=status 2=ip 3=vsock_cid 4=ch_pid 5=ch_api_socket
 //          6=ch_vsock_socket 7=tap_device 8=mac_address 9=vcpus
 //          10=memory_mb 11=rootfs_path 12=created_at 13=stopped_at
-//          14=proxy_port 15=proxy_public 16=owner_id 17=host_id
+//          14=proxy_port 15=proxy_public 16=owner_id 17=host_id 18=os_type
 const VM_COLUMNS: &str = "name,status,ip,vsock_cid,ch_pid,ch_api_socket,ch_vsock_socket,\
      tap_device,mac_address,vcpus,memory_mb,rootfs_path,created_at,stopped_at,\
-     proxy_port,proxy_public,owner_id,host_id";
+     proxy_port,proxy_public,owner_id,host_id,os_type";
 
 /// Insert a new VM row (status = "creating").
 pub fn insert_vm(conn: &Connection, vm: &Vm) -> Result<()> {
@@ -217,8 +220,8 @@ pub fn insert_vm(conn: &Connection, vm: &Vm) -> Result<()> {
         "INSERT INTO vms
             (name, status, ip, vsock_cid, ch_pid, ch_api_socket, ch_vsock_socket,
              tap_device, mac_address, vcpus, memory_mb, rootfs_path, created_at, stopped_at,
-             proxy_port, proxy_public, owner_id, host_id)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+             proxy_port, proxy_public, owner_id, host_id, os_type)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
         params![
             vm.name,
             vm.status,
@@ -238,6 +241,7 @@ pub fn insert_vm(conn: &Connection, vm: &Vm) -> Result<()> {
             if vm.proxy_public { 1i64 } else { 0i64 },
             vm.owner_id,
             vm.host_id,
+            vm.os_type,
         ],
     )
     .context("insert vm")?;
@@ -428,6 +432,7 @@ fn row_to_vm(row: &rusqlite::Row<'_>) -> rusqlite::Result<Vm> {
         proxy_public: proxy_public != 0,
         owner_id: row.get(16)?,
         host_id: row.get(17)?,
+        os_type: row.get(18).unwrap_or_else(|_| "ubuntu".to_string()),
     })
 }
 

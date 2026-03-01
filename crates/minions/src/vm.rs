@@ -21,6 +21,32 @@ pub async fn create(
     ssh_pubkey: Option<String>,
     owner_id: Option<String>,
 ) -> Result<db::Vm> {
+    create_with_os(
+        db_path,
+        name,
+        vcpus,
+        memory_mb,
+        ssh_pubkey,
+        owner_id,
+        minions_node::OsType::default(),
+    )
+    .await
+}
+
+/// Create a VM with a specific OS, dispatching to the appropriate host.
+///
+/// Uses the scheduler to select a host based on available capacity, then
+/// either calls minions_node directly (local host) or makes an HTTP request
+/// to a remote node agent.
+pub async fn create_with_os(
+    db_path: &str,
+    name: &str,
+    vcpus: u32,
+    memory_mb: u32,
+    ssh_pubkey: Option<String>,
+    owner_id: Option<String>,
+    os: minions_node::OsType,
+) -> Result<db::Vm> {
     // Choose host via scheduler.
     let host_id = {
         let conn = db::open(db_path)?;
@@ -36,17 +62,19 @@ pub async fn create(
 
     if host.id == "local" {
         // Call minions_node library directly (in-process).
-        minions_node::create(
+        minions_node::create_with_os(
             db_path,
             name,
             vcpus,
             memory_mb,
             ssh_pubkey.clone(),
             owner_id.clone(),
+            os,
         )
         .await
     } else {
         // Make HTTP call to remote node agent.
+        // TODO: Pass OS parameter to remote host
         let client = host_client::HostClient::new(&host.address, host.api_port);
         let _response = client
             .create_vm(name, vcpus, memory_mb, ssh_pubkey, owner_id.clone())
