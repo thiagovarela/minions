@@ -72,6 +72,8 @@
     git
     curl
     wget
+    iproute2
+    iputils
     vim
     nano
     htop
