@@ -1,7 +1,12 @@
 //! HTTP reverse proxy handler.
 //!
-//! Receives every request from Cloudflare (already TLS-terminated),
+//! Receives every request (TLS already terminated by rustls),
 //! extracts the subdomain, looks up the VM, checks auth, and forwards.
+//!
+//! WebSocket upgrade requests (`Upgrade: websocket`) are detected and tunnelled:
+//! a raw TCP connection is opened to the VM, the HTTP upgrade handshake is
+//! forwarded, and once both sides return 101 the two streams are spliced
+//! bidirectionally with zero protocol awareness.
 
 use std::sync::Arc;
 
@@ -9,6 +14,7 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::Response;
+use hyper_util::rt::TokioIo;
 use subtle::ConstantTimeEq;
 use tracing::{debug, warn};
 
@@ -119,9 +125,221 @@ async fn forward_to_vm(req: Request, vm: &db::VmProxy, host: &str, state: &AppSt
         }
     }
 
-    // Forward request to VM.
+    // ── WebSocket upgrade ─────────────────────────────────────────────────────
+    if is_websocket_upgrade(&req) {
+        debug!(vm = %vm.name, port = vm.proxy_port, "WebSocket upgrade — tunnelling");
+        return ws_upgrade(req, &vm.ip, vm.proxy_port, host).await;
+    }
+
+    // ── Normal HTTP forward ───────────────────────────────────────────────────
     let origin = format!("http://{}:{}", vm.ip, vm.proxy_port);
     forward(req, &origin, host, &state.http_client).await
+}
+
+// ── WebSocket tunnel ──────────────────────────────────────────────────────────
+
+/// Returns true when the request carries `Upgrade: websocket`.
+fn is_websocket_upgrade(req: &Request) -> bool {
+    req.headers()
+        .get(header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+}
+
+/// Tunnel a WebSocket upgrade between the client and a VM.
+///
+/// 1. Connect to the VM over raw TCP.
+/// 2. Forward the client's HTTP upgrade request verbatim.
+/// 3. Read the VM's 101 response and parse its headers.
+/// 4. Return a matching 101 to the client.
+/// 5. Spawn a background task that awaits hyper's `on_upgrade` and then
+///    bidirectionally copies bytes between the two raw streams.
+async fn ws_upgrade(req: Request, vm_ip: &str, vm_port: u16, original_host: &str) -> Response {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let addr = format!("{}:{}", vm_ip, vm_port);
+
+    // ── 1. Connect to VM ──────────────────────────────────────────────────────
+    let mut vm_stream = match TcpStream::connect(&addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("WS: TCP connect to {} failed: {}", addr, e);
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "Could not reach the VM — is the web server running?",
+            );
+        }
+    };
+
+    // ── 2. Decompose the request, extracting the OnUpgrade handle ─────────────
+    let (mut parts, _body) = req.into_parts();
+
+    let on_upgrade = match parts.extensions.remove::<hyper::upgrade::OnUpgrade>() {
+        Some(u) => u,
+        None => {
+            warn!("WS: no OnUpgrade in request extensions");
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "Connection upgrade not supported",
+            );
+        }
+    };
+
+    let path_and_query = parts
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+
+    // ── 3. Build the raw HTTP/1.1 upgrade request for the VM ──────────────────
+    let mut raw = format!("GET {} HTTP/1.1\r\nHost: {}\r\n", path_and_query, original_host);
+
+    for (name, value) in &parts.headers {
+        let n = name.as_str();
+        // Host already set above.
+        if n.eq_ignore_ascii_case("host") {
+            continue;
+        }
+        if let Ok(v) = value.to_str() {
+            raw.push_str(n);
+            raw.push_str(": ");
+            raw.push_str(v);
+            raw.push_str("\r\n");
+        }
+    }
+    raw.push_str("X-Forwarded-Host: ");
+    raw.push_str(original_host);
+    raw.push_str("\r\nX-Forwarded-Proto: https\r\n\r\n");
+
+    // Send to VM.
+    if let Err(e) = vm_stream.write_all(raw.as_bytes()).await {
+        warn!("WS: write upgrade request to {} failed: {}", addr, e);
+        return error_response(StatusCode::BAD_GATEWAY, "Failed to send upgrade to VM");
+    }
+
+    // ── 4. Read the VM's HTTP response headers ────────────────────────────────
+    let mut buf = Vec::with_capacity(4096);
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+    let mut tmp = [0u8; 1024];
+    loop {
+        match tokio::time::timeout_at(deadline, vm_stream.read(&mut tmp)).await {
+            Ok(Ok(0)) => {
+                warn!("WS: VM closed during upgrade handshake");
+                return error_response(StatusCode::BAD_GATEWAY, "VM closed during upgrade");
+            }
+            Ok(Ok(n)) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.len() > 8192 {
+                    warn!("WS: upgrade response too large from {}", addr);
+                    return error_response(StatusCode::BAD_GATEWAY, "Upgrade response too large");
+                }
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Ok(Err(e)) => {
+                warn!("WS: read error during upgrade from {}: {}", addr, e);
+                return error_response(StatusCode::BAD_GATEWAY, "Read error during upgrade");
+            }
+            Err(_) => {
+                warn!("WS: timeout waiting for upgrade response from {}", addr);
+                return error_response(StatusCode::GATEWAY_TIMEOUT, "VM upgrade response timeout");
+            }
+        }
+    }
+
+    let header_end = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap();
+    // Any bytes after the headers are already WebSocket frame data — keep them.
+    let leftover = buf[header_end + 4..].to_vec();
+    let header_bytes = &buf[..header_end];
+    let header_str = String::from_utf8_lossy(header_bytes);
+
+    // ── 5. Parse VM response — must be 101 ────────────────────────────────────
+    let mut lines = header_str.lines();
+    let status_line = lines.next().unwrap_or("");
+    if !status_line.contains("101") {
+        warn!("WS: VM rejected upgrade: {}", status_line);
+        return error_response(
+            StatusCode::BAD_GATEWAY,
+            &format!("VM rejected WebSocket upgrade: {status_line}"),
+        );
+    }
+
+    // Parse response headers to mirror back to the client.
+    let mut response = Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(header::CONNECTION, "upgrade")
+        .header(header::UPGRADE, "websocket");
+
+    for line in lines {
+        let line = line.trim();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            let key = k.trim().to_lowercase();
+            let val = v.trim();
+            // Forward WebSocket-specific headers; skip connection/upgrade (we set them above).
+            match key.as_str() {
+                "connection" | "upgrade" => {}
+                _ => {
+                    if let (Ok(hn), Ok(hv)) = (
+                        HeaderName::from_bytes(k.trim().as_bytes()),
+                        HeaderValue::from_str(val),
+                    ) {
+                        response = response.header(hn, hv);
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 6. Spawn the bidirectional splice ─────────────────────────────────────
+    let addr_owned = addr.clone();
+    tokio::spawn(async move {
+        // Wait for hyper to hand us the raw client IO.
+        let upgraded = match on_upgrade.await {
+            Ok(u) => u,
+            Err(e) => {
+                warn!("WS: client upgrade failed: {}", e);
+                return;
+            }
+        };
+
+        let mut client_io = TokioIo::new(upgraded);
+
+        // If the VM sent any leftover bytes after the header boundary, write
+        // them into the client before starting the bidirectional copy.
+        if !leftover.is_empty() {
+            if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut client_io, &leftover).await {
+                warn!("WS: failed to flush leftover to client: {}", e);
+                return;
+            }
+        }
+
+        // Splice until one side closes.
+        match tokio::io::copy_bidirectional(&mut client_io, &mut vm_stream).await {
+            Ok((c2v, v2c)) => {
+                debug!(
+                    "WS: tunnel to {} closed (client→vm: {} B, vm→client: {} B)",
+                    addr_owned, c2v, v2c
+                );
+            }
+            Err(e) => {
+                // Connection resets are expected when either side closes.
+                debug!("WS: tunnel to {} ended: {}", addr_owned, e);
+            }
+        }
+    });
+
+    // ── 7. Return the 101 to the client ───────────────────────────────────────
+    response.body(Body::empty()).unwrap_or_else(|_| {
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to build upgrade response")
+    })
 }
 
 // ── Internal routes ───────────────────────────────────────────────────────────
@@ -183,7 +401,7 @@ async fn handle_login_post(req: Request, state: &AppState) -> Response {
 
 // ── Request forwarding ────────────────────────────────────────────────────────
 
-/// Hop-by-hop headers that must not be forwarded.
+/// Hop-by-hop headers that must not be forwarded in normal HTTP requests.
 static HOP_BY_HOP: &[&str] = &[
     "connection",
     "keep-alive",

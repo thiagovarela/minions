@@ -2039,6 +2039,8 @@ dependencies = [
  "dashmap",
  "hickory-resolver",
  "http",
+ "hyper",
+ "hyper-util",
  "instant-acme",
  "reqwest",
  "rusqlite",

@@ -35,3 +35,5 @@ hickory-resolver = "0.24"
 dashmap = "6"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 x509-parser = "0.16"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
