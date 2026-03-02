@@ -165,7 +165,8 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE vms ADD COLUMN proxy_public  INTEGER NOT NULL DEFAULT 0;");
     let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN owner_id      TEXT;");
     let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN host_id       TEXT;");
-    let _ = conn.execute_batch("ALTER TABLE vms ADD COLUMN os_type       TEXT NOT NULL DEFAULT 'ubuntu';");
+    let _ = conn
+        .execute_batch("ALTER TABLE vms ADD COLUMN os_type       TEXT NOT NULL DEFAULT 'ubuntu';");
 
     // Index on owner_id — must come after the column exists (idempotent).
     let _ = conn.execute_batch(
@@ -1001,6 +1002,7 @@ mod tests {
             proxy_public: false,
             owner_id: owner_id.map(|s| s.to_string()),
             host_id: Some("local".to_string()),
+            os_type: "ubuntu".to_string(),
         }
     }
 

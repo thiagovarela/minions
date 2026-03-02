@@ -74,10 +74,16 @@ pub async fn create_with_os(
         .await
     } else {
         // Make HTTP call to remote node agent.
-        // TODO: Pass OS parameter to remote host
         let client = host_client::HostClient::new(&host.address, host.api_port);
         let _response = client
-            .create_vm(name, vcpus, memory_mb, ssh_pubkey, owner_id.clone())
+            .create_vm(
+                name,
+                vcpus,
+                memory_mb,
+                ssh_pubkey,
+                owner_id.clone(),
+                os.as_str().to_string(),
+            )
             .await
             .context("remote create_vm call failed")?;
 

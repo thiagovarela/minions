@@ -47,7 +47,7 @@ sudo ./scripts/bake-agent.sh --os ubuntu
 sudo ./scripts/build-base-image.sh --os fedora
 sudo ./scripts/bake-agent.sh --os fedora
 
-# Build NixOS 24.11 (requires Nix installed)
+# Build NixOS 25.11 (requires Nix installed)
 sudo ./scripts/build-base-image.sh --os nixos
 # Note: NixOS doesn't need a separate bake-agent step
 ```
@@ -75,7 +75,7 @@ sudo minions create myvm --cpus 4 --memory 2048
 ```bash
 sudo minions create myvm --os ubuntu   # Ubuntu 24.04 (default)
 sudo minions create myvm --os fedora   # Fedora 41
-sudo minions create myvm --os nixos    # NixOS 24.11
+sudo minions create myvm --os nixos    # NixOS 25.11
 ```
 
 The base image for the chosen OS must be built first (see "Build the base image" above).
