@@ -15,6 +15,8 @@ pub struct CreateRequest {
     pub name: String,
     pub cpus: u32,
     pub memory_mb: u32,
+    /// Required VM owner ID.
+    pub owner_id: String,
     /// Operating system (optional, defaults to "ubuntu" on server).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os: Option<String>,
@@ -193,11 +195,11 @@ impl Client {
         Ok(())
     }
 
-    pub async fn copy_vm(&self, name: &str, new_name: &str) -> Result<VmResponse> {
+    pub async fn copy_vm(&self, name: &str, new_name: &str, owner_id: &str) -> Result<VmResponse> {
         self.auth(
             self.http
                 .post(format!("{}/api/vms/{name}/copy", self.base))
-                .json(&serde_json::json!({ "new_name": new_name })),
+                .json(&serde_json::json!({ "new_name": new_name, "owner_id": owner_id })),
         )
         .send()
         .await

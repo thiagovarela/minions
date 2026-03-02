@@ -112,7 +112,7 @@ pub struct CreateRequest {
     #[serde(default = "default_memory")]
     pub memory_mb: u32,
     /// SSH gateway user who will own this VM.
-    /// Supplied by the SSH gateway; absent for direct admin API calls.
+    /// Required.
     pub owner_id: Option<String>,
     /// Operating system: "ubuntu" (default), "fedora", or "nixos".
     #[serde(default = "default_os")]
@@ -178,7 +178,7 @@ pub struct ResizeRequest {
 #[derive(Debug, Deserialize)]
 pub struct CopyRequest {
     pub new_name: String,
-    /// Owner for the new copy. Supplied by the SSH gateway; absent for admin copies.
+    /// Owner for the new copy. Required.
     pub owner_id: Option<String>,
 }
 
@@ -258,6 +258,14 @@ fn bad_request(msg: impl std::fmt::Display) -> (StatusCode, Json<ErrorResponse>)
     )
 }
 
+fn require_owner_id(owner_id: Option<&str>) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let owner = owner_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| bad_request("owner_id is required"))?;
+    Ok(owner.to_string())
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /// `POST /api/vms` — Create a VM.
@@ -273,9 +281,13 @@ async fn create_vm(
         Err(e) => return bad_request(e.to_string()).into_response(),
     };
 
+    let owner_id = match require_owner_id(req.owner_id.as_deref()) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+
     let ssh_pubkey = state.ssh_pubkey.as_deref().map(|s| s.to_string());
     let db_path = state.db_path.as_str().to_string();
-    let owner_id = req.owner_id.clone();
 
     match vm::create_with_os(
         &db_path,
@@ -283,7 +295,7 @@ async fn create_vm(
         req.cpus,
         req.memory_mb,
         ssh_pubkey,
-        owner_id,
+        Some(owner_id),
         os_type,
     )
     .await
@@ -494,10 +506,14 @@ async fn copy_vm(
     Json(req): Json<CopyRequest>,
 ) -> impl IntoResponse {
     info!(name = %name, new_name = %req.new_name, "copy VM");
+    let owner_id = match require_owner_id(req.owner_id.as_deref()) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+
     let db_path = state.db_path.as_str().to_string();
     let ssh_pubkey = state.ssh_pubkey.as_deref().map(|s| s.to_string());
-    let owner_id = req.owner_id.clone();
-    match vm::copy(&db_path, &name, &req.new_name, ssh_pubkey, owner_id).await {
+    match vm::copy(&db_path, &name, &req.new_name, ssh_pubkey, Some(owner_id)).await {
         Ok(v) => (StatusCode::CREATED, Json(VmResponse::from(v))).into_response(),
         Err(e) => {
             let msg = e.to_string();

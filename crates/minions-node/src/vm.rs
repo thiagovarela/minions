@@ -15,8 +15,7 @@ use uuid::Uuid;
 /// Takes `db_path` instead of `&Connection` so the connection is never held
 /// across `.await` points (rusqlite::Connection is !Sync).
 ///
-/// `owner_id` — the SSH gateway user who owns this VM, or `None` for
-/// admin/system VMs created directly via the HTTP API.
+/// `owner_id` — required owner of this VM (SSH gateway user id).
 ///
 /// `os` — the operating system to use (defaults to Ubuntu if None).
 pub async fn create(
@@ -44,8 +43,7 @@ pub async fn create(
 /// Takes `db_path` instead of `&Connection` so the connection is never held
 /// across `.await` points (rusqlite::Connection is !Sync).
 ///
-/// `owner_id` — the SSH gateway user who owns this VM, or `None` for
-/// admin/system VMs created directly via the HTTP API.
+/// `owner_id` — required owner of this VM (SSH gateway user id).
 ///
 /// `os` — the operating system to use for the VM image.
 pub async fn create_with_os(
@@ -57,6 +55,8 @@ pub async fn create_with_os(
     owner_id: Option<String>,
     os: storage::OsType,
 ) -> Result<db::Vm> {
+    let owner_id = normalize_owner_id(owner_id)?;
+
     // ── Sync: validate + allocate resources ──────────────────────────────────
     let (ip, vsock_socket, cfg) = {
         let conn = db::open(db_path)?;
@@ -64,9 +64,7 @@ pub async fn create_with_os(
         if db::get_vm(&conn, name)?.is_some() {
             anyhow::bail!("VM '{name}' already exists");
         }
-        if let Some(ref oid) = owner_id {
-            check_quota(&conn, oid, vcpus, memory_mb)?;
-        }
+        check_quota(&conn, &owner_id, vcpus, memory_mb)?;
         network::check_bridge().context("bridge check")?;
         hypervisor::ensure_run_dir()?;
 
@@ -103,7 +101,7 @@ pub async fn create_with_os(
             stopped_at: None,
             proxy_port: 80,
             proxy_public: false,
-            owner_id: owner_id.clone(),
+            owner_id: Some(owner_id.clone()),
             host_id: Some("local".to_string()),
             os_type: os.as_str().to_string(),
         };
@@ -273,8 +271,8 @@ pub async fn start(db_path: &str, name: &str) -> Result<db::Vm> {
         let api_socket = std::path::PathBuf::from(&vm.ch_api_socket);
         let vsock_socket = std::path::PathBuf::from(&vm.ch_vsock_socket);
 
-        let os_type = storage::OsType::from_str(&vm.os_type)
-            .unwrap_or_else(|_| storage::OsType::default());
+        let os_type =
+            storage::OsType::from_str(&vm.os_type).unwrap_or_else(|_| storage::OsType::default());
 
         let cfg = hypervisor::VmConfig {
             name: name.to_string(),
@@ -432,15 +430,28 @@ pub async fn restart(db_path: &str, name: &str) -> Result<db::Vm> {
     // Wait for the agent to come back up after the guest reboot.
     // The guest OS takes a few seconds to reboot; without this wait, any
     // operation immediately after restart (exec, status) would fail.
-    let vsock_socket = {
+    let (ip, vsock_socket) = {
         let conn = db::open(db_path)?;
         let vm = db::get_vm(&conn, name)?
             .with_context(|| format!("VM '{name}' vanished after reboot signal"))?;
-        std::path::PathBuf::from(vm.ch_vsock_socket)
+        (vm.ip.clone(), std::path::PathBuf::from(vm.ch_vsock_socket))
     };
     agent::wait_ready(&vsock_socket, Duration::from_secs(60))
         .await
         .context("agent did not come back after restart")?;
+
+    // Reconfigure guest networking — the ACPI reboot clears all runtime
+    // network state (ip addr, routes, resolv.conf) since the agent sets
+    // them ephemerally via `ip` commands rather than persisted config files.
+    info!("agent ready after restart, reconfiguring network at {ip}");
+    agent::configure_network(
+        &vsock_socket,
+        &format!("{ip}/16"),
+        "10.0.0.1",
+        vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()],
+    )
+    .await
+    .context("reconfigure guest network after restart")?;
 
     // Mark running again.
     let conn = db::open(db_path)?;
@@ -636,6 +647,7 @@ pub async fn copy(
     owner_id: Option<String>,
 ) -> Result<db::Vm> {
     validate_name(new_name)?;
+    let owner_id = normalize_owner_id(owner_id)?;
 
     let (ip, vsock_socket, cfg) = {
         let conn = db::open(db_path)?;
@@ -648,9 +660,7 @@ pub async fn copy(
         if db::get_vm(&conn, new_name)?.is_some() {
             anyhow::bail!("VM '{new_name}' already exists");
         }
-        if let Some(ref oid) = owner_id {
-            check_quota(&conn, oid, source.vcpus, source.memory_mb)?;
-        }
+        check_quota(&conn, &owner_id, source.vcpus, source.memory_mb)?;
 
         network::check_bridge().context("bridge check")?;
         hypervisor::ensure_run_dir()?;
@@ -689,7 +699,7 @@ pub async fn copy(
             // Inherit proxy settings and OS type from source VM.
             proxy_port: source.proxy_port,
             proxy_public: source.proxy_public,
-            owner_id: owner_id.clone(),
+            owner_id: Some(owner_id.clone()),
             host_id: Some("local".to_string()),
             os_type: source.os_type.clone(),
         };
@@ -974,7 +984,6 @@ pub async fn delete_snapshot(db_path: &str, vm_name: &str, snap_name: &str) -> R
 ///
 /// Looks up their plan limits and compares against live usage.
 /// Returns `Ok(())` if within limits, or a descriptive error message.
-/// Passes silently for admin VMs (no `owner_id`).
 pub fn check_quota(
     conn: &rusqlite::Connection,
     owner_id: &str,
@@ -1008,6 +1017,15 @@ pub fn check_quota(
         );
     }
     Ok(())
+}
+
+fn normalize_owner_id(owner_id: Option<String>) -> Result<String> {
+    let owner = owner_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("owner_id is required"))?;
+    Ok(owner.to_string())
 }
 
 fn validate_snapshot_name(name: &str) -> Result<()> {

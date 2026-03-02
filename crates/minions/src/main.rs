@@ -61,6 +61,9 @@ enum Commands {
         cpus: u32,
         #[arg(long, default_value_t = 1024)]
         memory: u32,
+        /// Required owner ID for the VM.
+        #[arg(long)]
+        owner_id: String,
         /// Operating system: ubuntu (default), fedora, nixos
         #[arg(long, default_value = "ubuntu")]
         os: String,
@@ -93,6 +96,9 @@ enum Commands {
         source: String,
         /// New VM name (auto-generated if omitted)
         new_name: Option<String>,
+        /// Required owner ID for the copied VM.
+        #[arg(long)]
+        owner_id: String,
     },
     /// Run a command inside a VM
     Exec {
@@ -476,7 +482,13 @@ async fn run_remote(
     let c = client::Client::new(host, api_key);
 
     match command {
-        Commands::Create { name, cpus, memory, os } => {
+        Commands::Create {
+            name,
+            cpus,
+            memory,
+            owner_id,
+            os,
+        } => {
             if !json {
                 println!("Creating VM '{name}' (os: {os}) via {host}…");
             }
@@ -485,6 +497,7 @@ async fn run_remote(
                     name,
                     cpus,
                     memory_mb: memory,
+                    owner_id,
                     os: Some(os),
                 })
                 .await?;
@@ -565,12 +578,16 @@ async fn run_remote(
             }
         }
 
-        Commands::Cp { source, new_name } => {
+        Commands::Cp {
+            source,
+            new_name,
+            owner_id,
+        } => {
             let new_name = resolve_copy_name(&source, new_name);
             if !json {
                 println!("Copying VM '{source}' → '{new_name}' via {host}…");
             }
-            let vm = c.copy_vm(&source, &new_name).await?;
+            let vm = c.copy_vm(&source, &new_name, &owner_id).await?;
             print_vm(VmJson::from(vm), json);
         }
 
@@ -661,7 +678,13 @@ async fn run_remote(
 
 async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> {
     match command {
-        Commands::Create { name, cpus, memory, os } => {
+        Commands::Create {
+            name,
+            cpus,
+            memory,
+            owner_id,
+            os,
+        } => {
             if !json {
                 println!("Creating VM '{name}' (os: {os})…");
             }
@@ -670,7 +693,16 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
             if ssh_pubkey.is_some() && !json {
                 println!("  (SSH public key found — key-based SSH will work)");
             }
-            let vm = vm::create_with_os(db_path, &name, cpus, memory, ssh_pubkey, None, os_type).await?;
+            let vm = vm::create_with_os(
+                db_path,
+                &name,
+                cpus,
+                memory,
+                ssh_pubkey,
+                Some(owner_id),
+                os_type,
+            )
+            .await?;
             print_vm(VmJson::from(vm), json);
         }
 
@@ -747,13 +779,17 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
             }
         }
 
-        Commands::Cp { source, new_name } => {
+        Commands::Cp {
+            source,
+            new_name,
+            owner_id,
+        } => {
             let new_name = resolve_copy_name(&source, new_name);
             if !json {
                 println!("Copying VM '{source}' → '{new_name}'…");
             }
             let ssh_pubkey = find_ssh_pubkey();
-            let vm = vm::copy(db_path, &source, &new_name, ssh_pubkey, None).await?;
+            let vm = vm::copy(db_path, &source, &new_name, ssh_pubkey, Some(owner_id)).await?;
             print_vm(VmJson::from(vm), json);
         }
 
