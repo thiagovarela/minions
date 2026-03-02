@@ -25,6 +25,7 @@ impl HostClient {
         memory_mb: u32,
         ssh_pubkey: Option<String>,
         owner_id: Option<String>,
+        os: String,
     ) -> Result<serde_json::Value> {
         #[derive(Serialize)]
         struct CreateRequest {
@@ -33,6 +34,7 @@ impl HostClient {
             memory_mb: u32,
             ssh_pubkey: Option<String>,
             owner_id: Option<String>,
+            os: String,
         }
 
         let req = CreateRequest {
@@ -41,6 +43,7 @@ impl HostClient {
             memory_mb,
             ssh_pubkey,
             owner_id,
+            os,
         };
 
         let resp = self

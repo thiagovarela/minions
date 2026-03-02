@@ -114,7 +114,7 @@ pub struct CreateRequest {
     /// SSH gateway user who will own this VM.
     /// Supplied by the SSH gateway; absent for direct admin API calls.
     pub owner_id: Option<String>,
-    /// Operating system: "ubuntu" (default) or "fedora".
+    /// Operating system: "ubuntu" (default), "fedora", or "nixos".
     #[serde(default = "default_os")]
     pub os: String,
 }

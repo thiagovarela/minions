@@ -51,7 +51,7 @@ This installs `minions`, `minions-agent`, `minions-node`, and `minions-vsock-cli
 
 ## 4. Download the guest kernel (Ubuntu/Fedora)
 
-Cloud Hypervisor boots an uncompressed `vmlinux` kernel directly — no bootloader or initramfs needed.
+Cloud Hypervisor boots an uncompressed `vmlinux` kernel directly — no bootloader needed. Ubuntu/Fedora VMs boot without initramfs; NixOS VMs use a matching initramfs (`initrd-nixos`).
 
 **For Ubuntu and Fedora VMs**, download the Cloud Hypervisor project kernel:
 
@@ -114,14 +114,15 @@ sudo ./scripts/build-nixos-image.sh
 
 This single script:
 1. Builds the NixOS VM configuration from `images/nixos/flake.nix`
-2. Extracts the matching `vmlinux` kernel from the NixOS build
+2. Extracts the matching `vmlinux` kernel and `initrd` from the NixOS build
 3. Copies the image to `/var/lib/minions/images/base-nixos.ext4`
 4. Copies the kernel to `/var/lib/minions/kernel/vmlinux-nixos`
-5. Injects the `minions-agent` binary into the image
+5. Copies the initramfs to `/var/lib/minions/kernel/initrd-nixos`
+6. Injects the `minions-agent` binary into the image
 
 **No separate bake-agent step is needed** — the agent service is defined in the NixOS configuration and the binary is injected during the build script.
 
-NixOS VMs use their own matched kernel (`vmlinux-nixos`), while Ubuntu/Fedora VMs share the Cloud Hypervisor kernel (`vmlinux`).
+NixOS VMs use their own matched kernel + initramfs (`vmlinux-nixos` + `initrd-nixos`), while Ubuntu/Fedora VMs share the Cloud Hypervisor kernel (`vmlinux`).
 
 ## 6. Bake the agent into the image (Ubuntu/Fedora only)
 
@@ -182,7 +183,8 @@ sudo minions destroy test
 /var/lib/minions/
 ├── kernel/
 │   ├── vmlinux               # Ubuntu/Fedora kernel (~46 MB)
-│   └── vmlinux-nixos         # NixOS kernel (if built)
+│   ├── vmlinux-nixos         # NixOS kernel (if built)
+│   └── initrd-nixos          # NixOS initramfs (if built)
 ├── images/
 │   ├── base-ubuntu.ext4      # Ubuntu rootfs (5 GB sparse, ~600 MB actual)
 │   ├── base-fedora.ext4      # Fedora rootfs (if built)
