@@ -8,10 +8,11 @@
 //! forwarded, and once both sides return 101 the two streams are spliced
 //! bidirectionally with zero protocol awareness.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::Response;
 use hyper_util::rt::TokioIo;
@@ -19,9 +20,12 @@ use subtle::ConstantTimeEq;
 use tracing::{debug, warn};
 
 use crate::auth::{
-    Sessions, clear_cookie, extract_token, login_page, redirect_to_login, safe_next, set_cookie,
+    LoginRateLimiter, Sessions, clear_cookie, extract_token, locked_out_page, login_page,
+    redirect_to_login, safe_next, set_cookie,
 };
+use crate::connection_limit::{ConnectionLimiter, connection_limit_response};
 use crate::db;
+use crate::rate_limit::{RateLimiter, rate_limit_response};
 
 // ── App state ─────────────────────────────────────────────────────────────────
 
@@ -42,11 +46,21 @@ pub struct AppState {
     pub acme_client: Arc<crate::tls::AcmeClient>,
     /// SNI resolver (for loading custom domain certs after provision).
     pub sni_resolver: Arc<crate::tls::SniResolver>,
+    /// Request rate limiter per IP.
+    pub rate_limiter: Arc<RateLimiter>,
+    /// Login rate limiter for brute force protection.
+    pub login_rate_limiter: Arc<LoginRateLimiter>,
+    /// Connection limiter.
+    pub connection_limiter: Arc<ConnectionLimiter>,
 }
 
 // ── Main handler ──────────────────────────────────────────────────────────────
 
-pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
+pub async fn handle(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+    req: Request,
+) -> Response {
     let host = req
         .headers()
         .get(header::HOST)
@@ -57,10 +71,29 @@ pub async fn handle(State(state): State<AppState>, req: Request) -> Response {
     // Strip port suffix from Host if present.
     let host = host.split(':').next().unwrap_or("");
 
+    // Extract client IP (respecting X-Forwarded-For, X-Real-IP headers).
+    let client_ip = crate::rate_limit::extract_client_ip(&req)
+        .unwrap_or_else(|| addr.ip());
+
+    // ── Connection limiting check ─────────────────────────────────────────────
+    let _conn_guard = match state.connection_limiter.acquire(client_ip) {
+        Some(guard) => guard,
+        None => {
+            warn!(ip = %client_ip, "connection limit exceeded");
+            return connection_limit_response();
+        }
+    };
+
+    // ── Rate limiting check ───────────────────────────────────────────────────
+    if !state.rate_limiter.check(client_ip) {
+        warn!(ip = %client_ip, "rate limit exceeded");
+        return rate_limit_response(state.rate_limiter.config.window_secs);
+    }
+
     // ── Internal /__minions/ routes ───────────────────────────────────────────
     let path = req.uri().path().to_string();
     if path.starts_with("/__minions/") {
-        return handle_internal(req, &state).await;
+        return handle_internal(req, client_ip, &state).await;
     }
 
     // ── Apex domain → forward to local dashboard ──────────────────────────────
@@ -344,16 +377,22 @@ async fn ws_upgrade(req: Request, vm_ip: &str, vm_port: u16, original_host: &str
 
 // ── Internal routes ───────────────────────────────────────────────────────────
 
-async fn handle_internal(req: Request, state: &AppState) -> Response {
+async fn handle_internal(req: Request, client_ip: std::net::IpAddr, state: &AppState) -> Response {
     let path = req.uri().path();
     match (req.method().clone(), path) {
         (Method::GET, "/__minions/login") => {
+            // Check if IP is locked out before showing login page
+            if let Err(retry_after) = state.login_rate_limiter.check(client_ip) {
+                warn!(ip = %client_ip, "login page blocked due to rate limit");
+                return locked_out_page(retry_after);
+            }
+
             let next_raw = query_param(req.uri(), "next").unwrap_or_else(|| "/".to_string());
             // Validate before embedding in the login form to prevent open redirect.
             let next = safe_next(&next_raw).to_string();
             login_page(&next, false)
         }
-        (Method::POST, "/__minions/login") => handle_login_post(req, state).await,
+        (Method::POST, "/__minions/login") => handle_login_post(req, client_ip, state).await,
         (Method::GET, "/__minions/logout") => {
             if let Some(token) = extract_token(req.headers()) {
                 state.sessions.revoke(&token);
@@ -369,7 +408,17 @@ async fn handle_internal(req: Request, state: &AppState) -> Response {
     }
 }
 
-async fn handle_login_post(req: Request, state: &AppState) -> Response {
+async fn handle_login_post(
+    req: Request,
+    client_ip: std::net::IpAddr,
+    state: &AppState,
+) -> Response {
+    // Check rate limit before processing login
+    if let Err(retry_after) = state.login_rate_limiter.check(client_ip) {
+        warn!(ip = %client_ip, "login blocked due to rate limit");
+        return locked_out_page(retry_after);
+    }
+
     // Parse form body.
     let bytes = match axum::body::to_bytes(req.into_body(), 8192).await {
         Ok(b) => b,
@@ -386,9 +435,15 @@ async fn handle_login_post(req: Request, state: &AppState) -> Response {
     let expected = state.api_key.as_deref().map(|k| k.as_ref()).unwrap_or("");
     // Use constant-time comparison to prevent timing side-channel attacks.
     let password_ok = expected.is_empty() || password.as_bytes().ct_eq(expected.as_bytes()).into();
+
     if !password_ok {
+        // Record failed login attempt
+        state.login_rate_limiter.record_failure(client_ip);
         return login_page(next, true);
     }
+
+    // Record successful login (clears failure streak)
+    state.login_rate_limiter.record_success(client_ip);
 
     let token = state.sessions.create();
     Response::builder()
@@ -501,6 +556,9 @@ async fn forward(
         }
     }
 
+    // Add security headers.
+    resp = add_security_headers(resp);
+
     // Stream the response body back to the client.
     let body = Body::from_stream(upstream_resp.bytes_stream());
     resp.body(body)
@@ -508,6 +566,20 @@ async fn forward(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Add security headers to a response builder.
+pub fn add_security_headers(
+    builder: axum::http::response::Builder,
+) -> axum::http::response::Builder {
+    builder
+        .header("X-Content-Type-Options", "nosniff")
+        .header("X-Frame-Options", "DENY")
+        .header("Referrer-Policy", "strict-origin-when-cross-origin")
+        .header(
+            "Permissions-Policy",
+            "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
+        )
+}
 
 /// Extract the subdomain from `host` given a `base_domain`.
 /// e.g. host="myvm.miniclankers.com", domain="miniclankers.com" → Some("myvm")
@@ -562,11 +634,13 @@ pub fn error_response(status: StatusCode, message: &str) -> Response {
         code = status.as_u16(),
         message = message,
     );
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .body(Body::from(html))
-        .unwrap()
+    add_security_headers(
+        Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8"),
+    )
+    .body(Body::from(html))
+    .unwrap()
 }
 
 // ── ACME HTTP-01 Challenge Handler ────────────────────────────────────────────
@@ -583,10 +657,11 @@ pub async fn acme_challenge(State(state): State<AppState>, Path(token): Path<Str
             .body(Body::from(response_text))
             .unwrap()
     } else {
-        Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::from("challenge not found"))
-            .unwrap()
+        add_security_headers(
+            Response::builder().status(StatusCode::NOT_FOUND)
+        )
+        .body(Body::from("challenge not found"))
+        .unwrap()
     }
 }
 
@@ -606,9 +681,11 @@ pub async fn http_redirect(req: Request) -> Response {
         .unwrap_or("/");
     let location = format!("https://{}{}", host, path_and_query);
 
-    Response::builder()
-        .status(StatusCode::MOVED_PERMANENTLY)
-        .header(header::LOCATION, location)
-        .body(Body::from("Redirecting to HTTPS"))
-        .unwrap()
+    add_security_headers(
+        Response::builder()
+            .status(StatusCode::MOVED_PERMANENTLY)
+            .header(header::LOCATION, location),
+    )
+    .body(Body::from("Redirecting to HTTPS"))
+    .unwrap()
 }

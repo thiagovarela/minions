@@ -21,8 +21,10 @@ use axum::{Router, routing::any, routing::get};
 use tracing::{info, warn};
 
 pub mod auth;
+pub mod connection_limit;
 pub mod db;
 pub mod proxy;
+pub mod rate_limit;
 pub mod tls;
 // Simplified TLS with manual cert provisioning (deprecated, kept for reference)
 #[allow(dead_code)]
@@ -120,6 +122,31 @@ pub async fn serve(config: ProxyConfig, https_bind: &str, http_bind: &str) -> Re
         .with_no_client_auth()
         .with_cert_resolver(sni_resolver.clone());
 
+    // Build rate limiters.
+    let rate_limit_config = rate_limit::RateLimitConfig::from_env();
+    if rate_limit_config.enabled {
+        info!(
+            "Rate limiting enabled: {} requests per {} seconds",
+            rate_limit_config.max_requests, rate_limit_config.window_secs
+        );
+    } else {
+        info!("Rate limiting disabled");
+    }
+    let rate_limiter = Arc::new(rate_limit::RateLimiter::new(rate_limit_config));
+    let login_rate_limiter = Arc::new(auth::LoginRateLimiter::new());
+
+    // Build connection limiter.
+    let conn_limit_config = connection_limit::ConnectionLimitConfig::from_env();
+    if conn_limit_config.enabled {
+        info!(
+            "Connection limiting enabled: max {} total, {} per IP",
+            conn_limit_config.max_total, conn_limit_config.max_per_ip
+        );
+    } else {
+        info!("Connection limiting disabled");
+    }
+    let connection_limiter = Arc::new(connection_limit::ConnectionLimiter::new(conn_limit_config));
+
     // Build shared app state.
     let state = AppState {
         db_path: Arc::new(config.db_path.clone()),
@@ -135,6 +162,9 @@ pub async fn serve(config: ProxyConfig, https_bind: &str, http_bind: &str) -> Re
         acme_challenges: challenges.clone(),
         acme_client: acme.clone(),
         sni_resolver: sni_resolver.clone(),
+        rate_limiter,
+        login_rate_limiter,
+        connection_limiter,
     };
 
     // HTTPS app (port 443) — main proxy.
@@ -159,7 +189,7 @@ pub async fn serve(config: ProxyConfig, https_bind: &str, http_bind: &str) -> Re
             https_bind_clone.parse().expect("parse https bind addr"),
             axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls_config)),
         )
-        .serve(https_app.into_make_service())
+        .serve(https_app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .await
         .expect("HTTPS server error");
     });
@@ -174,9 +204,12 @@ pub async fn serve(config: ProxyConfig, https_bind: &str, http_bind: &str) -> Re
         let listener = tokio::net::TcpListener::bind(&http_bind_clone)
             .await
             .expect("bind HTTP listener");
-        axum::serve(listener, http_app)
-            .await
-            .expect("HTTP server error");
+        axum::serve(
+            listener,
+            http_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("HTTP server error");
     });
 
     // Wait for both tasks (one will run forever unless error).
