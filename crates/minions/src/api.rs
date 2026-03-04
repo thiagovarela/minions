@@ -38,15 +38,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/ssh-keys", post(add_ssh_key))
         .route("/api/auth/ssh-keys", get(list_ssh_keys))
         .route("/api/auth/ssh-keys/{id}", delete(remove_ssh_key))
-        .layer(middleware::from_fn_with_state(
-            auth_config.clone(),
-            auth::require_auth,
-        ));
-
-    let mut router = Router::new()
-        // Auth routes
-        .merge(public_router)
-        .merge(auth_router)
         // VM routes
         .route("/api/vms", post(create_vm))
         .route("/api/vms", get(list_vms))
@@ -83,13 +74,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/billing/plans", get(billing_plans))
         .route("/api/billing/subscription", get(billing_subscription))
         .route("/api/billing/plan", post(billing_set_plan))
-        // Per-VM metrics (authenticated)
+        // Per-VM metrics
         .route("/api/vms/{name}/metrics", get(vm_metrics))
-        // Add authentication middleware
         .layer(middleware::from_fn_with_state(
             auth_config,
             auth::require_auth,
         ));
+
+    let mut router = Router::new()
+        // Public routes (no auth)
+        .merge(public_router)
+        // Authenticated routes
+        .merge(auth_router);
 
     // CORS: only enable if explicit origins are configured via MINIONS_CORS_ORIGINS.
     // Default is no CORS to prevent cross-site API access.
