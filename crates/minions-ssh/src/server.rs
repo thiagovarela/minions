@@ -6,7 +6,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use russh::server::{Auth, Handler, Msg, Session};
 use russh::{Channel, ChannelId, CryptoVec, Pty};
-use russh_keys::PublicKeyBase64;
 use russh_keys::key::PublicKey;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, info};
@@ -23,23 +22,12 @@ pub type ServerHandle = russh::server::Handle;
 enum SessionMode {
     /// Not yet determined (between auth and first channel request).
     Pending,
-    /// Collecting the user's email for first-time registration.
-    Registration {
-        after: AfterRegistration,
-        email_buf: String,
-    },
-    /// Registered user in interactive command mode.
+    /// Authenticated user in interactive command mode.
     Command { line_buf: String },
     /// Proxy mode: stdin bytes go to the VM via this writer.
     Proxy {
         vm_stdin: tokio::io::WriteHalf<russh::ChannelStream<russh::client::Msg>>,
     },
-}
-
-#[derive(Clone)]
-enum AfterRegistration {
-    Command,
-    Proxy { vm_name: String },
 }
 
 // ── PTY params (stored during pty_request, forwarded on shell/exec) ───────────
@@ -102,10 +90,6 @@ impl ConnectionHandler {
 
     fn fingerprint(key: &PublicKey) -> String {
         key.fingerprint()
-    }
-
-    fn key_to_str(key: &PublicKey) -> String {
-        format!("{} {}", key.name(), key.public_key_base64())
     }
 
     async fn send(&self, bytes: impl Into<Vec<u8>>) {
@@ -193,86 +177,6 @@ impl ConnectionHandler {
         self.mode = SessionMode::Proxy { vm_stdin };
         Ok(())
     }
-
-    async fn complete_registration(
-        &mut self,
-        email: String,
-        after: AfterRegistration,
-        session: &mut Session,
-        channel: ChannelId,
-    ) -> Result<()> {
-        session.data(channel, CryptoVec::from(b"\r\n".to_vec()));
-
-        if !email.contains('@') || email.len() < 5 {
-            session.data(
-                channel,
-                CryptoVec::from(b"Invalid email. Try again: ".to_vec()),
-            );
-            if let SessionMode::Registration { email_buf, .. } = &mut self.mode {
-                email_buf.clear();
-            }
-            return Ok(());
-        }
-
-        let key = self.pending_key.clone().expect("pending key set");
-        let fp = Self::fingerprint(&key);
-        let key_str = Self::key_to_str(&key);
-
-        let conn = crate::db::open(&self.config.db_path)?;
-        match crate::db::create_user(&conn, &email, &key_str, &fp) {
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("UNIQUE") {
-                    session.data(
-                        channel,
-                        CryptoVec::from(
-                            "Email already registered — use the key that belongs to that account.\r\n"
-                                .as_bytes()
-                                .to_vec(),
-                        ),
-                    );
-                } else {
-                    session.data(
-                        channel,
-                        CryptoVec::from(format!("Registration error: {}\r\n", msg).into_bytes()),
-                    );
-                }
-                return Ok(());
-            }
-            Ok(user) => {
-                self.authed_user = Some(user.clone());
-                info!(email = %user.email, peer = ?self.peer_addr, "new user registered");
-                session.data(
-                    channel,
-                    CryptoVec::from(
-                        format!("✓ Registered! Welcome, {}.\r\n\r\n", user.email).into_bytes(),
-                    ),
-                );
-            }
-        }
-
-        match after {
-            AfterRegistration::Command => {
-                self.mode = SessionMode::Command {
-                    line_buf: String::new(),
-                };
-                session.data(
-                    channel,
-                    CryptoVec::from(b"Type 'help' for available commands.\r\n\r\n$ ".to_vec()),
-                );
-            }
-            AfterRegistration::Proxy { vm_name } => match self.start_proxy_shell(&vm_name).await {
-                Ok(()) => {}
-                Err(e) => {
-                    session.data(
-                        channel,
-                        CryptoVec::from(format!("error: {}\r\n", e).into_bytes()),
-                    );
-                }
-            },
-        }
-        Ok(())
-    }
 }
 
 // ── russh Handler impl ────────────────────────────────────────────────────────
@@ -295,11 +199,13 @@ impl Handler for ConnectionHandler {
 
         if let Some(ref u) = self.authed_user {
             info!(peer = ?self.peer_addr, email = %u.email, "authenticated");
+            Ok(Auth::Accept)
         } else {
-            info!(peer = ?self.peer_addr, ssh_user = %user, "unknown key — will prompt for registration");
+            info!(peer = ?self.peer_addr, ssh_user = %user, "unknown key — rejected");
+            Ok(Auth::Reject {
+                proceed_with_methods: None,
+            })
         }
-
-        Ok(Auth::Accept)
     }
 
     async fn channel_open_session(
@@ -345,25 +251,18 @@ impl Handler for ConnectionHandler {
 
         let is_proxy = self.ssh_username != self.config.command_user;
 
-        // Unregistered user → prompt for email.
+        // This should not happen since unknown keys are rejected at auth time,
+        // but handle it gracefully just in case.
         if self.authed_user.is_none() {
-            let after = if is_proxy {
-                AfterRegistration::Proxy {
-                    vm_name: self.ssh_username.clone(),
-                }
-            } else {
-                AfterRegistration::Command
-            };
-            self.mode = SessionMode::Registration {
-                after,
-                email_buf: String::new(),
-            };
             session.data(
                 channel,
                 CryptoVec::from(
-                    b"Welcome to MINICLANKERS.COM\r\n\r\nEnter your email to register: ".to_vec(),
+                    b"Authentication failed. Register at https://miniclankers.com and add your SSH key.\r\n".to_vec(),
                 ),
             );
+            session.exit_status_request(channel, 1);
+            session.eof(channel);
+            session.close(channel);
             return Ok(());
         }
 
@@ -398,9 +297,9 @@ impl Handler for ConnectionHandler {
         session.channel_success(channel);
         let cmd_str = String::from_utf8_lossy(data).to_string();
 
-        // Unregistered user — must register interactively first.
+        // This should not happen since unknown keys are rejected at auth time.
         if self.authed_user.is_none() {
-            let msg = "Register first: ssh minions@ssh.miniclankers.com\r\n";
+            let msg = "Authentication failed. Register at https://miniclankers.com and add your SSH key.\r\n";
             let _ = session.data(channel, CryptoVec::from(msg.as_bytes().to_vec()));
             session.exit_status_request(channel, 1);
             session.eof(channel);
@@ -437,44 +336,6 @@ impl Handler for ConnectionHandler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // ── Registration: collect email ───────────────────────────────────────
-        // Inner block releases the mutable borrow before calling complete_registration.
-        let reg_action: Option<(String, AfterRegistration)> = {
-            if let SessionMode::Registration { email_buf, after } = &mut self.mode {
-                let mut action = None;
-                for &b in data {
-                    match b {
-                        b'\r' | b'\n' => {
-                            let email = email_buf.trim().to_lowercase();
-                            action = Some((email, after.clone()));
-                            break;
-                        }
-                        0x7f | 0x08 => {
-                            if !email_buf.is_empty() {
-                                email_buf.pop();
-                                session.data(channel, CryptoVec::from(b"\x08 \x08".to_vec()));
-                            }
-                        }
-                        c => {
-                            email_buf.push(c as char);
-                            session.data(channel, CryptoVec::from(vec![c]));
-                        }
-                    }
-                }
-                action
-            } else {
-                None
-            }
-        }; // ← mutable borrow released here
-        if let Some((email, after)) = reg_action {
-            self.complete_registration(email, after, session, channel)
-                .await?;
-            return Ok(());
-        }
-        if matches!(self.mode, SessionMode::Registration { .. }) {
-            return Ok(()); // still collecting input, no newline yet
-        }
-
         // ── Proxy: forward stdin to VM ────────────────────────────────────────
         if let SessionMode::Proxy { vm_stdin } = &mut self.mode {
             if let Err(e) = vm_stdin.write_all(data).await {
