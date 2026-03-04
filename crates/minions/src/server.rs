@@ -106,6 +106,7 @@ pub async fn serve(
     proxy_bind: Option<String>,
     http_bind: Option<String>,
     domain: Option<String>,
+    vm_domain: Option<String>,
     public_ip: Option<String>,
     acme_email: Option<String>,
     acme_staging: bool,
@@ -180,6 +181,9 @@ pub async fn serve(
 
     info!("minions daemon listening on http://{bind}");
 
+    // Compute VM domain (used by both SSH and proxy)
+    let vm_domain_val = vm_domain.or_else(|| domain.clone()).unwrap_or_else(|| "localhost".to_string());
+
     // ── SSH gateway (optional) ─────────────────────────────────────────────────
     if let Some(ssh_bind_addr) = ssh_bind {
         let (host_key, proxy_key, proxy_pubkey) =
@@ -192,12 +196,15 @@ pub async fn serve(
         let port = bind.rsplit(':').next().unwrap_or("3000");
         let api_base_url = format!("http://127.0.0.1:{}", port);
 
+        let dashboard_domain_val = domain.clone().unwrap_or_else(|| vm_domain_val.clone());
         let gateway_config = minions_ssh::GatewayConfig {
             db_path: db_path.clone(),
             command_user: "minions".to_string(),
             api_base_url,
             api_key: api_key.clone(),
             proxy_key: std::sync::Arc::new(proxy_key),
+            dashboard_domain: dashboard_domain_val,
+            vm_domain: vm_domain_val.clone(),
         };
 
         let ssh_bind_clone = ssh_bind_addr.clone();
@@ -214,17 +221,19 @@ pub async fn serve(
 
     // ── HTTPS reverse proxy (optional) ────────────────────────────────────────
     if let Some(https_addr) = proxy_bind {
-        let base_domain = domain.clone().unwrap_or_else(|| {
+        let dashboard_domain = domain.clone().unwrap_or_else(|| {
             warn!("⚠️  --proxy-bind set but --domain not provided; defaulting to 'localhost'");
             "localhost".to_string()
         });
+
+        // Use pre-computed VM domain (already defaults to dashboard domain if not specified)
 
         let http_addr = http_bind
             .clone()
             .unwrap_or_else(|| "0.0.0.0:80".to_string());
         let email = acme_email.clone().unwrap_or_else(|| {
-            warn!("⚠️  --acme-email not set; using noreply@{}", base_domain);
-            format!("noreply@{}", base_domain)
+            warn!("⚠️  --acme-email not set; using noreply@{}", dashboard_domain);
+            format!("noreply@{}", dashboard_domain)
         });
 
         let cf_dns_token = std::env::var("MINIONS_CF_DNS_TOKEN").ok();
@@ -235,7 +244,8 @@ pub async fn serve(
 
         let proxy_config = minions_proxy::ProxyConfig {
             db_path: db_path.clone(),
-            domain: base_domain.clone(),
+            dashboard_domain: dashboard_domain.clone(),
+            vm_domain: vm_domain_val.clone(),
             api_key: api_key.clone(),
             certs_dir: "/var/lib/minions/certs".to_string(),
             cf_dns_token,
@@ -245,8 +255,8 @@ pub async fn serve(
         };
 
         info!(
-            "HTTPS proxy starting on https://{} + http://{} (domain: {})",
-            https_addr, http_addr, base_domain
+            "HTTPS proxy starting on https://{} + http://{} (dashboard: {}, VMs: {})",
+            https_addr, http_addr, dashboard_domain, vm_domain_val
         );
         tokio::spawn(async move {
             if let Err(e) = minions_proxy::serve(proxy_config, &https_addr, &http_addr).await {

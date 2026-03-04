@@ -472,17 +472,17 @@ async fn check_owns<'a>(api: &ApiClient, name: &str, user: &User) -> Result<VmIn
 
 /// Execute a command string on behalf of `user`, returning output to send
 /// back to the SSH client. Returns `(output, exit_code)`.
-pub async fn run(cmd_str: &str, user: &User, api: &ApiClient, db_path: &str) -> (String, u32) {
-    match execute(cmd_str, user, api, db_path).await {
+pub async fn run(cmd_str: &str, user: &User, api: &ApiClient, db_path: &str, vm_domain: &str) -> (String, u32) {
+    match execute(cmd_str, user, api, db_path, vm_domain).await {
         Ok(output) => (output, 0),
         Err(e) => (format!("error: {}\r\n", e), 1),
     }
 }
 
-async fn execute(cmd_str: &str, user: &User, api: &ApiClient, db_path: &str) -> Result<String> {
+async fn execute(cmd_str: &str, user: &User, api: &ApiClient, db_path: &str, vm_domain: &str) -> Result<String> {
     let parts: Vec<&str> = cmd_str.split_whitespace().collect();
     if parts.is_empty() {
-        return Ok(help());
+        return Ok(help(vm_domain));
     }
 
     match parts[0] {
@@ -742,7 +742,7 @@ async fn execute(cmd_str: &str, user: &User, api: &ApiClient, db_path: &str) -> 
             check_owns(api, vm_name, user).await?;
             api.expose_vm(vm_name, port).await?;
             Ok(format!(
-                "✓ VM '{}' exposed on proxy port {}\r\n  URL: https://{}.miniclankers.com\r\n",
+                "✓ VM '{}' exposed on proxy port {}\r\n  URL: https://{}.{vm_domain}\r\n",
                 vm_name, port, vm_name
             ))
         }
@@ -941,7 +941,7 @@ async fn execute(cmd_str: &str, user: &User, api: &ApiClient, db_path: &str) -> 
                         Ok(d) => {
                             let status = if d.verified { "verified" } else { "pending" };
                             Ok(format!(
-                                "✓ Custom domain '{}' added to VM '{}' ({})\r\n  Make sure your DNS has a CNAME pointing to {}.miniclankers.com\r\n  Access: https://{}\r\n",
+                                "✓ Custom domain '{}' added to VM '{}' ({})\r\n  Make sure your DNS has a CNAME pointing to {}.{vm_domain}\r\n  Access: https://{}\r\n",
                                 d.domain, d.vm_name, status, vm_name, d.domain
                             ))
                         }
@@ -985,7 +985,7 @@ async fn execute(cmd_str: &str, user: &User, api: &ApiClient, db_path: &str) -> 
         }
 
         // ── help ───────────────────────────────────────────────────────────
-        "help" | "--help" | "-h" => Ok(help()),
+        "help" | "--help" | "-h" => Ok(help(vm_domain)),
 
         // ── unknown ────────────────────────────────────────────────────────
         unknown => Ok(format!(
@@ -995,7 +995,7 @@ async fn execute(cmd_str: &str, user: &User, api: &ApiClient, db_path: &str) -> 
     }
 }
 
-fn help() -> String {
+fn help(vm_domain: &str) -> String {
     [
         "MINICLANKERS.COM — VM management",
         "",
@@ -1030,8 +1030,8 @@ fn help() -> String {
         "",
         "  help                            show this help",
         "",
-        "  SSH into a VM:  ssh -p 2222 <vmname>@ssh.miniclankers.com",
-        "  Web access:     https://<vmname>.miniclankers.com",
+        &format!("  SSH into a VM:  ssh -p 2222 <vmname>@ssh.{vm_domain}"),
+        &format!("  Web access:     https://<vmname>.{vm_domain}"),
         "",
     ]
     .join("\r\n")

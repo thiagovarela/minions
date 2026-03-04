@@ -254,11 +254,10 @@ impl Handler for ConnectionHandler {
         // This should not happen since unknown keys are rejected at auth time,
         // but handle it gracefully just in case.
         if self.authed_user.is_none() {
+            let msg = format!("Authentication failed. Register at https://{} and add your SSH key.\r\n", self.config.dashboard_domain);
             session.data(
                 channel,
-                CryptoVec::from(
-                    b"Authentication failed. Register at https://miniclankers.com and add your SSH key.\r\n".to_vec(),
-                ),
+                CryptoVec::from(msg.into_bytes()),
             );
             session.exit_status_request(channel, 1);
             session.eof(channel);
@@ -299,8 +298,8 @@ impl Handler for ConnectionHandler {
 
         // This should not happen since unknown keys are rejected at auth time.
         if self.authed_user.is_none() {
-            let msg = "Authentication failed. Register at https://miniclankers.com and add your SSH key.\r\n";
-            let _ = session.data(channel, CryptoVec::from(msg.as_bytes().to_vec()));
+            let msg = format!("Authentication failed. Register at https://{} and add your SSH key.\r\n", self.config.dashboard_domain);
+            let _ = session.data(channel, CryptoVec::from(msg.into_bytes()));
             session.exit_status_request(channel, 1);
             session.eof(channel);
             session.close(channel);
@@ -322,7 +321,8 @@ impl Handler for ConnectionHandler {
         // Command mode exec: run command, return output, exit.
         let api = self.api();
         let db_path = self.config.db_path.clone();
-        let (output, code) = crate::commands::run(&cmd_str, &user, &api, &db_path).await;
+        let vm_domain = self.config.vm_domain.clone();
+        let (output, code) = crate::commands::run(&cmd_str, &user, &api, &db_path, &vm_domain).await;
         session.data(channel, CryptoVec::from(output.into_bytes()));
         session.exit_status_request(channel, code);
         session.eof(channel);
@@ -387,8 +387,9 @@ impl Handler for ConnectionHandler {
             if let Some(user) = self.authed_user.clone() {
                 let api = self.api();
                 let db_path = self.config.db_path.clone();
+                let vm_domain = self.config.vm_domain.clone();
                 for cmd in ready_cmds {
-                    let (output, _) = crate::commands::run(&cmd, &user, &api, &db_path).await;
+                    let (output, _) = crate::commands::run(&cmd, &user, &api, &db_path, &vm_domain).await;
                     session.data(channel, CryptoVec::from(output.into_bytes()));
                     session.data(channel, CryptoVec::from(b"$ ".to_vec()));
                 }

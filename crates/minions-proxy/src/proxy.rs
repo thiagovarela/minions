@@ -32,8 +32,10 @@ use crate::rate_limit::{RateLimiter, rate_limit_response};
 #[derive(Clone)]
 pub struct AppState {
     pub db_path: Arc<String>,
-    /// Base domain, e.g. "miniclankers.com".
-    pub domain: Arc<String>,
+    /// Dashboard domain, e.g. "miniclankers.com" — apex forwards to dashboard.
+    pub dashboard_domain: Arc<String>,
+    /// VM domain, e.g. "miniclankers.xyz" — subdomains route to VMs.
+    pub vm_domain: Arc<String>,
     /// Optional API key used as the proxy password.
     pub api_key: Option<Arc<String>>,
     /// Host public IP (for custom domain DNS verification).
@@ -97,7 +99,7 @@ pub async fn handle(
     }
 
     // ── Apex domain → forward to local dashboard ──────────────────────────────
-    if host == state.domain.as_str() {
+    if host == state.dashboard_domain.as_str() {
         debug!(host, "apex domain — forwarding to local dashboard");
         return forward(req, "http://127.0.0.1:3000", host, &state.http_client).await;
     }
@@ -116,8 +118,8 @@ pub async fn handle(
         return forward_to_vm(req, &vm, host, &state).await;
     }
 
-    // ── Extract subdomain (*.miniclankers.com) ────────────────────────────────
-    let subdomain = match extract_subdomain(host, &state.domain) {
+    // ── Extract subdomain (*.vm_domain) ───────────────────────────────────────
+    let subdomain = match extract_subdomain(host, &state.vm_domain) {
         Some(s) => s,
         None => return error_response(StatusCode::NOT_FOUND, "Not found"),
     };

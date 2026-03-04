@@ -335,6 +335,7 @@ ExecStart=/usr/local/bin/minions serve \
     --proxy-bind 0.0.0.0:443 \
     --http-bind 0.0.0.0:80 \
     --domain miniclankers.com \
+    --vm-domain miniclankers.xyz \
     --acme-email admin@miniclankers.com
 EnvironmentFile=-/etc/minions/env
 Restart=always

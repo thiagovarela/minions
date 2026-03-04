@@ -129,6 +129,9 @@ enum Commands {
         /// Base domain for the proxy (e.g. miniclankers.com)
         #[arg(long)]
         domain: Option<String>,
+        /// Domain for VM subdomains (e.g. miniclankers.xyz). Defaults to --domain if not set.
+        #[arg(long)]
+        vm_domain: Option<String>,
         /// Public IP address of this host (for custom domain verification)
         #[arg(long)]
         public_ip: Option<String>,
@@ -432,6 +435,7 @@ async fn main() -> Result<()> {
             proxy_bind,
             http_bind,
             domain,
+            vm_domain,
             public_ip,
             acme_email,
             acme_staging,
@@ -445,6 +449,7 @@ async fn main() -> Result<()> {
                 proxy_bind.clone(),
                 http_bind.clone(),
                 domain.clone(),
+                vm_domain.clone(),
                 public_ip.clone(),
                 acme_email.clone(),
                 *acme_staging,

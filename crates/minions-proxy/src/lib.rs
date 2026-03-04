@@ -41,8 +41,10 @@ pub type ChallengeMap = std::sync::Arc<dashmap::DashMap<String, String>>;
 pub struct ProxyConfig {
     /// Path to the shared SQLite DB.
     pub db_path: String,
-    /// Base domain, e.g. "miniclankers.com".
-    pub domain: String,
+    /// Dashboard domain, e.g. "miniclankers.com" — apex domain forwards to dashboard.
+    pub dashboard_domain: String,
+    /// VM domain, e.g. "miniclankers.xyz" — subdomains route to VMs.
+    pub vm_domain: String,
     /// Optional API key — used as the proxy password for private VMs.
     pub api_key: Option<String>,
     /// Certificate storage directory (default: /var/lib/minions/certs).
@@ -88,10 +90,10 @@ pub async fn serve(config: ProxyConfig, https_bind: &str, http_bind: &str) -> Re
     );
 
     // Provision wildcard cert for *.miniclankers.com if missing or expired.
-    let wildcard = format!("*.{}", config.domain);
+    let wildcard = format!("*.{}", config.vm_domain);
     if tls::CertStore::new(&config.certs_dir).needs_renewal(&wildcard) {
         info!(domain = %wildcard, "provisioning wildcard certificate");
-        acme.provision_dns01_wildcard(&config.domain)
+        acme.provision_dns01_wildcard(&config.vm_domain)
             .await
             .context("provision wildcard certificate")?;
     } else {
@@ -100,7 +102,7 @@ pub async fn serve(config: ProxyConfig, https_bind: &str, http_bind: &str) -> Re
 
     // Build SNI resolver.
     let sni_resolver = Arc::new(tls::SniResolver::new(
-        config.domain.clone(),
+        config.vm_domain.clone(),
         &config.certs_dir,
     ));
 
@@ -113,7 +115,7 @@ pub async fn serve(config: ProxyConfig, https_bind: &str, http_bind: &str) -> Re
     tls::spawn_renewal_task(
         acme.clone(),
         sni_resolver.clone(),
-        config.domain.clone(),
+        config.vm_domain.clone(),
         config.db_path.clone(),
     );
 
@@ -150,7 +152,8 @@ pub async fn serve(config: ProxyConfig, https_bind: &str, http_bind: &str) -> Re
     // Build shared app state.
     let state = AppState {
         db_path: Arc::new(config.db_path.clone()),
-        domain: Arc::new(config.domain.clone()),
+        dashboard_domain: Arc::new(config.dashboard_domain.clone()),
+        vm_domain: Arc::new(config.vm_domain.clone()),
         api_key: config.api_key.map(Arc::new),
         public_ip: config.public_ip.map(Arc::new),
         sessions: auth::Sessions::new(),

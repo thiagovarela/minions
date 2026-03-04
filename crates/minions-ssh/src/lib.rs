@@ -37,6 +37,10 @@ pub struct GatewayConfig {
     pub api_key: Option<String>,
     /// Gateway proxy key used to authenticate to VMs.
     pub proxy_key: Arc<KeyPair>,
+    /// Dashboard domain for registration links (e.g. "miniclankers.com").
+    pub dashboard_domain: String,
+    /// VM domain for generating URLs (e.g. "miniclankers.xyz").
+    pub vm_domain: String,
 }
 
 // ── Key paths ─────────────────────────────────────────────────────────────────
