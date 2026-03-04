@@ -121,7 +121,7 @@ pub async fn serve(
         info!("✓ API authentication enabled");
     }
 
-    let auth = auth::AuthConfig::new(api_key.clone());
+    let auth = auth::AuthConfig::new(api_key.clone(), db_path.clone());
 
     // ── CORS origins ──────────────────────────────────────────────────────────
     let cors_origins: Vec<String> = std::env::var("MINIONS_CORS_ORIGINS")

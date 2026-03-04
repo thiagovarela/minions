@@ -6,6 +6,38 @@ use rusqlite::{Connection, params};
 use std::path::Path;
 use uuid::Uuid;
 
+/// Compute the fingerprint of an SSH public key.
+/// Accepts keys in the format "ssh-ed25519 AAA... comment" or "ssh-rsa AAA... comment".
+/// Returns the SHA-256 fingerprint in the format "SHA256:xxxx...".
+pub fn fingerprint(public_key: &str) -> Result<String> {
+    use base64::{Engine as _, engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}};
+    use sha2::{Digest, Sha256};
+
+    // Parse the public key string: "type base64-data comment"
+    let parts: Vec<&str> = public_key.trim().split_whitespace().collect();
+    if parts.len() < 2 {
+        anyhow::bail!("invalid SSH public key format: expected 'type base64-data [comment]'");
+    }
+
+    let key_type = parts[0];
+    let key_data = parts[1];
+
+    // Validate key type
+    if !key_type.starts_with("ssh-") && !key_type.starts_with("ecdsa-") {
+        anyhow::bail!("unsupported SSH key type: {}", key_type);
+    }
+
+    // Decode base64 key data
+    let decoded = STANDARD.decode(key_data)
+        .map_err(|e| anyhow::anyhow!("invalid base64 in SSH key: {}", e))?;
+
+    // Compute SHA-256 fingerprint
+    let hash = Sha256::digest(&decoded);
+    let fingerprint = URL_SAFE_NO_PAD.encode(&hash);
+
+    Ok(format!("SHA256:{}", fingerprint))
+}
+
 pub const DB_PATH: &str = "/var/lib/minions/state.db";
 
 /// Represents a VM record in the database.
@@ -54,6 +86,61 @@ pub struct Host {
     pub available_disk_gb: u32,
     pub last_heartbeat: Option<String>,
     pub created_at: String,
+}
+
+/// Represents a user account in the database.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct User {
+    pub id: String,
+    pub email: String,
+    pub name: Option<String>,
+    pub google_id: Option<String>,
+    pub created_at: String,
+}
+
+/// Represents an API token for a user.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ApiToken {
+    pub id: String,
+    pub user_id: String,
+    pub name: String,
+    pub created_at: String,
+    pub last_used: Option<String>,
+    // token_hash is intentionally excluded from serialization
+}
+
+/// Represents an SSH public key for a user.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SshKey {
+    pub id: String,
+    pub user_id: String,
+    pub public_key: String,
+    pub fingerprint: String,
+    pub name: String,
+    pub created_at: String,
+}
+
+/// Generate a new API token.
+/// Returns (raw_token, token_hash) where raw_token is the value to show once,
+/// and token_hash is the SHA-256 hex digest to store in the database.
+pub fn generate_api_token() -> (String, String) {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use rand::RngCore;
+    use sha2::{Digest, Sha256};
+
+    // Generate 32 bytes of randomness
+    let mut random_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut random_bytes);
+
+    // Encode as base64url (URL-safe, no padding)
+    let encoded = URL_SAFE_NO_PAD.encode(&random_bytes);
+    let raw_token = format!("mnt_{}", encoded);
+
+    // Hash for storage
+    let hash = Sha256::digest(raw_token.as_bytes());
+    let token_hash = hex::encode(hash);
+
+    (raw_token, token_hash)
 }
 
 /// Open (or create) the state database.
@@ -201,6 +288,52 @@ fn migrate(conn: &Connection) -> Result<()> {
         ",
     )
     .context("create hosts table")?;
+
+    // Platform auth: users table (moved from minions-ssh)
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS users (
+            id              TEXT PRIMARY KEY,
+            email           TEXT UNIQUE NOT NULL,
+            created_at      TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS ssh_keys (
+            id              TEXT PRIMARY KEY,
+            user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            public_key      TEXT NOT NULL,
+            fingerprint     TEXT UNIQUE NOT NULL,
+            name            TEXT NOT NULL DEFAULT 'default',
+            created_at      TEXT NOT NULL
+        );
+        ",
+    )
+    .context("create users/ssh_keys tables")?;
+
+    // Idempotent column additions for users table (for google_id, name, password_hash)
+    let _ = conn.execute_batch("ALTER TABLE users ADD COLUMN google_id TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE users ADD COLUMN name TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE users ADD COLUMN password_hash TEXT;");
+
+    // Index for google_id lookups
+    let _ = conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id) WHERE google_id IS NOT NULL;",
+    );
+
+    // API tokens table for per-user authentication
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS api_tokens (
+            id              TEXT PRIMARY KEY,
+            user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            token_hash      TEXT UNIQUE NOT NULL,
+            name            TEXT NOT NULL DEFAULT 'default',
+            created_at      TEXT NOT NULL,
+            last_used       TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
+        ",
+    )
+    .context("create api_tokens table")?;
 
     Ok(())
 }
@@ -969,6 +1102,312 @@ fn row_to_host(row: &rusqlite::Row<'_>) -> rusqlite::Result<Host> {
         last_heartbeat: row.get(11)?,
         created_at: row.get(12)?,
     })
+}
+
+// ── User operations ─────────────────────────────────────────────────────────
+
+/// Create a new user from Google OAuth.
+/// Also assigns the free plan subscription automatically.
+pub fn create_user_from_google(
+    conn: &Connection,
+    email: &str,
+    name: Option<&str>,
+    google_id: &str,
+) -> Result<User> {
+    let user_id = Uuid::new_v4().to_string();
+    let sub_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO users (id, email, name, google_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![user_id, email, name, google_id, now],
+    )
+    .context("insert user from google")?;
+
+    // Auto-assign the free plan
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO subscriptions (id, user_id, plan_id, status, created_at)
+         VALUES (?1, ?2, 'free', 'active', ?3)",
+        params![sub_id, user_id, now],
+    );
+
+    Ok(User {
+        id: user_id,
+        email: email.to_string(),
+        name: name.map(|s| s.to_string()),
+        google_id: Some(google_id.to_string()),
+        created_at: now,
+    })
+}
+
+/// Create a new user from email registration (no Google).
+/// Also assigns the free plan subscription automatically.
+pub fn create_user_from_email(
+    conn: &Connection,
+    email: &str,
+    name: Option<&str>,
+) -> Result<User> {
+    let user_id = Uuid::new_v4().to_string();
+    let sub_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO users (id, email, name, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![user_id, email, name, now],
+    )
+    .context("insert user from email")?;
+
+    // Auto-assign the free plan
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO subscriptions (id, user_id, plan_id, status, created_at)
+         VALUES (?1, ?2, 'free', 'active', ?3)",
+        params![sub_id, user_id, now],
+    );
+
+    Ok(User {
+        id: user_id,
+        email: email.to_string(),
+        name: name.map(|s| s.to_string()),
+        google_id: None,
+        created_at: now,
+    })
+}
+
+/// Get a user by their ID.
+pub fn get_user(conn: &Connection, id: &str) -> Result<Option<User>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, email, name, google_id, created_at FROM users WHERE id = ?1"
+    )?;
+    let mut rows = stmt.query(params![id])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(User {
+            id: row.get(0)?,
+            email: row.get(1)?,
+            name: row.get(2)?,
+            google_id: row.get(3)?,
+            created_at: row.get(4)?,
+        })),
+        None => Ok(None),
+    }
+}
+
+/// Get a user by their Google ID.
+pub fn get_user_by_google_id(conn: &Connection, google_id: &str) -> Result<Option<User>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, email, name, google_id, created_at FROM users WHERE google_id = ?1"
+    )?;
+    let mut rows = stmt.query(params![google_id])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(User {
+            id: row.get(0)?,
+            email: row.get(1)?,
+            name: row.get(2)?,
+            google_id: row.get(3)?,
+            created_at: row.get(4)?,
+        })),
+        None => Ok(None),
+    }
+}
+
+/// Get a user by their email address.
+pub fn get_user_by_email(conn: &Connection, email: &str) -> Result<Option<User>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, email, name, google_id, created_at FROM users WHERE email = ?1"
+    )?;
+    let mut rows = stmt.query(params![email])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(User {
+            id: row.get(0)?,
+            email: row.get(1)?,
+            name: row.get(2)?,
+            google_id: row.get(3)?,
+            created_at: row.get(4)?,
+        })),
+        None => Ok(None),
+    }
+}
+
+/// Link a Google ID to an existing user (for account linking).
+pub fn set_user_google_id(
+    conn: &Connection,
+    user_id: &str,
+    google_id: &str,
+    name: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE users SET google_id = ?1, name = COALESCE(?2, name) WHERE id = ?3",
+        params![google_id, name, user_id],
+    )
+    .context("set user google_id")?;
+    Ok(())
+}
+
+// ── API Token operations ────────────────────────────────────────────────────
+
+/// Insert a new API token into the database.
+pub fn insert_api_token(
+    conn: &Connection,
+    user_id: &str,
+    token_hash: &str,
+    name: &str,
+) -> Result<ApiToken> {
+    let token_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO api_tokens (id, user_id, token_hash, name, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![token_id, user_id, token_hash, name, now],
+    )
+    .context("insert api token")?;
+
+    Ok(ApiToken {
+        id: token_id,
+        user_id: user_id.to_string(),
+        name: name.to_string(),
+        created_at: now,
+        last_used: None,
+    })
+}
+
+/// Validate an API token by its hash.
+/// Returns (user_id, email) if valid, None otherwise.
+/// Also updates the last_used timestamp.
+pub fn validate_api_token(
+    conn: &Connection,
+    token_hash: &str,
+) -> Result<Option<(String, String)>> {
+    let now = Utc::now().to_rfc3339();
+
+    // Update last_used and return user info in one query
+    let mut stmt = conn.prepare(
+        "UPDATE api_tokens SET last_used = ?1 WHERE token_hash = ?2
+         RETURNING user_id"
+    )?;
+    let mut rows = stmt.query(params![now, token_hash])?;
+
+    match rows.next()? {
+        Some(row) => {
+            let user_id: String = row.get(0)?;
+            // Get the user's email
+            let mut email_stmt = conn.prepare("SELECT email FROM users WHERE id = ?1")?;
+            let email: String = email_stmt.query_row(params![&user_id], |row| row.get(0))?;
+            Ok(Some((user_id, email)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// List all API tokens for a user (does not include token_hash for security).
+pub fn list_api_tokens(conn: &Connection, user_id: &str) -> Result<Vec<ApiToken>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, user_id, name, created_at, last_used
+         FROM api_tokens WHERE user_id = ?1 ORDER BY created_at"
+    )?;
+    let rows = stmt.query_map(params![user_id], |row| {
+        Ok(ApiToken {
+            id: row.get(0)?,
+            user_id: row.get(1)?,
+            name: row.get(2)?,
+            created_at: row.get(3)?,
+            last_used: row.get(4)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("list api tokens")
+}
+
+/// Revoke (delete) an API token.
+/// Returns true if a token was deleted, false if not found.
+pub fn revoke_api_token(conn: &Connection, user_id: &str, token_id: &str) -> Result<bool> {
+    let rows = conn.execute(
+        "DELETE FROM api_tokens WHERE id = ?1 AND user_id = ?2",
+        params![token_id, user_id],
+    )?;
+    Ok(rows > 0)
+}
+
+// ── SSH Key operations ──────────────────────────────────────────────────────
+
+/// Add an SSH public key for a user.
+pub fn add_ssh_key(
+    conn: &Connection,
+    user_id: &str,
+    public_key: &str,
+    fingerprint: &str,
+    name: &str,
+) -> Result<SshKey> {
+    let key_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO ssh_keys (id, user_id, public_key, fingerprint, name, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![key_id, user_id, public_key, fingerprint, name, now],
+    )
+    .context("insert ssh key")?;
+
+    Ok(SshKey {
+        id: key_id,
+        user_id: user_id.to_string(),
+        public_key: public_key.to_string(),
+        fingerprint: fingerprint.to_string(),
+        name: name.to_string(),
+        created_at: now,
+    })
+}
+
+/// List all SSH keys for a user.
+pub fn list_ssh_keys(conn: &Connection, user_id: &str) -> Result<Vec<SshKey>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, user_id, public_key, fingerprint, name, created_at
+         FROM ssh_keys WHERE user_id = ?1 ORDER BY created_at"
+    )?;
+    let rows = stmt.query_map(params![user_id], |row| {
+        Ok(SshKey {
+            id: row.get(0)?,
+            user_id: row.get(1)?,
+            public_key: row.get(2)?,
+            fingerprint: row.get(3)?,
+            name: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("list ssh keys")
+}
+
+/// Remove an SSH key by ID.
+/// Returns true if a key was deleted, false if not found.
+pub fn remove_ssh_key(conn: &Connection, user_id: &str, key_id: &str) -> Result<bool> {
+    let rows = conn.execute(
+        "DELETE FROM ssh_keys WHERE id = ?1 AND user_id = ?2",
+        params![key_id, user_id],
+    )?;
+    Ok(rows > 0)
+}
+
+/// Look up a user by SSH key fingerprint.
+pub fn get_user_by_fingerprint(conn: &Connection, fingerprint: &str) -> Result<Option<User>> {
+    let mut stmt = conn.prepare(
+        "SELECT u.id, u.email, u.name, u.google_id, u.created_at
+         FROM users u
+         JOIN ssh_keys k ON k.user_id = u.id
+         WHERE k.fingerprint = ?1"
+    )?;
+    let mut rows = stmt.query(params![fingerprint])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(User {
+            id: row.get(0)?,
+            email: row.get(1)?,
+            name: row.get(2)?,
+            google_id: row.get(3)?,
+            created_at: row.get(4)?,
+        })),
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]

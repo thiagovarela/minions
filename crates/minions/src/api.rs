@@ -25,7 +25,29 @@ pub fn router(state: AppState) -> Router {
     // Clone auth config for middleware
     let auth_config = state.auth.clone();
 
+    // Public routes (no auth required)
+    let public_router = Router::new()
+        .route("/api/auth/register", post(register));
+
+    // Authenticated routes (require valid token)
+    let auth_router = Router::new()
+        .route("/api/auth/me", get(get_me))
+        .route("/api/auth/tokens", post(create_token))
+        .route("/api/auth/tokens", get(list_tokens))
+        .route("/api/auth/tokens/{id}", delete(revoke_token))
+        .route("/api/auth/ssh-keys", post(add_ssh_key))
+        .route("/api/auth/ssh-keys", get(list_ssh_keys))
+        .route("/api/auth/ssh-keys/{id}", delete(remove_ssh_key))
+        .layer(middleware::from_fn_with_state(
+            auth_config.clone(),
+            auth::require_auth,
+        ));
+
     let mut router = Router::new()
+        // Auth routes
+        .merge(public_router)
+        .merge(auth_router)
+        // VM routes
         .route("/api/vms", post(create_vm))
         .route("/api/vms", get(list_vms))
         .route("/api/vms/{name}", get(get_vm))
@@ -63,7 +85,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/billing/plan", post(billing_set_plan))
         // Per-VM metrics (authenticated)
         .route("/api/vms/{name}/metrics", get(vm_metrics))
-        // Add authentication middleware (checks Bearer token if MINIONS_API_KEY is set)
+        // Add authentication middleware
         .layer(middleware::from_fn_with_state(
             auth_config,
             auth::require_auth,
@@ -208,6 +230,78 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+// ── Auth request/response types ───────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct RegisterRequest {
+    pub email: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterResponse {
+    pub user_id: String,
+    pub email: String,
+    pub token: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MeResponse {
+    pub user_id: String,
+    pub email: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateTokenRequest {
+    #[serde(default = "default_token_name")]
+    pub name: String,
+}
+
+fn default_token_name() -> String {
+    "default".to_string()
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateTokenResponse {
+    pub id: String,
+    pub name: String,
+    pub token: String,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddSshKeyRequest {
+    pub public_key: String,
+    #[serde(default = "default_ssh_key_name")]
+    pub name: String,
+}
+
+fn default_ssh_key_name() -> String {
+    "default".to_string()
+}
+
+#[derive(Debug, Serialize)]
+pub struct SshKeyResponse {
+    pub id: String,
+    pub public_key: String,
+    pub fingerprint: String,
+    pub name: String,
+    pub created_at: String,
+}
+
+impl From<minions_db::SshKey> for SshKeyResponse {
+    fn from(k: minions_db::SshKey) -> Self {
+        SshKeyResponse {
+            id: k.id,
+            public_key: k.public_key,
+            fingerprint: k.fingerprint,
+            name: k.name,
+            created_at: k.created_at,
+        }
+    }
+}
+
 // ── Name validation ───────────────────────────────────────────────────────────
 
 /// Validate that a VM name from a URL path parameter is safe to use in
@@ -266,11 +360,272 @@ fn require_owner_id(owner_id: Option<&str>) -> Result<String, (StatusCode, Json<
     Ok(owner.to_string())
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+/// Extract owner_id from auth context, enforcing that users can only access their own VMs.
+fn resolve_owner(
+    auth: &auth::AuthContext,
+    provided: Option<&str>,
+) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
+    Ok(auth::effective_owner(auth, provided))
+}
+
+/// Check if the current user can access a VM.
+fn check_vm_access(
+    auth: &auth::AuthContext,
+    vm: &db::Vm,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if auth::can_access_vm(auth, vm) {
+        Ok(())
+    } else {
+        // Return 404 to not leak existence
+        Err(not_found(&vm.name))
+    }
+}
+
+// ── Auth Handlers ─────────────────────────────────────────────────────────────
+
+/// `POST /api/auth/register` — Register a new user with email.
+async fn register(
+    State(state): State<AppState>,
+    Json(req): Json<RegisterRequest>,
+) -> impl IntoResponse {
+    // Validate email
+    let email = req.email.trim().to_lowercase();
+    if email.is_empty() || !email.contains('@') {
+        return Err(bad_request("valid email is required"));
+    }
+
+    let conn = db::open(&state.db_path).map_err(internal)?;
+
+    // Check if email already exists
+    if let Some(existing) = minions_db::get_user_by_email(&conn, &email).map_err(internal)? {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: format!("email '{}' is already registered", existing.email),
+            }),
+        ));
+    }
+
+    // Create user
+    let user = minions_db::create_user_from_email(&conn, &email, None).map_err(internal)?;
+
+    // Generate API token
+    let (raw_token, token_hash) = minions_db::generate_api_token();
+    minions_db::insert_api_token(&conn, &user.id, &token_hash, "default").map_err(internal)?;
+
+    info!(user_id = %user.id, email = %user.email, "new user registered");
+
+    Ok((StatusCode::CREATED, Json(RegisterResponse {
+        user_id: user.id,
+        email: user.email,
+        token: raw_token,
+        message: "Save this token — it will not be shown again.".to_string(),
+    })))
+}
+
+/// `GET /api/auth/me` — Get current user info.
+async fn get_me(
+    State(state): State<AppState>,
+    auth: auth::Auth,
+) -> impl IntoResponse {
+    let conn = db::open(&state.db_path).map_err(internal)?;
+
+    let user_id = match auth.0 {
+        auth::AuthContext::User { user_id, .. } => user_id,
+        auth::AuthContext::Admin => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "admin context has no user profile".to_string(),
+                }),
+            ));
+        }
+    };
+
+    let user = minions_db::get_user(&conn, &user_id).map_err(internal)?;
+    match user {
+        Some(u) => Ok(Json(MeResponse {
+            user_id: u.id,
+            email: u.email,
+            name: u.name,
+        })),
+        None => Err(not_found("user")),
+    }
+}
+
+/// `POST /api/auth/tokens` — Create a new API token.
+async fn create_token(
+    State(state): State<AppState>,
+    auth: auth::Auth,
+    Json(req): Json<CreateTokenRequest>,
+) -> impl IntoResponse {
+    let conn = db::open(&state.db_path).map_err(internal)?;
+
+    let user_id = match auth.0 {
+        auth::AuthContext::User { user_id, .. } => user_id,
+        auth::AuthContext::Admin => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "admin cannot create tokens".to_string(),
+                }),
+            ));
+        }
+    };
+
+    let (raw_token, token_hash) = minions_db::generate_api_token();
+    let token = minions_db::insert_api_token(&conn, &user_id, &token_hash, &req.name).map_err(internal)?;
+
+    info!(user_id = %user_id, "new api token created");
+
+    Ok((StatusCode::CREATED, Json(CreateTokenResponse {
+        id: token.id,
+        name: token.name,
+        token: raw_token,
+        message: "Save this token — it will not be shown again.".to_string(),
+    })))
+}
+
+/// `GET /api/auth/tokens` — List user's API tokens.
+async fn list_tokens(
+    State(state): State<AppState>,
+    auth: auth::Auth,
+) -> impl IntoResponse {
+    let conn = db::open(&state.db_path).map_err(internal)?;
+
+    let auth = &auth.0;
+    let user_id = match auth {
+        auth::AuthContext::User { user_id, .. } => user_id,
+        auth::AuthContext::Admin => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "admin has no tokens".to_string(),
+                }),
+            ));
+        }
+    };
+
+    let tokens = minions_db::list_api_tokens(&conn, user_id).map_err(internal)?;
+    Ok(Json(tokens))
+}
+
+/// `DELETE /api/auth/tokens/{id}` — Revoke an API token.
+async fn revoke_token(
+    State(state): State<AppState>,
+    auth: auth::Auth,
+    Path(token_id): Path<String>,
+) -> impl IntoResponse {
+    let conn = db::open(&state.db_path).map_err(internal)?;
+
+    let user_id = match auth.0 {
+        auth::AuthContext::User { user_id, .. } => user_id,
+        auth::AuthContext::Admin => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "admin has no tokens".to_string(),
+                }),
+            ));
+        }
+    };
+
+    let deleted = minions_db::revoke_api_token(&conn, &user_id, &token_id).map_err(internal)?;
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(not_found(&token_id))
+    }
+}
+
+/// `POST /api/auth/ssh-keys` — Add an SSH public key.
+async fn add_ssh_key(
+    State(state): State<AppState>,
+    auth: auth::Auth,
+    Json(req): Json<AddSshKeyRequest>,
+) -> impl IntoResponse {
+    let conn = db::open(&state.db_path).map_err(internal)?;
+
+    let user_id = match auth.0 {
+        auth::AuthContext::User { user_id, .. } => user_id,
+        auth::AuthContext::Admin => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "admin has no ssh keys".to_string(),
+                }),
+            ));
+        }
+    };
+
+    // Parse the public key to get fingerprint
+    let fp = minions_db::fingerprint(&req.public_key)
+        .map_err(|e| bad_request(format!("invalid ssh key: {}", e)))?;
+
+    let key = minions_db::add_ssh_key(&conn, &user_id, &req.public_key, &fp, &req.name).map_err(internal)?;
+
+    info!(user_id = %user_id, fingerprint = %fp, "ssh key added");
+
+    Ok((StatusCode::CREATED, Json(SshKeyResponse::from(key))))
+}
+
+/// `GET /api/auth/ssh-keys` — List user's SSH keys.
+async fn list_ssh_keys(
+    State(state): State<AppState>,
+    auth: auth::Auth,
+) -> impl IntoResponse {
+    let conn = db::open(&state.db_path).map_err(internal)?;
+
+    let user_id = match auth.0 {
+        auth::AuthContext::User { user_id, .. } => user_id,
+        auth::AuthContext::Admin => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "admin has no ssh keys".to_string(),
+                }),
+            ));
+        }
+    };
+
+    let keys = minions_db::list_ssh_keys(&conn, &user_id).map_err(internal)?;
+    Ok(Json(keys.into_iter().map(SshKeyResponse::from).collect::<Vec<_>>()))
+}
+
+/// `DELETE /api/auth/ssh-keys/{id}` — Remove an SSH key.
+async fn remove_ssh_key(
+    State(state): State<AppState>,
+    auth: auth::Auth,
+    Path(key_id): Path<String>,
+) -> impl IntoResponse {
+    let conn = db::open(&state.db_path).map_err(internal)?;
+
+    let user_id = match auth.0 {
+        auth::AuthContext::User { user_id, .. } => user_id,
+        auth::AuthContext::Admin => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "admin has no ssh keys".to_string(),
+                }),
+            ));
+        }
+    };
+
+    let deleted = minions_db::remove_ssh_key(&conn, &user_id, &key_id).map_err(internal)?;
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(not_found(&key_id))
+    }
+}
+
+// ── VM Handlers ───────────────────────────────────────────────────────────────
 
 /// `POST /api/vms` — Create a VM.
 async fn create_vm(
     State(state): State<AppState>,
+    auth: auth::Auth,
     Json(req): Json<CreateRequest>,
 ) -> impl IntoResponse {
     info!(name = %req.name, cpus = req.cpus, memory_mb = req.memory_mb, os = %req.os, "create VM");
@@ -281,8 +636,13 @@ async fn create_vm(
         Err(e) => return bad_request(e.to_string()).into_response(),
     };
 
-    let owner_id = match require_owner_id(req.owner_id.as_deref()) {
-        Ok(v) => v,
+    // Resolve owner_id from auth context (user tokens override provided value)
+    let owner_id = match resolve_owner(&auth.0, req.owner_id.as_deref()) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            // Admin creating a system VM (no owner)
+            return bad_request("owner_id is required for user VMs").into_response();
+        }
         Err(e) => return e.into_response(),
     };
 
@@ -315,9 +675,10 @@ async fn create_vm(
 /// `GET /api/vms` — List VMs.
 ///
 /// Optional query parameter: `?owner_id=<user_id>` — filter by owner.
-/// When absent, all VMs are returned (admin view).
+/// For user tokens, owner is derived from auth context.
 async fn list_vms(
     State(state): State<AppState>,
+    auth: auth::Auth,
     Query(query): Query<ListQuery>,
 ) -> impl IntoResponse {
     let conn = match db::open(&state.db_path) {
@@ -325,18 +686,21 @@ async fn list_vms(
         Err(e) => return internal(e).into_response(),
     };
 
-    let vms_result = if let Some(ref owner_id) = query.owner_id {
-        db::list_vms_by_owner(&conn, owner_id)
+    // Resolve owner_id from auth context
+    let owner_id = match resolve_owner(&auth.0, query.owner_id.as_deref()) {
+        Ok(id) => id,
+        Err(e) => return e.into_response(),
+    };
+
+    let vms_result = if let Some(ref oid) = owner_id {
+        db::list_vms_by_owner(&conn, oid)
     } else {
         db::list_vms(&conn)
     };
 
     match vms_result {
         Ok(vms) => {
-            // Correct stale "running" status for dead processes.
-            let mut vms_out: Vec<_> = vms.into_iter().map(VmResponse::from).collect();
-            // (Status reconciliation happens in vm::list; here we return raw DB values.)
-            let _ = vms_out.iter_mut(); // no-op, reconciliation is in vm::list
+            let vms_out: Vec<_> = vms.into_iter().map(VmResponse::from).collect();
             Json(vms_out).into_response()
         }
         Err(e) => internal(e).into_response(),
@@ -344,24 +708,38 @@ async fn list_vms(
 }
 
 /// `GET /api/vms/:name` — Get VM details.
-async fn get_vm(State(state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
+async fn get_vm(
+    State(state): State<AppState>,
+    auth: auth::Auth,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
     let conn = match db::open(&state.db_path) {
         Ok(c) => c,
         Err(e) => return internal(e).into_response(),
     };
 
     match db::get_vm(&conn, &name) {
-        Ok(Some(v)) => Json(VmResponse::from(v)).into_response(),
+        Ok(Some(v)) => {
+            // Check ownership for user tokens
+            if let Err(e) = check_vm_access(&auth.0, &v) {
+                return e.into_response();
+            }
+            Json(VmResponse::from(v)).into_response()
+        }
         Ok(None) => not_found(&name).into_response(),
         Err(e) => internal(e).into_response(),
     }
 }
 
 /// `DELETE /api/vms/:name` — Destroy a VM.
-async fn destroy_vm(State(state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
+async fn destroy_vm(
+    State(state): State<AppState>,
+    auth: auth::Auth,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
     info!(name = %name, "destroy VM");
 
-    // Check VM exists (sync, connection dropped before await).
+    // Check VM exists and ownership (sync, connection dropped before await).
     {
         let conn = match db::open(&state.db_path) {
             Ok(c) => c,
@@ -370,7 +748,11 @@ async fn destroy_vm(State(state): State<AppState>, Path(name): Path<String>) -> 
         match db::get_vm(&conn, &name) {
             Ok(None) => return not_found(&name).into_response(),
             Err(e) => return internal(e).into_response(),
-            Ok(Some(_)) => {}
+            Ok(Some(v)) => {
+                if let Err(e) = check_vm_access(&auth.0, &v) {
+                    return e.into_response();
+                }
+            }
         }
     } // conn dropped here
 
@@ -383,15 +765,38 @@ async fn destroy_vm(State(state): State<AppState>, Path(name): Path<String>) -> 
     }
 }
 
+/// Helper to get VM with ownership check.
+fn get_vm_checked(
+    db_path: &str,
+    auth: &auth::AuthContext,
+    name: &str,
+) -> Result<db::Vm, (StatusCode, Json<ErrorResponse>)> {
+    let conn = db::open(db_path).map_err(internal)?;
+    let vm = db::get_vm(&conn, name).map_err(internal)?;
+    match vm {
+        Some(v) => {
+            check_vm_access(auth, &v)?;
+            Ok(v)
+        }
+        None => Err(not_found(name)),
+    }
+}
+
 /// `POST /api/vms/:name/stop` — Halt a VM (CH process + TAP), keep rootfs + DB record.
-async fn stop_vm(State(state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
+async fn stop_vm(
+    State(state): State<AppState>,
+    auth: auth::Auth,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
     info!(name = %name, "stop VM");
+    if let Err(e) = get_vm_checked(&state.db_path, &auth.0, &name) {
+        return e.into_response();
+    }
     let db_path = state.db_path.as_str().to_string();
     match vm::stop(&db_path, &name).await {
         Ok(v) => Json(VmResponse::from(v)).into_response(),
         Err(e) => {
             let msg = e.to_string();
-            // Only 404 when the VM genuinely doesn't exist in the DB.
             if msg.contains("VM '") && msg.contains("' not found") {
                 not_found(&name).into_response()
             } else if msg.contains("already stopped") {
@@ -404,8 +809,15 @@ async fn stop_vm(State(state): State<AppState>, Path(name): Path<String>) -> imp
 }
 
 /// `POST /api/vms/:name/start` — Start a stopped VM using its existing rootfs.
-async fn start_vm(State(state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
+async fn start_vm(
+    State(state): State<AppState>,
+    auth: auth::Auth,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
     info!(name = %name, "start VM");
+    if let Err(e) = get_vm_checked(&state.db_path, &auth.0, &name) {
+        return e.into_response();
+    }
     let db_path = state.db_path.as_str().to_string();
     match vm::start(&db_path, &name).await {
         Ok(v) => Json(VmResponse::from(v)).into_response(),
@@ -423,14 +835,20 @@ async fn start_vm(State(state): State<AppState>, Path(name): Path<String>) -> im
 }
 
 /// `POST /api/vms/:name/restart` — Reboot a running VM via ACPI signal.
-async fn restart_vm(State(state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
+async fn restart_vm(
+    State(state): State<AppState>,
+    auth: auth::Auth,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
     info!(name = %name, "restart VM");
+    if let Err(e) = get_vm_checked(&state.db_path, &auth.0, &name) {
+        return e.into_response();
+    }
     let db_path = state.db_path.as_str().to_string();
     match vm::restart(&db_path, &name).await {
         Ok(v) => Json(VmResponse::from(v)).into_response(),
         Err(e) => {
             let msg = e.to_string();
-            // Only 404 when the VM genuinely doesn't exist in the DB.
             if msg.contains("VM '") && msg.contains("' not found") {
                 not_found(&name).into_response()
             } else if msg.contains("not running") {
