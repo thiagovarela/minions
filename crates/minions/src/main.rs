@@ -242,6 +242,9 @@ enum VolumeCommands {
         /// Size in gigabytes
         #[arg(long)]
         size: u64,
+        /// Optional filesystem to format on first attach (currently: ext4)
+        #[arg(long)]
+        fs: Option<String>,
     },
     /// List all volumes
     List,
@@ -775,11 +778,15 @@ async fn run_remote(
         },
 
         Commands::Volume { action } => match action {
-            VolumeCommands::Create { name, size } => {
+            VolumeCommands::Create { name, size, fs } => {
                 if !json {
-                    println!("Creating {size}GB volume '{name}'…");
+                    if let Some(ref fs) = fs {
+                        println!("Creating {size}GB volume '{name}' (fs={fs})…");
+                    } else {
+                        println!("Creating {size}GB volume '{name}'…");
+                    }
                 }
-                let volume = c.create_volume(&name, size).await?;
+                let volume = c.create_volume(&name, size, fs.as_deref()).await?;
                 print_volume(&volume, json);
             }
             VolumeCommands::List => {
@@ -1212,17 +1219,24 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
         },
 
         Commands::Volume { action } => match action {
-            VolumeCommands::Create { name, size } => {
+            VolumeCommands::Create { name, size, fs } => {
                 if !json {
-                    println!("Creating {size}GB volume '{name}'…");
+                    if let Some(ref fs) = fs {
+                        println!("Creating {size}GB volume '{name}' (fs={fs})…");
+                    } else {
+                        println!("Creating {size}GB volume '{name}'…");
+                    }
                 }
-                let volume = volume::create(db_path, &name, size).await?;
+                let volume = volume::create(db_path, &name, size, fs.as_deref()).await?;
 
                 if json {
                     println!("{}", serde_json::to_string_pretty(&volume)?);
                 } else {
                     println!("✓ Volume '{name}' created successfully");
                     println!("  Size: {} GB", size);
+                    if let Some(fs) = &volume.fs_type {
+                        println!("  Filesystem: {} (first attach)", fs);
+                    }
                     println!("  Status: {}", volume.status);
                     println!("  S3 Bucket: {}", volume.s3_bucket);
                 }

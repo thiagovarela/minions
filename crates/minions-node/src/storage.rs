@@ -422,7 +422,7 @@ pub fn nbd_device_path(device_num: u32) -> String {
 }
 
 /// Connect an NBD client to a Unix socket
-pub fn nbd_connect(socket_path: &Path) -> Result<String> {
+pub fn nbd_connect(socket_path: &Path, export_name: &str) -> Result<String> {
     // Find free device
     let device_num = find_free_nbd_device()?;
     let device_path = nbd_device_path(device_num);
@@ -433,11 +433,13 @@ pub fn nbd_connect(socket_path: &Path) -> Result<String> {
         .arg(format!("max_part=0"))
         .status();
 
-    // Connect using nbd-client
+    // Connect using nbd-client (newstyle requires explicit export name)
     let status = std::process::Command::new("nbd-client")
         .args([
             "-unix",
             socket_path.to_str().unwrap(),
+            "-name",
+            export_name,
             &device_path,
         ])
         .status()
@@ -447,7 +449,12 @@ pub fn nbd_connect(socket_path: &Path) -> Result<String> {
         anyhow::bail!("nbd-client failed to connect to {}", socket_path.display());
     }
 
-    tracing::info!("Connected NBD device {} to {}", device_path, socket_path.display());
+    tracing::info!(
+        "Connected NBD device {} to {} (export={})",
+        device_path,
+        socket_path.display(),
+        export_name
+    );
     Ok(device_path)
 }
 
@@ -464,4 +471,39 @@ pub fn nbd_disconnect(device_path: &str) -> Result<()> {
 
     tracing::info!("Disconnected NBD device {}", device_path);
     Ok(())
+}
+
+/// Ensure a filesystem exists on a block device.
+///
+/// If the device already has a filesystem (detected via `blkid`), this is a no-op.
+/// Currently supports only `ext4`.
+pub fn ensure_filesystem(device_path: &str, fs_type: &str) -> Result<()> {
+    // If blkid succeeds, a filesystem already exists.
+    let has_fs = std::process::Command::new("blkid")
+        .arg(device_path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if has_fs {
+        tracing::info!("Device {} already has filesystem, skipping format", device_path);
+        return Ok(());
+    }
+
+    match fs_type {
+        "ext4" => {
+            let status = std::process::Command::new("mkfs.ext4")
+                .args(["-F", device_path])
+                .status()
+                .context("Failed to spawn mkfs.ext4")?;
+
+            if !status.success() {
+                anyhow::bail!("mkfs.ext4 failed for {}", device_path);
+            }
+
+            tracing::info!("Formatted {} with ext4", device_path);
+            Ok(())
+        }
+        other => anyhow::bail!("unsupported filesystem '{}': only ext4 is supported", other),
+    }
 }

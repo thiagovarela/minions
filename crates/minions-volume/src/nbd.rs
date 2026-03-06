@@ -40,7 +40,11 @@ const NBD_OPT_GO: u32 = 7;
 /// NBD option reply types
 const NBD_REP_ACK: u32 = 1;
 const NBD_REP_SERVER: u32 = 2;
+const NBD_REP_INFO: u32 = 3;
 const NBD_REP_ERR_UNSUP: u32 = 2147483649; // 1 << 31 | 1
+
+/// NBD info types
+const NBD_INFO_EXPORT: u16 = 0;
 
 /// NBD commands
 const NBD_CMD_READ: u16 = 0;
@@ -164,6 +168,16 @@ pub struct NbdServer {
 }
 
 impl NbdServer {
+    fn transmission_flags(&self) -> u16 {
+        let mut flags = NBD_FLAG_HAS_FLAGS | NBD_FLAG_SEND_FLUSH | NBD_FLAG_SEND_TRIM;
+        if self.config.read_only {
+            flags |= NBD_FLAG_READ_ONLY;
+        } else {
+            flags |= NBD_FLAG_SEND_FUA;
+        }
+        flags
+    }
+
     /// Create a new NBD server
     pub fn new(config: NbdServerConfig) -> Result<Self> {
         Ok(NbdServer {
@@ -259,12 +273,7 @@ impl NbdServer {
                     stream.write_u64(self.config.export_size).await?;
 
                     // Send transmission flags
-                    let mut trans_flags = NBD_FLAG_HAS_FLAGS | NBD_FLAG_SEND_FLUSH | NBD_FLAG_SEND_TRIM;
-                    if self.config.read_only {
-                        trans_flags |= NBD_FLAG_READ_ONLY;
-                    } else {
-                        trans_flags |= NBD_FLAG_SEND_FUA;
-                    }
+                    let trans_flags = self.transmission_flags();
                     stream.write_u16(trans_flags).await?;
 
                     // No zeroes (we set NBD_FLAG_NO_ZEROES)
@@ -297,13 +306,35 @@ impl NbdServer {
                     stream.write_u32(0).await?;
                 }
                 NBD_OPT_GO => {
-                    // Read export name
-                    let mut name_buf = vec![0u8; length as usize];
-                    stream.read_exact(&mut name_buf).await?;
-                    
-                    debug!("Client sent GO for export");
+                    // GO payload: export name len + export name + info requests
+                    let mut payload = vec![0u8; length as usize];
+                    stream.read_exact(&mut payload).await?;
 
-                    // Send INFO responses then ACK
+                    let requested_name = if payload.len() >= 4 {
+                        let name_len = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+                        if payload.len() >= 4 + name_len {
+                            String::from_utf8_lossy(&payload[4..4 + name_len]).to_string()
+                        } else {
+                            self.config.export_name.clone()
+                        }
+                    } else {
+                        self.config.export_name.clone()
+                    };
+
+                    debug!("Client sent GO for export '{}'", requested_name);
+
+                    // Send NBD_INFO_EXPORT (size + transmission flags)
+                    let trans_flags = self.transmission_flags();
+                    stream.write_u64(NBD_REP_MAGIC).await?;
+                    stream.write_u32(option).await?;
+                    stream.write_u32(NBD_REP_INFO).await?;
+                    // payload len: info_type(2) + export_size(8) + export_flags(2) = 12
+                    stream.write_u32(12).await?;
+                    stream.write_u16(NBD_INFO_EXPORT).await?;
+                    stream.write_u64(self.config.export_size).await?;
+                    stream.write_u16(trans_flags).await?;
+
+                    // Final ACK
                     stream.write_u64(NBD_REP_MAGIC).await?;
                     stream.write_u32(option).await?;
                     stream.write_u32(NBD_REP_ACK).await?;

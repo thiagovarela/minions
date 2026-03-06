@@ -10,12 +10,21 @@ pub async fn create(
     db_path: &str,
     name: &str,
     size_gb: u64,
+    fs_type: Option<&str>,
 ) -> Result<db::Volume> {
     // Validate S3 configuration
     let s3_config = minions_volume::s3::S3Config::from_env()
         .context("S3 configuration not set (check MINIONS_S3_* environment variables)")?;
 
     let size_bytes = size_gb * 1024 * 1024 * 1024;
+
+    // Validate optional filesystem
+    let fs_type = fs_type.map(|s| s.to_lowercase());
+    if let Some(ref fs) = fs_type {
+        if fs != "ext4" {
+            anyhow::bail!("unsupported filesystem '{}': currently only 'ext4' is supported", fs);
+        }
+    }
 
     // Create volume in S3
     let volume_config = minions_volume::VolumeConfig::new(
@@ -40,6 +49,7 @@ pub async fn create(
         s3_bucket: s3_config.bucket.clone(),
         s3_prefix: format!("volumes/{}", name),
         host_id: None,
+        fs_type,
         created_at: chrono::Utc::now().to_rfc3339(),
     };
 

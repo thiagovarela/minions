@@ -1631,6 +1631,7 @@ async fn delete_snapshot(
 struct CreateVolumeRequest {
     name: String,
     size_gb: u64,
+    fs_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1648,9 +1649,9 @@ async fn create_volume(
     State(state): State<AppState>,
     Json(req): Json<CreateVolumeRequest>,
 ) -> impl IntoResponse {
-    info!(name = %req.name, size_gb = %req.size_gb, "create volume");
+    info!(name = %req.name, size_gb = %req.size_gb, fs_type = ?req.fs_type, "create volume");
     let db_path = state.db_path.as_str().to_string();
-    match crate::volume::create(&db_path, &req.name, req.size_gb).await {
+    match crate::volume::create(&db_path, &req.name, req.size_gb, req.fs_type.as_deref()).await {
         Ok(volume) => (StatusCode::CREATED, Json(volume)).into_response(),
         Err(e) => {
             let msg = e.to_string();

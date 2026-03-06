@@ -329,15 +329,18 @@ impl Client {
 
     // ── Volume methods ──────────────────────────────────────────────────────
 
-    pub async fn create_volume(&self, name: &str, size_gb: u64) -> Result<VolumeResponse> {
+    pub async fn create_volume(&self, name: &str, size_gb: u64, fs_type: Option<&str>) -> Result<VolumeResponse> {
         #[derive(Serialize)]
         struct Req {
             name: String,
             size_gb: u64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            fs_type: Option<String>,
         }
         self.auth(self.http.post(format!("{}/api/volumes", self.base)).json(&Req {
             name: name.to_string(),
             size_gb,
+            fs_type: fs_type.map(|s| s.to_string()),
         }))
         .send()
         .await
@@ -439,6 +442,7 @@ pub struct VolumeResponse {
     pub s3_bucket: String,
     pub s3_prefix: String,
     pub host_id: Option<String>,
+    pub fs_type: Option<String>,
     pub created_at: String,
 }
 
