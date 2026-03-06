@@ -9,9 +9,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use russh::client;
-use russh::{ChannelId, Pty};
+use russh::{ChannelId, ChannelMsg, Pty};
 use russh_keys::key::{KeyPair, PublicKey};
-use tokio::io::AsyncReadExt;
 use tracing::debug;
 
 use crate::server::ServerHandle;
@@ -109,37 +108,62 @@ impl ConnectedVm {
     pub async fn exec(&mut self, command: &[u8]) -> Result<()> {
         self.channel.exec(true, command).await.context("exec on VM")
     }
+
+    /// Start a subsystem on the VM (e.g. sftp).
+    pub async fn subsystem(&mut self, name: &str) -> Result<()> {
+        self.channel
+            .request_subsystem(true, name)
+            .await
+            .with_context(|| format!("subsystem '{}' on VM", name))
+    }
 }
 
 // ── Bidirectional proxy ────────────────────────────────────────────────────────
 
-/// Takes ownership of the VM channel, converts it to a stream, and:
-/// * spawns a task that forwards VM stdout → client (via `client_handle`)
-/// * returns the write half so the caller can forward client stdin → VM.
+/// Takes ownership of the VM channel and:
+/// * spawns a task that forwards VM stdout/stderr/exit-status → client
+/// * returns a writer for client stdin → VM.
 ///
-/// The returned writer implements `AsyncWrite + Send + Unpin`.
+/// The returned writer implements `AsyncWrite + Send + Unpin`. Calling
+/// `shutdown()` on it sends EOF to the VM channel, which is required for
+/// exec-based protocols like `scp` to complete.
 pub fn spawn_proxy(
-    vm: ConnectedVm,
+    mut vm: ConnectedVm,
     client_handle: ServerHandle,
     client_channel_id: ChannelId,
-) -> tokio::io::WriteHalf<russh::ChannelStream<client::Msg>> {
-    let stream = vm.channel.into_stream();
-    let (mut read_half, write_half) = tokio::io::split(stream);
+) -> impl tokio::io::AsyncWrite + Send + Unpin {
+    let write_half = vm.channel.make_writer();
 
     tokio::spawn(async move {
-        let mut buf = vec![0u8; 32_768];
-        loop {
-            match read_half.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let data = russh::CryptoVec::from(buf[..n].to_vec());
+        while let Some(msg) = vm.channel.wait().await {
+            match msg {
+                ChannelMsg::Data { data } => {
                     if client_handle.data(client_channel_id, data).await.is_err() {
                         break;
                     }
                 }
+                ChannelMsg::ExtendedData { data, ext } => {
+                    if client_handle
+                        .extended_data(client_channel_id, ext, data)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                ChannelMsg::ExitStatus { exit_status } => {
+                    let _ = client_handle
+                        .exit_status_request(client_channel_id, exit_status)
+                        .await;
+                }
+                ChannelMsg::Eof => {
+                    let _ = client_handle.eof(client_channel_id).await;
+                }
+                ChannelMsg::Close => break,
+                _ => {}
             }
         }
-        let _ = client_handle.eof(client_channel_id).await;
+
         let _ = client_handle.close(client_channel_id).await;
     });
 

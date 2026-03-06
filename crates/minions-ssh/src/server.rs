@@ -7,7 +7,7 @@ use anyhow::Result;
 use russh::server::{Auth, Handler, Msg, Session};
 use russh::{Channel, ChannelId, CryptoVec, Pty};
 use russh_keys::key::PublicKey;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tracing::{debug, info};
 
 use crate::commands::ApiClient;
@@ -26,7 +26,7 @@ enum SessionMode {
     Command { line_buf: String },
     /// Proxy mode: stdin bytes go to the VM via this writer.
     Proxy {
-        vm_stdin: tokio::io::WriteHalf<russh::ChannelStream<russh::client::Msg>>,
+        vm_stdin: Box<dyn AsyncWrite + Send + Unpin>,
     },
 }
 
@@ -92,56 +92,12 @@ impl ConnectionHandler {
         key.fingerprint()
     }
 
-    async fn send(&self, bytes: impl Into<Vec<u8>>) {
-        if let (Some(h), Some(id)) = (&self.client_handle, self.client_channel_id) {
-            let _ = h.data(id, CryptoVec::from(bytes.into())).await;
-        }
-    }
-
-    async fn close_err(&self, msg: &str) {
-        self.send(format!("error: {}\r\n", msg)).await;
-        if let (Some(h), Some(id)) = (&self.client_handle, self.client_channel_id) {
-            let _ = h.exit_status_request(id, 1).await;
-            let _ = h.eof(id).await;
-            let _ = h.close(id).await;
-        }
-    }
-
-    /// Look up a VM by name via the API, verify ownership, and return its IP.
-    ///
-    /// Ownership is checked when the user is a registered SSH gateway user.
-    /// An unregistered user connecting in proxy mode is caught earlier during
-    /// shell/exec handling (they get the registration prompt).
-    async fn resolve_vm(&self, vm_name: &str) -> Result<String> {
-        let api = self.api();
-        let vm = api
-            .get_vm(vm_name)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", vm_name))?;
-
-        // Enforce ownership: the VM must belong to the authenticated user.
-        // We use a deliberately vague error to avoid leaking VM existence.
-        if let Some(ref user) = self.authed_user {
-            match &vm.owner_id {
-                Some(oid) if oid == &user.id => {} // ✓ owned by this user
-                _ => anyhow::bail!("VM '{}' not found", vm_name),
-            }
-        }
-
-        if vm.status != "running" {
-            anyhow::bail!(
-                "VM '{}' is {} — it must be running to SSH into it",
-                vm_name,
-                vm.status
-            );
-        }
-        Ok(vm.ip)
-    }
-
     /// Connect to a VM and set up the bidirectional proxy.
     /// Sends the shell or exec request on the VM channel.
     async fn start_proxy_shell(&mut self, vm_name: &str) -> Result<()> {
-        let vm_ip = self.resolve_vm(vm_name).await?;
+        let api = self.api();
+        let authed_user = self.authed_user.clone();
+        let vm_ip = resolve_vm(&api, authed_user.as_ref(), vm_name).await?;
         let mut vm = ConnectedVm::connect(&vm_ip, Arc::clone(&self.config.proxy_key)).await?;
 
         // Forward PTY if the client requested one.
@@ -161,22 +117,69 @@ impl ConnectionHandler {
 
         let handle = self.client_handle.clone().expect("handle set");
         let cid = self.client_channel_id.expect("cid set");
-        let vm_stdin = spawn_proxy(vm, handle, cid);
+        let vm_stdin = Box::new(spawn_proxy(vm, handle, cid));
         self.mode = SessionMode::Proxy { vm_stdin };
         Ok(())
     }
 
     async fn start_proxy_exec(&mut self, vm_name: &str, command: &[u8]) -> Result<()> {
-        let vm_ip = self.resolve_vm(vm_name).await?;
+        let api = self.api();
+        let authed_user = self.authed_user.clone();
+        let vm_ip = resolve_vm(&api, authed_user.as_ref(), vm_name).await?;
         let mut vm = ConnectedVm::connect(&vm_ip, Arc::clone(&self.config.proxy_key)).await?;
         vm.exec(command).await?;
 
         let handle = self.client_handle.clone().expect("handle set");
         let cid = self.client_channel_id.expect("cid set");
-        let vm_stdin = spawn_proxy(vm, handle, cid);
+        let vm_stdin = Box::new(spawn_proxy(vm, handle, cid));
         self.mode = SessionMode::Proxy { vm_stdin };
         Ok(())
     }
+
+    async fn start_proxy_subsystem(&mut self, vm_name: &str, name: &str) -> Result<()> {
+        let api = self.api();
+        let authed_user = self.authed_user.clone();
+        let vm_ip = resolve_vm(&api, authed_user.as_ref(), vm_name).await?;
+        let mut vm = ConnectedVm::connect(&vm_ip, Arc::clone(&self.config.proxy_key)).await?;
+        vm.subsystem(name).await?;
+
+        let handle = self.client_handle.clone().expect("handle set");
+        let cid = self.client_channel_id.expect("cid set");
+        let vm_stdin = Box::new(spawn_proxy(vm, handle, cid));
+        self.mode = SessionMode::Proxy { vm_stdin };
+        Ok(())
+    }
+}
+
+/// Look up a VM by name via the API, verify ownership, and return its IP.
+///
+/// Ownership is checked when the user is a registered SSH gateway user.
+/// An unregistered user connecting in proxy mode is caught earlier during
+/// shell/exec handling (they get the registration prompt).
+async fn resolve_vm(api: &ApiClient, authed_user: Option<&User>, vm_name: &str) -> Result<String> {
+    let vm = api
+        .get_vm(vm_name)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("VM '{}' not found", vm_name))?;
+
+    // Enforce ownership: the VM must belong to the authenticated user.
+    // We use a deliberately vague error to avoid leaking VM existence.
+    if let Some(user) = authed_user {
+        match &vm.owner_id {
+            Some(oid) if oid == &user.id => {}
+            _ => anyhow::bail!("VM '{}' not found", vm_name),
+        }
+    }
+
+    if vm.status != "running" {
+        anyhow::bail!(
+            "VM '{}' is {} — it must be running to SSH into it",
+            vm_name,
+            vm.status
+        );
+    }
+
+    Ok(vm.ip)
 }
 
 // ── russh Handler impl ────────────────────────────────────────────────────────
@@ -271,7 +274,21 @@ impl Handler for ConnectionHandler {
             let vm_name = self.ssh_username.clone();
             match self.start_proxy_shell(&vm_name).await {
                 Ok(()) => {}
-                Err(e) => self.close_err(&e.to_string()).await,
+                Err(e) => {
+                    if let (Some(h), Some(id)) =
+                        (self.client_handle.clone(), self.client_channel_id)
+                    {
+                        let _ = h
+                            .data(
+                                id,
+                                CryptoVec::from(format!("error: {}\r\n", e).into_bytes()),
+                            )
+                            .await;
+                        let _ = h.exit_status_request(id, 1).await;
+                        let _ = h.eof(id).await;
+                        let _ = h.close(id).await;
+                    }
+                }
             }
         } else {
             // Command mode: interactive shell.
@@ -313,7 +330,21 @@ impl Handler for ConnectionHandler {
             let vm_name = self.ssh_username.clone();
             match self.start_proxy_exec(&vm_name, data).await {
                 Ok(()) => {}
-                Err(e) => self.close_err(&e.to_string()).await,
+                Err(e) => {
+                    if let (Some(h), Some(id)) =
+                        (self.client_handle.clone(), self.client_channel_id)
+                    {
+                        let _ = h
+                            .data(
+                                id,
+                                CryptoVec::from(format!("error: {}\r\n", e).into_bytes()),
+                            )
+                            .await;
+                        let _ = h.exit_status_request(id, 1).await;
+                        let _ = h.eof(id).await;
+                        let _ = h.close(id).await;
+                    }
+                }
             }
             return Ok(());
         }
@@ -399,6 +430,53 @@ impl Handler for ConnectionHandler {
         Ok(())
     }
 
+    async fn subsystem_request(
+        &mut self,
+        channel: ChannelId,
+        name: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let is_proxy = self.ssh_username != self.config.command_user;
+
+        if !is_proxy {
+            session.channel_failure(channel);
+            return Ok(());
+        }
+
+        if self.authed_user.is_none() {
+            let msg = format!("Authentication failed. Register at https://{} and add your SSH key.\r\n", self.config.dashboard_domain);
+            let _ = session.data(channel, CryptoVec::from(msg.into_bytes()));
+            session.exit_status_request(channel, 1);
+            session.eof(channel);
+            session.close(channel);
+            return Ok(());
+        }
+
+        session.channel_success(channel);
+
+        let vm_name = self.ssh_username.clone();
+        match self.start_proxy_subsystem(&vm_name, name).await {
+            Ok(()) => {}
+            Err(e) => {
+                if let (Some(h), Some(id)) =
+                    (self.client_handle.clone(), self.client_channel_id)
+                {
+                    let _ = h
+                        .data(
+                            id,
+                            CryptoVec::from(format!("error: {}\r\n", e).into_bytes()),
+                        )
+                        .await;
+                    let _ = h.exit_status_request(id, 1).await;
+                    let _ = h.eof(id).await;
+                    let _ = h.close(id).await;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn window_change_request(
         &mut self,
         _channel: ChannelId,
@@ -420,6 +498,9 @@ impl Handler for ConnectionHandler {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         debug!(peer = ?self.peer_addr, "channel_close");
+        if let SessionMode::Proxy { vm_stdin } = &mut self.mode {
+            let _ = vm_stdin.shutdown().await;
+        }
         Ok(())
     }
 
@@ -429,6 +510,9 @@ impl Handler for ConnectionHandler {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         debug!(peer = ?self.peer_addr, "channel_eof");
+        if let SessionMode::Proxy { vm_stdin } = &mut self.mode {
+            let _ = vm_stdin.shutdown().await;
+        }
         Ok(())
     }
 }
