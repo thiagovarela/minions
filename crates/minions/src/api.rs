@@ -70,6 +70,13 @@ pub fn router(state: AppState) -> Router {
             post(restore_snapshot),
         )
         .route("/api/vms/{name}/snapshots/{snap}", delete(delete_snapshot))
+        // Volume routes
+        .route("/api/volumes", post(create_volume))
+        .route("/api/volumes", get(list_volumes))
+        .route("/api/volumes/{name}", get(get_volume_status))
+        .route("/api/volumes/{name}", delete(destroy_volume))
+        .route("/api/volumes/{name}/attach", post(attach_volume))
+        .route("/api/volumes/{name}/detach", post(detach_volume))
         // Resource / billing routes
         .route("/api/billing/plans", get(billing_plans))
         .route("/api/billing/subscription", get(billing_subscription))
@@ -1611,6 +1618,151 @@ async fn delete_snapshot(
             let msg = e.to_string();
             if msg.contains("not found") {
                 (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg })).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
+    }
+}
+
+// ── Volume handlers ────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CreateVolumeRequest {
+    name: String,
+    size_gb: u64,
+}
+
+#[derive(Deserialize)]
+struct AttachVolumeRequest {
+    vm_name: String,
+}
+
+#[derive(Deserialize)]
+struct DetachVolumeRequest {
+    vm_name: String,
+}
+
+/// `POST /api/volumes` — Create a new volume
+async fn create_volume(
+    State(state): State<AppState>,
+    Json(req): Json<CreateVolumeRequest>,
+) -> impl IntoResponse {
+    info!(name = %req.name, size_gb = %req.size_gb, "create volume");
+    let db_path = state.db_path.as_str().to_string();
+    match crate::volume::create(&db_path, &req.name, req.size_gb).await {
+        Ok(volume) => (StatusCode::CREATED, Json(volume)).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("already exists") {
+                (StatusCode::CONFLICT, Json(ErrorResponse { error: msg })).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
+    }
+}
+
+/// `GET /api/volumes` — List all volumes
+async fn list_volumes(State(state): State<AppState>) -> impl IntoResponse {
+    info!("list volumes");
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return internal(e.to_string()).into_response(),
+    };
+    match crate::volume::list(&conn) {
+        Ok(volumes) => Json(volumes).into_response(),
+        Err(e) => internal(e.to_string()).into_response(),
+    }
+}
+
+/// `GET /api/volumes/{name}` — Get volume status
+async fn get_volume_status(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    info!(name = %name, "get volume status");
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return internal(e.to_string()).into_response(),
+    };
+    match crate::volume::get(&conn, &name) {
+        Ok(Some(volume)) => Json(volume).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("volume '{name}' not found"),
+            }),
+        )
+            .into_response(),
+        Err(e) => internal(e.to_string()).into_response(),
+    }
+}
+
+/// `DELETE /api/volumes/{name}` — Destroy a volume
+async fn destroy_volume(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    info!(name = %name, "destroy volume");
+    let db_path = state.db_path.as_str().to_string();
+    match crate::volume::destroy(&db_path, &name).await {
+        Ok(()) => Json(serde_json::json!({
+            "message": format!("volume '{name}' destroyed")
+        }))
+        .into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg })).into_response()
+            } else if msg.contains("attached") {
+                (StatusCode::CONFLICT, Json(ErrorResponse { error: msg })).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
+    }
+}
+
+/// `POST /api/volumes/{name}/attach` — Attach volume to VM
+async fn attach_volume(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<AttachVolumeRequest>,
+) -> impl IntoResponse {
+    info!(volume = %name, vm = %req.vm_name, "attach volume");
+    let db_path = state.db_path.as_str().to_string();
+    match crate::volume::attach(&db_path, &req.vm_name, &name).await {
+        Ok(volume) => Json(volume).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg })).into_response()
+            } else if msg.contains("not available") {
+                (StatusCode::CONFLICT, Json(ErrorResponse { error: msg })).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
+    }
+}
+
+/// `POST /api/volumes/{name}/detach` — Detach volume from VM
+async fn detach_volume(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<DetachVolumeRequest>,
+) -> impl IntoResponse {
+    info!(volume = %name, vm = %req.vm_name, "detach volume");
+    let db_path = state.db_path.as_str().to_string();
+    match crate::volume::detach(&db_path, &req.vm_name, &name).await {
+        Ok(volume) => Json(volume).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg })).into_response()
+            } else if msg.contains("not attached") {
+                (StatusCode::CONFLICT, Json(ErrorResponse { error: msg })).into_response()
             } else {
                 internal(msg).into_response()
             }

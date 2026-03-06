@@ -666,6 +666,7 @@ async fn vm_add_domain(
     let client = reqwest::Client::new();
     let resp = client
         .post(&api_url)
+        .bearer_auth(state.auth.api_key.as_deref().map(|s| s.as_str()).unwrap_or(""))
         .json(&serde_json::json!({ "domain": form.domain }))
         .send()
         .await;

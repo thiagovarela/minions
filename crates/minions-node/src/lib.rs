@@ -9,6 +9,7 @@ pub mod hypervisor;
 pub mod network;
 pub mod storage;
 pub mod vm;
+pub mod volume;
 
 // Re-export db for convenience
 pub use minions_db as db;

@@ -20,6 +20,7 @@ mod metrics;
 mod scheduler;
 mod server;
 mod vm;
+mod volume;
 
 use minions_proto::{Request, Response, ResponseData};
 
@@ -152,6 +153,11 @@ enum Commands {
         #[command(subcommand)]
         action: HostCommands,
     },
+    /// Manage S3-backed volumes
+    Volume {
+        #[command(subcommand)]
+        action: VolumeCommands,
+    },
     /// One-time host setup: bridge, iptables, directories, systemd unit
     Init {
         /// Also persist networking across reboots (sysctl + iptables-persistent)
@@ -223,6 +229,44 @@ enum HostCommands {
     /// Remove a host (must have no VMs)
     Remove {
         /// Host name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum VolumeCommands {
+    /// Create a new S3-backed volume
+    Create {
+        /// Volume name
+        name: String,
+        /// Size in gigabytes
+        #[arg(long)]
+        size: u64,
+    },
+    /// List all volumes
+    List,
+    /// Show volume status
+    Status {
+        /// Volume name
+        name: String,
+    },
+    /// Attach a volume to a VM
+    Attach {
+        /// VM name
+        vm: String,
+        /// Volume name
+        volume: String,
+    },
+    /// Detach a volume from a VM
+    Detach {
+        /// VM name
+        vm: String,
+        /// Volume name
+        volume: String,
+    },
+    /// Destroy a volume (delete from S3 and DB)
+    Destroy {
+        /// Volume name
         name: String,
     },
 }
@@ -407,6 +451,64 @@ fn print_vm_list<I: IntoIterator<Item = VmJson>>(vms: I, json: bool) {
                     .pid
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "-".to_string()),
+            })
+            .collect();
+        println!("{}", Table::new(rows));
+    }
+}
+
+// ── Volume output helpers ──────────────────────────────────────────────────────
+
+fn print_volume(volume: &client::VolumeResponse, json: bool) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(volume).unwrap());
+    } else {
+        println!();
+        println!("✓ Volume '{}'", volume.name);
+        println!("  Size:   {} GB", volume.size_bytes / (1024 * 1024 * 1024));
+        println!("  Status: {}", volume.status);
+        println!("  Bucket: {}", volume.s3_bucket);
+        if let Some(ref vm) = volume.vm_name {
+            println!("  VM:     {}", vm);
+            if let Some(ref dev) = volume.nbd_device {
+                println!("  Device: {}", dev);
+            }
+        }
+        println!();
+    }
+}
+
+fn print_volume_list(volumes: &[client::VolumeResponse], json: bool) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(volumes).unwrap());
+    } else {
+        if volumes.is_empty() {
+            println!("No volumes found.");
+            return;
+        }
+        
+        #[derive(Tabled)]
+        struct VolumeRow {
+            #[tabled(rename = "NAME")]
+            name: String,
+            #[tabled(rename = "SIZE")]
+            size: String,
+            #[tabled(rename = "STATUS")]
+            status: String,
+            #[tabled(rename = "VM")]
+            vm: String,
+            #[tabled(rename = "DEVICE")]
+            device: String,
+        }
+        
+        let rows: Vec<VolumeRow> = volumes
+            .iter()
+            .map(|v| VolumeRow {
+                name: v.name.clone(),
+                size: format!("{} GB", v.size_bytes / (1024 * 1024 * 1024)),
+                status: v.status.clone(),
+                vm: v.vm_name.clone().unwrap_or("-".to_string()),
+                device: v.nbd_device.clone().unwrap_or("-".to_string()),
             })
             .collect();
         println!("{}", Table::new(rows));
@@ -668,6 +770,52 @@ async fn run_remote(
                     );
                 } else {
                     println!("✓ Snapshot '{snapshot}' deleted");
+                }
+            }
+        },
+
+        Commands::Volume { action } => match action {
+            VolumeCommands::Create { name, size } => {
+                if !json {
+                    println!("Creating {size}GB volume '{name}'…");
+                }
+                let volume = c.create_volume(&name, size).await?;
+                print_volume(&volume, json);
+            }
+            VolumeCommands::List => {
+                let volumes = c.list_volumes().await?;
+                print_volume_list(&volumes, json);
+            }
+            VolumeCommands::Status { name } => {
+                let volume = c.get_volume_status(&name).await?;
+                print_volume(&volume, json);
+            }
+            VolumeCommands::Attach { vm, volume } => {
+                if !json {
+                    println!("Attaching volume '{volume}' to VM '{vm}'…");
+                }
+                let vol = c.attach_volume(&volume, &vm).await?;
+                print_volume(&vol, json);
+            }
+            VolumeCommands::Detach { vm, volume } => {
+                if !json {
+                    println!("Detaching volume '{volume}' from VM '{vm}'…");
+                }
+                let vol = c.detach_volume(&volume, &vm).await?;
+                print_volume(&vol, json);
+            }
+            VolumeCommands::Destroy { name } => {
+                if !json {
+                    println!("Destroying volume '{name}'…");
+                }
+                c.destroy_volume(&name).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "message": format!("Volume '{name}' destroyed") })
+                    );
+                } else {
+                    println!("✓ Volume '{name}' destroyed");
                 }
             }
         },
@@ -1059,6 +1207,129 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
                     );
                 } else {
                     println!("✓ Host '{name}' removed");
+                }
+            }
+        },
+
+        Commands::Volume { action } => match action {
+            VolumeCommands::Create { name, size } => {
+                if !json {
+                    println!("Creating {size}GB volume '{name}'…");
+                }
+                let volume = volume::create(db_path, &name, size).await?;
+
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&volume)?);
+                } else {
+                    println!("✓ Volume '{name}' created successfully");
+                    println!("  Size: {} GB", size);
+                    println!("  Status: {}", volume.status);
+                    println!("  S3 Bucket: {}", volume.s3_bucket);
+                }
+            }
+            VolumeCommands::List => {
+                let conn = db::open(db_path)?;
+                let volumes = volume::list(&conn)?;
+
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&volumes)?);
+                } else {
+                    if volumes.is_empty() {
+                        println!("No volumes found");
+                    } else {
+                        #[derive(Tabled)]
+                        struct VolumeRow {
+                            name: String,
+                            #[tabled(rename = "Size")]
+                            size: String,
+                            status: String,
+                            #[tabled(rename = "VM")]
+                            vm_name: String,
+                            #[tabled(rename = "Device")]
+                            device: String,
+                        }
+
+                        let rows: Vec<VolumeRow> = volumes
+                            .iter()
+                            .map(|v| VolumeRow {
+                                name: v.name.clone(),
+                                size: format!("{} GB", v.size_bytes / (1024 * 1024 * 1024)),
+                                status: v.status.clone(),
+                                vm_name: v.vm_name.clone().unwrap_or("-".to_string()),
+                                device: v.nbd_device.clone().unwrap_or("-".to_string()),
+                            })
+                            .collect();
+                        println!("{}", Table::new(rows));
+                    }
+                }
+            }
+            VolumeCommands::Status { name } => {
+                let conn = db::open(db_path)?;
+                let volume = volume::get(&conn, &name)?
+                    .with_context(|| format!("Volume '{name}' not found"))?;
+
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&volume)?);
+                } else {
+                    println!("Volume: {}", volume.name);
+                    println!("  ID: {}", volume.id);
+                    println!("  Size: {} GB", volume.size_bytes / (1024 * 1024 * 1024));
+                    println!("  Status: {}", volume.status);
+                    println!("  S3 Bucket: {}", volume.s3_bucket);
+                    println!("  S3 Prefix: {}", volume.s3_prefix);
+                    if let Some(ref vm) = volume.vm_name {
+                        println!("  Attached to VM: {}", vm);
+                        if let Some(ref dev) = volume.nbd_device {
+                            println!("  Device: {}", dev);
+                        }
+                        if let Some(ref host) = volume.host_id {
+                            println!("  Host: {}", host);
+                        }
+                    }
+                    println!("  Created: {}", volume.created_at);
+                }
+            }
+            VolumeCommands::Attach { vm, volume } => {
+                if !json {
+                    println!("Attaching volume '{volume}' to VM '{vm}'…");
+                }
+                let vol = volume::attach(db_path, &vm, &volume).await?;
+
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&vol)?);
+                } else {
+                    println!("✓ Volume '{volume}' attached to VM '{vm}'");
+                    if let Some(ref dev) = vol.nbd_device {
+                        println!("  Device: {}", dev);
+                    }
+                }
+            }
+            VolumeCommands::Detach { vm, volume } => {
+                if !json {
+                    println!("Detaching volume '{volume}' from VM '{vm}'…");
+                }
+                let vol = volume::detach(db_path, &vm, &volume).await?;
+
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&vol)?);
+                } else {
+                    println!("✓ Volume '{volume}' detached from VM '{vm}'");
+                    println!("  Status: {}", vol.status);
+                }
+            }
+            VolumeCommands::Destroy { name } => {
+                if !json {
+                    println!("Destroying volume '{name}'…");
+                }
+                volume::destroy(db_path, &name).await?;
+
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "message": format!("Volume '{name}' destroyed") })
+                    );
+                } else {
+                    println!("✓ Volume '{name}' destroyed");
                 }
             }
         },

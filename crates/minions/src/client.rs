@@ -326,6 +326,120 @@ impl Client {
         .context("delete snapshot")?;
         Ok(())
     }
+
+    // ── Volume methods ──────────────────────────────────────────────────────
+
+    pub async fn create_volume(&self, name: &str, size_gb: u64) -> Result<VolumeResponse> {
+        #[derive(Serialize)]
+        struct Req {
+            name: String,
+            size_gb: u64,
+        }
+        self.auth(self.http.post(format!("{}/api/volumes", self.base)).json(&Req {
+            name: name.to_string(),
+            size_gb,
+        }))
+        .send()
+        .await
+        .context("send create volume request")?
+        .error_for_status()
+        .context("create volume")?
+        .json()
+        .await
+        .context("decode create volume response")
+    }
+
+    pub async fn list_volumes(&self) -> Result<Vec<VolumeResponse>> {
+        self.auth(self.http.get(format!("{}/api/volumes", self.base)))
+            .send()
+            .await
+            .context("send list volumes request")?
+            .error_for_status()
+            .context("list volumes")?
+            .json()
+            .await
+            .context("decode list volumes response")
+    }
+
+    pub async fn get_volume_status(&self, name: &str) -> Result<VolumeResponse> {
+        self.auth(self.http.get(format!("{}/api/volumes/{}", self.base, name)))
+            .send()
+            .await
+            .context("send get volume status request")?
+            .error_for_status()
+            .context("get volume status")?
+            .json()
+            .await
+            .context("decode volume status response")
+    }
+
+    pub async fn destroy_volume(&self, name: &str) -> Result<()> {
+        self.auth(self.http.delete(format!("{}/api/volumes/{}", self.base, name)))
+            .send()
+            .await
+            .context("send destroy volume request")?
+            .error_for_status()
+            .context("destroy volume")?;
+        Ok(())
+    }
+
+    pub async fn attach_volume(&self, volume_name: &str, vm_name: &str) -> Result<VolumeResponse> {
+        #[derive(Serialize)]
+        struct Req {
+            vm_name: String,
+        }
+        self.auth(
+            self.http
+                .post(format!("{}/api/volumes/{}/attach", self.base, volume_name))
+                .json(&Req {
+                    vm_name: vm_name.to_string(),
+                }),
+        )
+        .send()
+        .await
+        .context("send attach volume request")?
+        .error_for_status()
+        .context("attach volume")?
+        .json()
+        .await
+        .context("decode attach volume response")
+    }
+
+    pub async fn detach_volume(&self, volume_name: &str, vm_name: &str) -> Result<VolumeResponse> {
+        #[derive(Serialize)]
+        struct Req {
+            vm_name: String,
+        }
+        self.auth(
+            self.http
+                .post(format!("{}/api/volumes/{}/detach", self.base, volume_name))
+                .json(&Req {
+                    vm_name: vm_name.to_string(),
+                }),
+        )
+        .send()
+        .await
+        .context("send detach volume request")?
+        .error_for_status()
+        .context("detach volume")?
+        .json()
+        .await
+        .context("decode detach volume response")
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct VolumeResponse {
+    pub id: String,
+    pub name: String,
+    pub size_bytes: i64,
+    pub status: String,
+    pub vm_name: Option<String>,
+    pub nbd_device: Option<String>,
+    pub s3_bucket: String,
+    pub s3_prefix: String,
+    pub host_id: Option<String>,
+    pub created_at: String,
 }
 
 /// Check if the local daemon is reachable on port 3000.
