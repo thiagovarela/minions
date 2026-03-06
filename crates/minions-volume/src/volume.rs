@@ -72,7 +72,7 @@ pub struct VolumeHandle {
     s3_backend: Arc<S3Backend>,
     sync_engine: Arc<SyncEngine>,
     sync_task: Option<JoinHandle<Result<()>>>,
-    nbd_task: Option<JoinHandle<()>>,
+    nbd_server: Option<NbdServer>,
     socket_path: PathBuf,
 }
 
@@ -134,12 +134,19 @@ impl VolumeHandle {
         let mut nbd_server = NbdServer::new(nbd_config)?;
         nbd_server.start().await?;
 
-        // Spawn task to accept NBD connections on the started server
+        // Spawn task to accept NBD connections
         let volume_name = config.name.clone();
         let cache_clone = cache.clone();
         let s3_clone = s3_backend.clone();
-        let nbd_task = tokio::spawn(async move {
-            let mut server = nbd_server;
+        
+        let mut server_clone = NbdServer::new(NbdServerConfig {
+            socket_path: socket_path.clone(),
+            export_name: config.name.clone(),
+            export_size: metadata.size_bytes,
+            read_only: config.read_only,
+        })?;
+        
+        tokio::spawn(async move {
             loop {
                 let handler = VolumeCommandHandler {
                     cache: cache_clone.clone(),
@@ -147,13 +154,9 @@ impl VolumeHandle {
                     volume_name: volume_name.clone(),
                 };
 
-                match server.accept_and_handle(handler).await {
+                match server_clone.accept_and_handle(handler).await {
                     Ok(_) => info!("NBD client disconnected"),
-                    Err(e) => {
-                        warn!("NBD client error: {}", e);
-                        // Brief backoff to avoid busy loop on persistent errors
-                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    }
+                    Err(e) => warn!("NBD client error: {}", e),
                 }
             }
         });
@@ -166,7 +169,7 @@ impl VolumeHandle {
             s3_backend,
             sync_engine,
             sync_task,
-            nbd_task: Some(nbd_task),
+            nbd_server: Some(nbd_server),
             socket_path,
         })
     }
@@ -232,10 +235,8 @@ impl VolumeHandle {
             let _ = task.await;
         }
 
-        // Stop NBD accept loop
-        if let Some(task) = self.nbd_task.take() {
-            task.abort();
-        }
+        // NBD server cleanup happens in Drop
+        drop(self.nbd_server.take());
 
         info!("Volume '{}' closed successfully", self.config.name);
         Ok(())
@@ -381,40 +382,12 @@ impl VolumeCommandHandler {
     async fn fetch_block_from_s3(&self, lba: Lba) -> Result<Vec<u8>> {
         let (segment_id, block_offset) = crate::lba_to_segment(lba);
 
-        // Fetch entire segment from S3.
-        // If the segment does not exist yet, treat it as zero-filled.
-        let segment_data = match self
+        // Fetch entire segment from S3
+        let segment_data = self
             .s3_backend
-            .segment_exists(&self.volume_name, segment_id)
+            .read_segment(&self.volume_name, segment_id)
             .await
-        {
-            Ok(true) => match self
-                .s3_backend
-                .read_segment(&self.volume_name, segment_id)
-                .await
-            {
-                Ok(data) => data,
-                Err(e) => {
-                    tracing::warn!(
-                        "Segment {} read failed for volume '{}', using zero-filled segment: {}",
-                        segment_id,
-                        self.volume_name,
-                        e
-                    );
-                    vec![0u8; crate::SEGMENT_SIZE]
-                }
-            },
-            Ok(false) => vec![0u8; crate::SEGMENT_SIZE],
-            Err(e) => {
-                tracing::warn!(
-                    "Segment {} existence check failed for volume '{}', using zero-filled segment: {}",
-                    segment_id,
-                    self.volume_name,
-                    e
-                );
-                vec![0u8; crate::SEGMENT_SIZE]
-            }
-        };
+            .context("Failed to fetch segment from S3")?;
 
         // Extract the requested block
         let block_start = block_offset * BLOCK_SIZE;
@@ -451,7 +424,6 @@ mod tests {
             bucket: "test".to_string(),
             access_key: "test".to_string(),
             secret_key: "test".to_string(),
-            path_style: true,
         };
 
         let config = VolumeConfig::new("test-vol".to_string(), 10 * 1024 * 1024, s3_config)

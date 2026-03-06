@@ -10,7 +10,7 @@ use s3::creds::Credentials;
 use s3::{Bucket, Region};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::{SegmentId, VolumeSize, SEGMENT_SIZE};
 
@@ -22,29 +22,14 @@ pub struct S3Config {
     pub bucket: String,
     pub access_key: String,
     pub secret_key: String,
-    /// Use path-style requests (e.g. http://host:9000/bucket/key)
-    /// Set true for MinIO; false for many hosted S3-compatible providers.
-    pub path_style: bool,
 }
 
 impl S3Config {
     /// Load from environment variables
     pub fn from_env() -> Result<Self> {
-        let endpoint = std::env::var("MINIONS_S3_ENDPOINT")
-            .unwrap_or_else(|_| "https://s3.amazonaws.com".to_string());
-
-        let path_style = std::env::var("MINIONS_S3_PATH_STYLE")
-            .ok()
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-            // Auto-detect for local MinIO-style endpoints
-            .unwrap_or_else(|| {
-                endpoint.contains("localhost")
-                    || endpoint.contains("127.0.0.1")
-                    || endpoint.contains(":9000")
-            });
-
         Ok(S3Config {
-            endpoint,
+            endpoint: std::env::var("MINIONS_S3_ENDPOINT")
+                .unwrap_or_else(|_| "https://s3.amazonaws.com".to_string()),
             region: std::env::var("MINIONS_S3_REGION")
                 .unwrap_or_else(|_| "us-east-1".to_string()),
             bucket: std::env::var("MINIONS_S3_BUCKET")
@@ -53,7 +38,6 @@ impl S3Config {
                 .context("MINIONS_S3_ACCESS_KEY not set")?,
             secret_key: std::env::var("MINIONS_S3_SECRET_KEY")
                 .context("MINIONS_S3_SECRET_KEY not set")?,
-            path_style,
         })
     }
 }
@@ -98,18 +82,10 @@ impl S3Backend {
         };
 
         let bucket = Bucket::new(&config.bucket, region, credentials)
-            .context("Failed to create S3 bucket")?;
+            .context("Failed to create S3 bucket")?
+            .with_path_style(); // Use path-style for MinIO compatibility
 
-        let bucket = if config.path_style {
-            bucket.with_path_style()
-        } else {
-            bucket
-        };
-
-        info!(
-            "Initialized S3 backend: bucket={}, path_style={}",
-            config.bucket, config.path_style
-        );
+        info!("Initialized S3 backend: bucket={}", config.bucket);
 
         Ok(S3Backend {
             bucket: Arc::new(*bucket),
@@ -149,46 +125,13 @@ impl S3Backend {
     }
 
     /// Check if a volume exists
-    ///
-    /// Some S3-compatible providers behave inconsistently for HEAD on missing
-    /// objects, so we use GET + metadata validation for robustness.
     pub async fn volume_exists(&self, name: &str) -> Result<bool> {
         let meta_path = self.volume_meta_path(name);
-
-        match self.bucket.get_object(&meta_path).await {
-            Ok(response) => {
-                let body = response.bytes();
-                if body.is_empty() {
-                    return Ok(false);
-                }
-
-                // Consider it existing only if metadata is valid JSON in expected shape.
-                match serde_json::from_slice::<VolumeMetadata>(body) {
-                    Ok(_) => Ok(true),
-                    Err(e) => {
-                        warn!(
-                            "Unexpected object at '{}': not valid volume metadata ({})",
-                            meta_path, e
-                        );
-                        Ok(false)
-                    }
-                }
-            }
+        
+        match self.bucket.head_object(&meta_path).await {
+            Ok(_) => Ok(true),
             Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Ok(false),
-            Err(e) => {
-                // If provider returns non-404 for missing key, treat as non-existent
-                // only when message hints key/object absence.
-                let msg = e.to_string().to_lowercase();
-                if msg.contains("not found")
-                    || msg.contains("no such key")
-                    || msg.contains("nosuchkey")
-                    || msg.contains("key does not exist")
-                {
-                    Ok(false)
-                } else {
-                    Err(e).context("Failed to check volume existence")
-                }
-            }
+            Err(e) => Err(e).context("Failed to check volume existence"),
         }
     }
 
@@ -373,7 +316,6 @@ mod tests {
             bucket: "test-bucket".to_string(),
             access_key: "test".to_string(),
             secret_key: "test".to_string(),
-            path_style: true,
         };
 
         let backend = S3Backend::new(config).unwrap();

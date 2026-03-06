@@ -132,8 +132,6 @@ pub struct Volume {
     pub s3_bucket: String,
     pub s3_prefix: String,
     pub host_id: Option<String>,
-    /// Optional filesystem to create on first attach (e.g. "ext4")
-    pub fs_type: Option<String>,
     pub created_at: String,
 }
 
@@ -364,7 +362,6 @@ fn migrate(conn: &Connection) -> Result<()> {
             s3_bucket       TEXT NOT NULL,
             s3_prefix       TEXT NOT NULL,
             host_id         TEXT,
-            fs_type         TEXT,
             created_at      TEXT NOT NULL
         );
 
@@ -373,9 +370,6 @@ fn migrate(conn: &Connection) -> Result<()> {
         ",
     )
     .context("create volumes table")?;
-
-    // Idempotent addition for existing databases.
-    let _ = conn.execute_batch("ALTER TABLE volumes ADD COLUMN fs_type TEXT;");
 
     Ok(())
 }
@@ -1454,12 +1448,12 @@ pub fn get_user_by_fingerprint(conn: &Connection, fingerprint: &str) -> Result<O
 
 // ── Volume management ─────────────────────────────────────────────────────────
 
-const VOLUME_COLUMNS: &str = "id,name,size_bytes,status,vm_name,nbd_device,s3_bucket,s3_prefix,host_id,fs_type,created_at";
+const VOLUME_COLUMNS: &str = "id,name,size_bytes,status,vm_name,nbd_device,s3_bucket,s3_prefix,host_id,created_at";
 
 pub fn insert_volume(conn: &Connection, volume: &Volume) -> Result<()> {
     conn.execute(
-        "INSERT INTO volumes (id,name,size_bytes,status,vm_name,nbd_device,s3_bucket,s3_prefix,host_id,fs_type,created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        "INSERT INTO volumes (id,name,size_bytes,status,vm_name,nbd_device,s3_bucket,s3_prefix,host_id,created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         params![
             volume.id,
             volume.name,
@@ -1470,7 +1464,6 @@ pub fn insert_volume(conn: &Connection, volume: &Volume) -> Result<()> {
             volume.s3_bucket,
             volume.s3_prefix,
             volume.host_id,
-            volume.fs_type,
             volume.created_at,
         ],
     )?;
@@ -1491,8 +1484,7 @@ pub fn get_volume(conn: &Connection, name: &str) -> Result<Option<Volume>> {
             s3_bucket: row.get(6)?,
             s3_prefix: row.get(7)?,
             host_id: row.get(8)?,
-            fs_type: row.get(9)?,
-            created_at: row.get(10)?,
+            created_at: row.get(9)?,
         })),
         None => Ok(None),
     }
@@ -1511,8 +1503,7 @@ pub fn list_volumes(conn: &Connection) -> Result<Vec<Volume>> {
             s3_bucket: row.get(6)?,
             s3_prefix: row.get(7)?,
             host_id: row.get(8)?,
-            fs_type: row.get(9)?,
-            created_at: row.get(10)?,
+            created_at: row.get(9)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -1534,8 +1525,7 @@ pub fn list_volumes_by_vm(conn: &Connection, vm_name: &str) -> Result<Vec<Volume
             s3_bucket: row.get(6)?,
             s3_prefix: row.get(7)?,
             host_id: row.get(8)?,
-            fs_type: row.get(9)?,
-            created_at: row.get(10)?,
+            created_at: row.get(9)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -1896,7 +1886,6 @@ mod tests {
             s3_bucket: "minions-volumes".to_string(),
             s3_prefix: format!("volumes/{}", name),
             host_id: None,
-            fs_type: None,
             created_at: Utc::now().to_rfc3339(),
         }
     }

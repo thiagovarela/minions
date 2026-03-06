@@ -104,27 +104,10 @@ pub async fn attach_volume_to_vm(
     // Open the volume (starts NBD server)
     let handle = open_volume(volume_name, s3_config).await?;
 
-    // Connect nbd-client (blocking process call in blocking task)
-    let socket_path = handle.socket_path().clone();
-    let export_name = volume_name.to_string();
-    let device_path = tokio::task::spawn_blocking(move || {
-        storage::nbd_connect(&socket_path, &export_name)
-    })
-    .await
-    .context("join error while connecting NBD client")?
-    .context("Failed to connect NBD client")?;
-
-    // Optional first-attach filesystem formatting
-    if let Some(fs) = volume.fs_type.as_deref() {
-        tokio::task::spawn_blocking({
-            let device = device_path.clone();
-            let fs = fs.to_string();
-            move || storage::ensure_filesystem(&device, &fs)
-        })
-        .await
-        .context("join error while ensuring filesystem")?
-        .context("Failed to ensure filesystem on volume")?;
-    }
+    // Connect nbd-client
+    let socket_path = handle.socket_path();
+    let device_path = storage::nbd_connect(socket_path)
+        .context("Failed to connect NBD client")?;
 
     // Update database
     db::attach_volume(&conn, volume_name, vm_name, &device_path, "local")?;
@@ -213,15 +196,10 @@ async fn reattach_volume(db_path: &str, vm_name: &str, volume_name: &str) -> Res
     // Open the volume (starts NBD server)
     let handle = open_volume(volume_name, s3_config).await?;
 
-    // Connect nbd-client (blocking process call in blocking task)
-    let socket_path = handle.socket_path().clone();
-    let export_name = volume_name.to_string();
-    let device_path = tokio::task::spawn_blocking(move || {
-        storage::nbd_connect(&socket_path, &export_name)
-    })
-    .await
-    .context("join error while connecting NBD client")?
-    .context("Failed to connect NBD client")?;
+    // Connect nbd-client
+    let socket_path = handle.socket_path();
+    let device_path = storage::nbd_connect(socket_path)
+        .context("Failed to connect NBD client")?;
 
     // Update database with new device path
     let conn = db::open(db_path)?;

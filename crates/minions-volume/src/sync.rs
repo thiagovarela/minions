@@ -316,7 +316,6 @@ mod tests {
                 bucket: "test".to_string(),
                 access_key: "test".to_string(),
                 secret_key: "test".to_string(),
-                path_style: true,
             })
             .unwrap(),
         );
