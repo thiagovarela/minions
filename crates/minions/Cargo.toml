@@ -19,9 +19,6 @@ path = "../minions-node"
 [dependencies.minions-db]
 path = "../minions-db"
 
-[dependencies.minions-volume]
-path = "../minions-volume"
-
 [dependencies]
 askama = "0.12"
 minions-proto = { path = "../minions-proto" }

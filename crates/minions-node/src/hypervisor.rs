@@ -27,7 +27,6 @@ pub struct VmConfig {
     pub api_socket: PathBuf,
     pub vsock_socket: PathBuf,
     pub serial_log: PathBuf,
-    pub extra_disks: Vec<String>, // Additional disk paths (e.g., NBD devices)
 }
 
 /// Ensure /run/minions/ exists.
@@ -64,14 +63,6 @@ pub fn spawn(cfg: &VmConfig) -> Result<u32> {
     cmd.args([
         "--disk",
         &format!("path={}", cfg.rootfs.display()),
-    ]);
-
-    // Add extra disks (volumes)
-    for disk_path in &cfg.extra_disks {
-        cmd.args(["--disk", &format!("path={}", disk_path)]);
-    }
-
-    cmd.args([
         "--cpus",
         &format!("boot={}", cfg.vcpus),
         "--memory",

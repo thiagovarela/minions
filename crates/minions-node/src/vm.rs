@@ -125,7 +125,6 @@ pub async fn create_with_os(
             api_socket,
             vsock_socket: vsock_socket.clone(),
             serial_log,
-            extra_disks: Vec::new(), // No extra disks on create
         };
         (ip, vsock_socket, cfg)
         // conn dropped here — no borrow across await
@@ -235,13 +234,6 @@ pub async fn stop(db_path: &str, name: &str) -> Result<db::Vm> {
         // conn dropped here
     };
 
-    // ── Disconnect volumes before shutdown ────────────────────────────────────
-    // Note: This disconnects NBD but preserves DB attachment for auto-reattach on start
-    if let Err(e) = crate::volume::disconnect_all_vm_volumes(db_path, name).await {
-        tracing::warn!("Failed to disconnect volumes during stop: {}", e);
-        // Continue with shutdown anyway
-    }
-
     // ── Shutdown CH process using stored socket paths ─────────────────────────
     hypervisor::shutdown_vm(&api_socket, &vsock_socket, ch_pid).context("shutdown hypervisor")?;
     network::destroy_tap_device(&tap_device).context("destroy TAP")?;
@@ -258,12 +250,9 @@ pub async fn stop(db_path: &str, name: &str) -> Result<db::Vm> {
 /// the original rootfs, reconfigures the guest network at the same IP, and
 /// marks the VM as running.  The rootfs is preserved exactly as it was when
 /// the VM was stopped — no data is lost.
-///
-/// Automatically attaches any volumes that are marked as attached to this VM
-/// in the database.
 pub async fn start(db_path: &str, name: &str) -> Result<db::Vm> {
-    // ── Sync: validate + prepare resources ───────────────────────────────────
-    let (ip, vsock_socket, tap, os_type) = {
+    // ── Sync: validate + build config from stored state ───────────────────────
+    let (ip, vsock_socket, tap, cfg) = {
         let conn = db::open(db_path)?;
         let vm = db::get_vm(&conn, name)?.with_context(|| format!("VM '{name}' not found"))?;
 
@@ -278,41 +267,14 @@ pub async fn start(db_path: &str, name: &str) -> Result<db::Vm> {
         let tap = network::create_tap_named(&vm.tap_device)
             .with_context(|| format!("recreate TAP device '{}'", vm.tap_device))?;
 
+        let serial_log = storage::serial_log_path(name);
+        let api_socket = std::path::PathBuf::from(&vm.ch_api_socket);
         let vsock_socket = std::path::PathBuf::from(&vm.ch_vsock_socket);
+
         let os_type =
             storage::OsType::from_str(&vm.os_type).unwrap_or_else(|_| storage::OsType::default());
 
-        db::update_vm_status(&conn, name, "starting", None)?;
-
-        (vm.ip.clone(), vsock_socket, tap, os_type)
-        // conn dropped here
-    };
-
-    // ── Async: attach volumes before spawning ─────────────────────────────────
-    info!("Attaching volumes for VM '{name}'...");
-    let volume_devices = match crate::volume::attach_all_vm_volumes(db_path, name).await {
-        Ok(devices) => {
-            if !devices.is_empty() {
-                info!("Attached {} volume(s): {:?}", devices.len(), devices);
-            }
-            devices
-        }
-        Err(e) => {
-            tracing::warn!("Failed to attach volumes: {}", e);
-            // Continue without volumes - don't fail VM start
-            Vec::new()
-        }
-    };
-
-    // ── Sync: build config with attached volumes ──────────────────────────────
-    let cfg = {
-        let conn = db::open(db_path)?;
-        let vm = db::get_vm(&conn, name)?.with_context(|| format!("VM '{name}' not found"))?;
-
-        let serial_log = storage::serial_log_path(name);
-        let api_socket = std::path::PathBuf::from(&vm.ch_api_socket);
-
-        hypervisor::VmConfig {
+        let cfg = hypervisor::VmConfig {
             name: name.to_string(),
             vcpus: vm.vcpus,
             memory_mb: vm.memory_mb,
@@ -325,8 +287,12 @@ pub async fn start(db_path: &str, name: &str) -> Result<db::Vm> {
             api_socket,
             vsock_socket: vsock_socket.clone(),
             serial_log,
-            extra_disks: volume_devices,
-        }
+        };
+
+        db::update_vm_status(&conn, name, "starting", None)?;
+
+        (vm.ip.clone(), vsock_socket, tap, cfg)
+        // conn dropped here
     };
 
     // ── Async: spawn CH, wait for agent, configure network ───────────────────
@@ -361,12 +327,6 @@ pub async fn start(db_path: &str, name: &str) -> Result<db::Vm> {
     // ── Rollback on failure ───────────────────────────────────────────────────
     if let Err(e) = result {
         info!("start failed ({e:#}), rolling back…");
-        
-        // Disconnect volumes (keep DB attachment for retry)
-        if let Err(vol_err) = crate::volume::disconnect_all_vm_volumes(db_path, name).await {
-            tracing::warn!("Failed to disconnect volumes during rollback: {}", vol_err);
-        }
-        
         let pid = {
             let conn = db::open(db_path).ok();
             conn.and_then(|c| db::get_vm(&c, name).ok().flatten())
@@ -404,12 +364,6 @@ pub async fn destroy(db_path: &str, name: &str) -> Result<()> {
         )
         // conn dropped here
     };
-
-    // ── Detach all volumes (full detach - clears DB) ──────────────────────────
-    // Best-effort: log errors but don't fail the destroy
-    if let Err(e) = crate::volume::detach_all_vm_volumes(db_path, name).await {
-        tracing::warn!("Failed to detach volumes for VM '{}': {:#}", name, e);
-    }
 
     // ── Shutdown CH using stored socket paths ─────────────────────────────────
     hypervisor::shutdown_vm(&api_socket, &vsock_socket, ch_pid).context("shutdown hypervisor")?;
@@ -772,7 +726,6 @@ pub async fn copy(
             api_socket,
             vsock_socket: vsock_socket.clone(),
             serial_log,
-            extra_disks: Vec::new(), // No extra disks on copy
         };
         (ip, vsock_socket, cfg)
         // conn dropped
