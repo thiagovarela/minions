@@ -172,6 +172,31 @@ sudo minions snapshot restore myvm before-upgrade
 sudo minions snapshot delete myvm before-upgrade
 ```
 
+## S3 backups
+
+Upload VM disk backups to S3-compatible object storage:
+
+```bash
+# Required environment variables (on the host running minions)
+export MINIONS_BACKUP_S3_BUCKET=my-minions-backups
+export MINIONS_BACKUP_S3_REGION=us-east-1
+
+# Optional
+export MINIONS_BACKUP_S3_PREFIX=minions/v1
+export MINIONS_BACKUP_S3_ENDPOINT=https://s3.amazonaws.com   # or MinIO endpoint
+export MINIONS_BACKUP_S3_SSE=aws:kms                         # or AES256
+export MINIONS_BACKUP_S3_KMS_KEY_ID=arn:aws:kms:...
+
+# Create / list / restore / delete
+sudo minions backup create myvm
+sudo minions backup create myvm --name nightly-2026-03-07
+sudo minions backup list myvm
+sudo minions backup restore myvm nightly-2026-03-07
+sudo minions backup delete myvm nightly-2026-03-07
+```
+
+Backups are compressed with zstd before upload. Restore requires the VM to be stopped.
+
 ## Running as a daemon
 
 Start the HTTP API server to manage VMs remotely:

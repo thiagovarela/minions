@@ -3,6 +3,8 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::db;
+
 /// Client for calling a remote node agent API.
 pub struct HostClient {
     base_url: String,
@@ -132,6 +134,72 @@ impl HostClient {
             .context("snapshot request failed")?;
 
         resp.json().await.context("parse snapshot response")
+    }
+
+    pub async fn create_backup(
+        &self,
+        vm_name: &str,
+        backup_name: Option<String>,
+    ) -> Result<db::Backup> {
+        #[derive(Serialize)]
+        struct BackupRequest {
+            name: Option<String>,
+        }
+
+        let req = BackupRequest { name: backup_name };
+
+        let resp = self
+            .client
+            .post(format!("{}/vms/{}/backups", self.base_url, vm_name))
+            .json(&req)
+            .send()
+            .await
+            .context("send create backup request")?
+            .error_for_status()
+            .context("create backup request failed")?;
+
+        resp.json().await.context("parse create backup response")
+    }
+
+    pub async fn list_backups(&self, vm_name: &str) -> Result<Vec<db::Backup>> {
+        let resp = self
+            .client
+            .get(format!("{}/vms/{}/backups", self.base_url, vm_name))
+            .send()
+            .await
+            .context("send list backups request")?
+            .error_for_status()
+            .context("list backups request failed")?;
+
+        resp.json().await.context("parse list backups response")
+    }
+
+    pub async fn restore_backup(&self, vm_name: &str, backup_name: &str) -> Result<()> {
+        self.client
+            .post(format!(
+                "{}/vms/{}/backups/{}/restore",
+                self.base_url, vm_name, backup_name
+            ))
+            .send()
+            .await
+            .context("send restore backup request")?
+            .error_for_status()
+            .context("restore backup request failed")?;
+        Ok(())
+    }
+
+    pub async fn delete_backup(&self, vm_name: &str, backup_name: &str) -> Result<()> {
+        self.client
+            .delete(format!(
+                "{}/vms/{}/backups/{}",
+                self.base_url, vm_name, backup_name
+            ))
+            .send()
+            .await
+            .context("send delete backup request")?
+            .error_for_status()
+            .context("delete backup request failed")?;
+        Ok(())
     }
 
     pub async fn exec_vm(

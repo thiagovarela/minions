@@ -41,6 +41,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/vms/:name/start", post(start_vm))
         .route("/vms/:name/restart", post(restart_vm))
         .route("/vms/:name/snapshot", post(snapshot_vm))
+        .route("/vms/:name/backups", post(create_backup_vm))
+        .route("/vms/:name/backups", get(list_backups_vm))
+        .route(
+            "/vms/:name/backups/:backup/restore",
+            post(restore_backup_vm),
+        )
+        .route("/vms/:name/backups/:backup", delete(delete_backup_vm))
         .route("/vms/:name/exec", post(exec_vm))
         .with_state(state);
 
@@ -165,6 +172,47 @@ async fn snapshot_vm(
     info!("Creating snapshot for VM: {}", vm_name);
     let snapshot = vm::snapshot(&state.db_path, &vm_name, req.name).await?;
     Ok(Json(snapshot))
+}
+
+#[derive(Deserialize)]
+struct BackupRequest {
+    name: Option<String>,
+}
+
+async fn create_backup_vm(
+    State(state): State<Arc<AppState>>,
+    Path(vm_name): Path<String>,
+    Json(req): Json<BackupRequest>,
+) -> Result<Json<db::Backup>, AppError> {
+    info!("Creating S3 backup for VM: {}", vm_name);
+    let backup = vm::backup_to_s3(&state.db_path, &vm_name, req.name).await?;
+    Ok(Json(backup))
+}
+
+async fn list_backups_vm(
+    State(state): State<Arc<AppState>>,
+    Path(vm_name): Path<String>,
+) -> Result<Json<Vec<db::Backup>>, AppError> {
+    let backups = vm::list_backups(&state.db_path, &vm_name)?;
+    Ok(Json(backups))
+}
+
+async fn restore_backup_vm(
+    State(state): State<Arc<AppState>>,
+    Path((vm_name, backup_name)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    info!("Restoring VM '{}' from backup '{}'", vm_name, backup_name);
+    vm::restore_backup(&state.db_path, &vm_name, &backup_name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_backup_vm(
+    State(state): State<Arc<AppState>>,
+    Path((vm_name, backup_name)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    info!("Deleting backup '{}' for VM '{}'", backup_name, vm_name);
+    vm::delete_backup(&state.db_path, &vm_name, &backup_name).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]

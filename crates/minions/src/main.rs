@@ -147,6 +147,11 @@ enum Commands {
         #[command(subcommand)]
         action: SnapshotCommands,
     },
+    /// Manage VM S3 backups
+    Backup {
+        #[command(subcommand)]
+        action: BackupCommands,
+    },
     /// Manage hosts (multi-host deployments)
     Host {
         #[command(subcommand)]
@@ -188,6 +193,37 @@ enum SnapshotCommands {
         vm: String,
         /// Snapshot name
         snapshot: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum BackupCommands {
+    /// Create an S3 backup of a VM (VM may be running or stopped)
+    Create {
+        /// VM name
+        vm: String,
+        /// Backup name (default: UTC timestamp)
+        #[arg(long, short)]
+        name: Option<String>,
+    },
+    /// List S3 backups for a VM
+    List {
+        /// VM name
+        vm: String,
+    },
+    /// Restore a VM from an S3 backup (VM must be stopped first)
+    Restore {
+        /// VM name
+        vm: String,
+        /// Backup name
+        backup: String,
+    },
+    /// Delete an S3 backup
+    Delete {
+        /// VM name
+        vm: String,
+        /// Backup name
+        backup: String,
     },
 }
 
@@ -383,6 +419,76 @@ fn print_snapshot_list(vm_name: &str, snaps: &[client::SnapshotResponse], json: 
             })
             .collect();
         println!("{}", Table::new(rows));
+    }
+}
+
+// ── S3 backup output helpers ──────────────────────────────────────────────────
+
+#[derive(Tabled)]
+struct BackupRow {
+    #[tabled(rename = "NAME")]
+    name: String,
+    #[tabled(rename = "COMPRESSED")]
+    compressed_size: String,
+    #[tabled(rename = "RAW")]
+    raw_size: String,
+    #[tabled(rename = "CREATED")]
+    created_at: String,
+}
+
+fn print_backup(backup: &client::BackupResponse, json: bool) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(backup).unwrap());
+    } else {
+        println!();
+        println!("✓ Backup '{}'", backup.name);
+        println!("  VM:         {}", backup.vm_name);
+        println!("  Bucket:     {}", backup.bucket);
+        println!("  Object:     {}", backup.object_key);
+        println!(
+            "  Size:       {} (compressed), {} (raw)",
+            fmt_bytes(backup.size_bytes_compressed),
+            fmt_bytes(backup.size_bytes_uncompressed)
+        );
+        println!("  Created:    {}", backup.created_at);
+        println!();
+    }
+}
+
+fn print_backup_list(vm_name: &str, backups: &[client::BackupResponse], json: bool) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(backups).unwrap());
+    } else {
+        if backups.is_empty() {
+            println!("No S3 backups for VM '{vm_name}'.");
+            return;
+        }
+
+        let rows: Vec<BackupRow> = backups
+            .iter()
+            .map(|b| BackupRow {
+                name: b.name.clone(),
+                compressed_size: fmt_bytes(b.size_bytes_compressed),
+                raw_size: fmt_bytes(b.size_bytes_uncompressed),
+                created_at: b.created_at.clone(),
+            })
+            .collect();
+        println!("{}", Table::new(rows));
+    }
+}
+
+fn backup_to_client_response(b: db::Backup) -> client::BackupResponse {
+    client::BackupResponse {
+        id: b.id,
+        vm_name: b.vm_name,
+        name: b.name,
+        bucket: b.bucket,
+        object_key: b.object_key,
+        checksum_sha256: b.checksum_sha256,
+        compression: b.compression,
+        size_bytes_compressed: b.size_bytes_compressed,
+        size_bytes_uncompressed: b.size_bytes_uncompressed,
+        created_at: b.created_at,
     }
 }
 
@@ -672,6 +778,48 @@ async fn run_remote(
             }
         },
 
+        Commands::Backup { action } => match action {
+            BackupCommands::Create { vm, name } => {
+                if !json {
+                    println!("Creating S3 backup for VM '{vm}'…");
+                }
+                let backup = c.create_backup(&vm, name).await?;
+                print_backup(&backup, json);
+            }
+            BackupCommands::List { vm } => {
+                let backups = c.list_backups(&vm).await?;
+                print_backup_list(&vm, &backups, json);
+            }
+            BackupCommands::Restore { vm, backup } => {
+                if !json {
+                    println!("Restoring VM '{vm}' from S3 backup '{backup}'…");
+                }
+                c.restore_backup(&vm, &backup).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "message": format!("VM '{vm}' restored from backup '{backup}'") })
+                    );
+                } else {
+                    println!("✓ VM '{vm}' restored from backup '{backup}'");
+                }
+            }
+            BackupCommands::Delete { vm, backup } => {
+                if !json {
+                    println!("Deleting S3 backup '{backup}' for VM '{vm}'…");
+                }
+                c.delete_backup(&vm, &backup).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "message": format!("Backup '{backup}' deleted") })
+                    );
+                } else {
+                    println!("✓ Backup '{backup}' deleted");
+                }
+            }
+        },
+
         // Already handled above or unreachable in remote mode.
         _ => unreachable!(),
     }
@@ -919,6 +1067,53 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
                     );
                 } else {
                     println!("✓ Snapshot '{snapshot}' deleted");
+                }
+            }
+        },
+
+        Commands::Backup { action } => match action {
+            BackupCommands::Create { vm, name } => {
+                if !json {
+                    println!("Creating S3 backup for VM '{vm}'…");
+                }
+                let backup = vm::backup(db_path, &vm, name).await?;
+                let client_backup = backup_to_client_response(backup);
+                print_backup(&client_backup, json);
+            }
+            BackupCommands::List { vm } => {
+                let backups = vm::list_backups(db_path, &vm)
+                    .await?
+                    .into_iter()
+                    .map(backup_to_client_response)
+                    .collect::<Vec<_>>();
+                print_backup_list(&vm, &backups, json);
+            }
+            BackupCommands::Restore { vm, backup } => {
+                if !json {
+                    println!("Restoring VM '{vm}' from S3 backup '{backup}'…");
+                }
+                vm::restore_backup(db_path, &vm, &backup).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "message": format!("VM '{vm}' restored from backup '{backup}'") })
+                    );
+                } else {
+                    println!("✓ VM '{vm}' restored from backup '{backup}'");
+                }
+            }
+            BackupCommands::Delete { vm, backup } => {
+                if !json {
+                    println!("Deleting S3 backup '{backup}' for VM '{vm}'…");
+                }
+                vm::delete_backup(db_path, &vm, &backup).await?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "message": format!("Backup '{backup}' deleted") })
+                    );
+                } else {
+                    println!("✓ Backup '{backup}' deleted");
                 }
             }
         },

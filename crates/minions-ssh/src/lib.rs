@@ -129,11 +129,29 @@ pub fn public_key_openssh_line(kp: &KeyPair) -> String {
 /// `bind`       — address + port to listen on (e.g. "0.0.0.0:22")
 /// `config`     — gateway config
 pub async fn serve(host_key: KeyPair, config: GatewayConfig, bind: &str) -> Result<()> {
+    let auth_rejection_ms = std::env::var("MINIONS_SSH_AUTH_REJECTION_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(300);
+
+    let auth_rejection_initial_ms = std::env::var("MINIONS_SSH_AUTH_REJECTION_INITIAL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    let max_auth_attempts = std::env::var("MINIONS_SSH_MAX_AUTH_ATTEMPTS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(10);
+
     let russh_config = Arc::new(russh::server::Config {
         keys: vec![host_key],
         inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
-        auth_rejection_time: std::time::Duration::from_millis(300),
-        auth_rejection_time_initial: Some(std::time::Duration::from_secs(0)),
+        auth_rejection_time: std::time::Duration::from_millis(auth_rejection_ms),
+        auth_rejection_time_initial: Some(std::time::Duration::from_millis(
+            auth_rejection_initial_ms,
+        )),
+        max_auth_attempts,
         ..Default::default()
     });
 
@@ -145,6 +163,10 @@ pub async fn serve(host_key: KeyPair, config: GatewayConfig, bind: &str) -> Resu
         .parse()
         .with_context(|| format!("parse bind address: {}", bind))?;
 
+    info!(
+        "SSH auth rejection delay: {}ms (initial none: {}ms), max auth attempts: {}",
+        auth_rejection_ms, auth_rejection_initial_ms, max_auth_attempts
+    );
     info!("SSH gateway listening on {}", bind);
     srv.run_on_address(russh_config, addr)
         .await

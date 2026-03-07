@@ -328,6 +328,77 @@ impl Client {
     }
 }
 
+/// Response type for S3 backup API calls.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct BackupResponse {
+    pub id: String,
+    pub vm_name: String,
+    pub name: String,
+    pub bucket: String,
+    pub object_key: String,
+    pub checksum_sha256: String,
+    pub compression: String,
+    pub size_bytes_compressed: Option<u64>,
+    pub size_bytes_uncompressed: Option<u64>,
+    pub created_at: String,
+}
+
+impl Client {
+    pub async fn create_backup(&self, vm: &str, name: Option<String>) -> Result<BackupResponse> {
+        self.auth(
+            self.http
+                .post(format!("{}/api/vms/{vm}/backups", self.base))
+                .json(&serde_json::json!({ "name": name })),
+        )
+        .send()
+        .await
+        .context("send create backup request")?
+        .error_for_status()
+        .context("create backup")?
+        .json()
+        .await
+        .context("decode backup response")
+    }
+
+    pub async fn list_backups(&self, vm: &str) -> Result<Vec<BackupResponse>> {
+        self.auth(self.http.get(format!("{}/api/vms/{vm}/backups", self.base)))
+            .send()
+            .await
+            .context("send list backups request")?
+            .error_for_status()
+            .context("list backups")?
+            .json()
+            .await
+            .context("decode backups response")
+    }
+
+    pub async fn restore_backup(&self, vm: &str, backup: &str) -> Result<()> {
+        self.auth(self.http.post(format!(
+            "{}/api/vms/{vm}/backups/{backup}/restore",
+            self.base
+        )))
+        .send()
+        .await
+        .context("send restore backup request")?
+        .error_for_status()
+        .context("restore backup")?;
+        Ok(())
+    }
+
+    pub async fn delete_backup(&self, vm: &str, backup: &str) -> Result<()> {
+        self.auth(
+            self.http
+                .delete(format!("{}/api/vms/{vm}/backups/{backup}", self.base)),
+        )
+        .send()
+        .await
+        .context("send delete backup request")?
+        .error_for_status()
+        .context("delete backup")?;
+        Ok(())
+    }
+}
+
 /// Check if the local daemon is reachable on port 3000.
 pub async fn local_daemon_url() -> Option<String> {
     let url = "http://127.0.0.1:3000";

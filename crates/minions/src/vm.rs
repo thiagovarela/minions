@@ -267,6 +267,98 @@ pub async fn delete_snapshot(db_path: &str, vm_name: &str, snap_name: &str) -> R
     minions_node::delete_snapshot(db_path, vm_name, snap_name).await
 }
 
+/// Create an S3 backup for a VM.
+pub async fn backup(
+    db_path: &str,
+    vm_name: &str,
+    backup_name: Option<String>,
+) -> Result<db::Backup> {
+    let host_id = {
+        let conn = db::open(db_path)?;
+        let vm =
+            db::get_vm(&conn, vm_name)?.with_context(|| format!("VM '{}' not found", vm_name))?;
+        vm.host_id.unwrap_or_else(|| "local".to_string())
+    };
+
+    if host_id == "local" {
+        minions_node::backup_to_s3(db_path, vm_name, backup_name).await
+    } else {
+        let host = {
+            let conn = db::open(db_path)?;
+            db::get_host(&conn, &host_id)?
+                .with_context(|| format!("Host '{}' not found", host_id))?
+        };
+        let client = host_client::HostClient::new(&host.address, host.api_port);
+        client.create_backup(vm_name, backup_name).await
+    }
+}
+
+/// List S3 backups for a VM.
+pub async fn list_backups(db_path: &str, vm_name: &str) -> Result<Vec<db::Backup>> {
+    let host_id = {
+        let conn = db::open(db_path)?;
+        let vm =
+            db::get_vm(&conn, vm_name)?.with_context(|| format!("VM '{}' not found", vm_name))?;
+        vm.host_id.unwrap_or_else(|| "local".to_string())
+    };
+
+    if host_id == "local" {
+        minions_node::list_backups(db_path, vm_name)
+    } else {
+        let host = {
+            let conn = db::open(db_path)?;
+            db::get_host(&conn, &host_id)?
+                .with_context(|| format!("Host '{}' not found", host_id))?
+        };
+        let client = host_client::HostClient::new(&host.address, host.api_port);
+        client.list_backups(vm_name).await
+    }
+}
+
+/// Restore a VM from an S3 backup.
+pub async fn restore_backup(db_path: &str, vm_name: &str, backup_name: &str) -> Result<()> {
+    let host_id = {
+        let conn = db::open(db_path)?;
+        let vm =
+            db::get_vm(&conn, vm_name)?.with_context(|| format!("VM '{}' not found", vm_name))?;
+        vm.host_id.unwrap_or_else(|| "local".to_string())
+    };
+
+    if host_id == "local" {
+        minions_node::restore_backup(db_path, vm_name, backup_name).await
+    } else {
+        let host = {
+            let conn = db::open(db_path)?;
+            db::get_host(&conn, &host_id)?
+                .with_context(|| format!("Host '{}' not found", host_id))?
+        };
+        let client = host_client::HostClient::new(&host.address, host.api_port);
+        client.restore_backup(vm_name, backup_name).await
+    }
+}
+
+/// Delete an S3 backup.
+pub async fn delete_backup(db_path: &str, vm_name: &str, backup_name: &str) -> Result<()> {
+    let host_id = {
+        let conn = db::open(db_path)?;
+        let vm =
+            db::get_vm(&conn, vm_name)?.with_context(|| format!("VM '{}' not found", vm_name))?;
+        vm.host_id.unwrap_or_else(|| "local".to_string())
+    };
+
+    if host_id == "local" {
+        minions_node::delete_backup(db_path, vm_name, backup_name).await
+    } else {
+        let host = {
+            let conn = db::open(db_path)?;
+            db::get_host(&conn, &host_id)?
+                .with_context(|| format!("Host '{}' not found", host_id))?
+        };
+        let client = host_client::HostClient::new(&host.address, host.api_port);
+        client.delete_backup(vm_name, backup_name).await
+    }
+}
+
 /// Check quota for a user.
 pub fn check_quota(
     conn: &rusqlite::Connection,

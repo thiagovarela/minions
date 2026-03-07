@@ -7,7 +7,7 @@ use tracing::info;
 
 use minions_proto::Request;
 
-use crate::{agent, db, hypervisor, network, storage};
+use crate::{agent, backup as s3_backup, db, hypervisor, network, storage};
 use uuid::Uuid;
 
 /// Create a fully networked VM.
@@ -978,6 +978,172 @@ pub async fn delete_snapshot(db_path: &str, vm_name: &str, snap_name: &str) -> R
     Ok(())
 }
 
+// ── S3 backups ────────────────────────────────────────────────────────────────
+
+/// Create an S3 backup of a VM rootfs.
+///
+/// If the VM is running, the guest is flushed (`sync`), paused for a brief disk
+/// copy, then resumed. Compression + upload happen after resume.
+pub async fn backup_to_s3(
+    db_path: &str,
+    vm_name: &str,
+    backup_name: Option<String>,
+) -> Result<db::Backup> {
+    let backup_name =
+        backup_name.unwrap_or_else(|| chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string());
+    validate_backup_name(&backup_name)?;
+
+    let (status, api_socket, vsock_socket, rootfs_path, host_id) = {
+        let conn = db::open(db_path)?;
+        let vm =
+            db::get_vm(&conn, vm_name)?.with_context(|| format!("VM '{vm_name}' not found"))?;
+
+        if vm.status == "creating" || vm.status == "starting" {
+            anyhow::bail!("VM '{vm_name}' is still starting — wait until it is running or stopped");
+        }
+
+        if db::get_backup(&conn, vm_name, &backup_name)?.is_some() {
+            anyhow::bail!("backup '{backup_name}' already exists for VM '{vm_name}'");
+        }
+
+        (
+            vm.status,
+            vm.ch_api_socket,
+            std::path::PathBuf::from(vm.ch_vsock_socket),
+            vm.rootfs_path,
+            vm.host_id,
+        )
+    };
+
+    let was_running = status == "running";
+    if was_running {
+        let _ = agent::send_request(
+            &vsock_socket,
+            Request::Exec {
+                command: "sync".to_string(),
+                args: vec![],
+            },
+        )
+        .await;
+
+        hypervisor::pause_vm(&api_socket)
+            .with_context(|| format!("pause VM '{vm_name}' before backup"))?;
+        info!("VM '{vm_name}' paused for backup");
+    }
+
+    let temp_rootfs = format!("/tmp/minions-backup-copy-{}.ext4", Uuid::new_v4());
+
+    let copy_result = tokio::task::spawn_blocking({
+        let src = rootfs_path.clone();
+        let dst = temp_rootfs.clone();
+        move || copy_rootfs_sparse(&src, &dst)
+    })
+    .await
+    .context("backup disk copy task panicked")?;
+
+    if was_running {
+        if let Err(e) = hypervisor::resume_vm(&api_socket) {
+            tracing::error!("failed to resume VM '{vm_name}' after backup copy: {:#}", e);
+        } else {
+            info!("VM '{vm_name}' resumed after backup copy");
+        }
+    }
+
+    if let Err(e) = copy_result {
+        let _ = std::fs::remove_file(&temp_rootfs);
+        return Err(e).context("copy rootfs for backup");
+    }
+
+    let backup_id = Uuid::new_v4().to_string();
+    let upload_result = s3_backup::upload_rootfs_to_s3(
+        &temp_rootfs,
+        vm_name,
+        &backup_name,
+        &backup_id,
+        host_id.as_deref(),
+    )
+    .await;
+
+    let _ = std::fs::remove_file(&temp_rootfs);
+
+    let uploaded = upload_result?;
+
+    let backup = db::Backup {
+        id: backup_id,
+        vm_name: vm_name.to_string(),
+        name: backup_name,
+        host_id,
+        bucket: uploaded.bucket,
+        object_key: uploaded.object_key,
+        checksum_sha256: uploaded.checksum_sha256,
+        compression: "zstd".to_string(),
+        size_bytes_compressed: Some(uploaded.size_bytes_compressed),
+        size_bytes_uncompressed: Some(uploaded.size_bytes_uncompressed),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+
+    let conn = db::open(db_path)?;
+    db::insert_backup(&conn, &backup)?;
+    Ok(backup)
+}
+
+/// List all S3 backups for a VM.
+pub fn list_backups(db_path: &str, vm_name: &str) -> Result<Vec<db::Backup>> {
+    let conn = db::open(db_path)?;
+    db::get_vm(&conn, vm_name)?.with_context(|| format!("VM '{vm_name}' not found"))?;
+    db::list_backups(&conn, vm_name)
+}
+
+/// Restore a VM rootfs from an S3 backup.
+///
+/// The VM must be stopped.
+pub async fn restore_backup(db_path: &str, vm_name: &str, backup_name: &str) -> Result<()> {
+    let (rootfs_path, backup) = {
+        let conn = db::open(db_path)?;
+        let vm =
+            db::get_vm(&conn, vm_name)?.with_context(|| format!("VM '{vm_name}' not found"))?;
+
+        if vm.status != "stopped" {
+            anyhow::bail!(
+                "VM '{vm_name}' must be stopped before restoring a backup (status: {}). \
+                 Run: minions stop {vm_name}",
+                vm.status
+            );
+        }
+
+        let backup = db::get_backup(&conn, vm_name, backup_name)?
+            .with_context(|| format!("backup '{backup_name}' not found for VM '{vm_name}'"))?;
+
+        (vm.rootfs_path, backup)
+    };
+
+    s3_backup::restore_rootfs_from_s3(&backup, &rootfs_path)
+        .await
+        .context("restore rootfs from S3 backup")?;
+
+    info!("VM '{vm_name}' restored from backup '{backup_name}'");
+    Ok(())
+}
+
+/// Delete an S3 backup (object + DB record).
+pub async fn delete_backup(db_path: &str, vm_name: &str, backup_name: &str) -> Result<()> {
+    let backup = {
+        let conn = db::open(db_path)?;
+        db::get_vm(&conn, vm_name)?.with_context(|| format!("VM '{vm_name}' not found"))?;
+        db::get_backup(&conn, vm_name, backup_name)?
+            .with_context(|| format!("backup '{backup_name}' not found for VM '{vm_name}'"))?
+    };
+
+    s3_backup::delete_backup_object(&backup)
+        .await
+        .context("delete backup object from S3")?;
+
+    let conn = db::open(db_path)?;
+    db::delete_backup(&conn, vm_name, backup_name)?;
+    info!("backup '{backup_name}' deleted for VM '{vm_name}'");
+    Ok(())
+}
+
 // ── Quota enforcement ─────────────────────────────────────────────────────────
 
 /// Check whether `owner_id` can create a VM with the given resource request.
@@ -1046,6 +1212,24 @@ fn validate_snapshot_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_backup_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("backup name cannot be empty");
+    }
+    if name.len() > 64 {
+        anyhow::bail!("backup name must be 64 characters or fewer");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        anyhow::bail!(
+            "backup name must only contain alphanumeric characters, hyphens, underscores, and dots"
+        );
+    }
+    Ok(())
+}
+
 fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() {
         anyhow::bail!("VM name cannot be empty");
@@ -1056,6 +1240,23 @@ fn validate_name(name: &str) -> Result<()> {
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         anyhow::bail!("VM name must only contain alphanumeric characters and hyphens");
     }
+    Ok(())
+}
+
+fn copy_rootfs_sparse(source_rootfs: &str, dest_rootfs: &str) -> Result<()> {
+    let status = std::process::Command::new("cp")
+        .args(["--sparse=always", source_rootfs, dest_rootfs])
+        .status()
+        .context("spawn cp for backup copy")?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "cp failed when creating temporary backup copy from '{}' to '{}'",
+            source_rootfs,
+            dest_rootfs
+        );
+    }
+
     Ok(())
 }
 

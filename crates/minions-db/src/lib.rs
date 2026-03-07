@@ -10,7 +10,10 @@ use uuid::Uuid;
 /// Accepts keys in the format "ssh-ed25519 AAA... comment" or "ssh-rsa AAA... comment".
 /// Returns the SHA-256 fingerprint in the format "SHA256:xxxx...".
 pub fn fingerprint(public_key: &str) -> Result<String> {
-    use base64::{Engine as _, engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}};
+    use base64::{
+        Engine as _,
+        engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    };
     use sha2::{Digest, Sha256};
 
     // Parse the public key string: "type base64-data comment"
@@ -28,7 +31,8 @@ pub fn fingerprint(public_key: &str) -> Result<String> {
     }
 
     // Decode base64 key data
-    let decoded = STANDARD.decode(key_data)
+    let decoded = STANDARD
+        .decode(key_data)
         .map_err(|e| anyhow::anyhow!("invalid base64 in SSH key: {}", e))?;
 
     // Compute SHA-256 fingerprint
@@ -204,6 +208,27 @@ fn migrate(conn: &Connection) -> Result<()> {
             created_at  TEXT NOT NULL,
             UNIQUE(vm_name, name)
         );
+
+        -- S3 backups table: one row per uploaded backup object.
+        -- Object layout example:
+        --   s3://bucket/minions/v1/{host_id}/{vm_name}/{name}-{id}.ext4.zst
+        CREATE TABLE IF NOT EXISTS backups (
+            id                        TEXT PRIMARY KEY,
+            vm_name                   TEXT NOT NULL,
+            name                      TEXT NOT NULL,
+            host_id                   TEXT,
+            bucket                    TEXT NOT NULL,
+            object_key                TEXT NOT NULL,
+            checksum_sha256           TEXT NOT NULL,
+            compression               TEXT NOT NULL DEFAULT 'zstd',
+            size_bytes_compressed     INTEGER,
+            size_bytes_uncompressed   INTEGER,
+            created_at                TEXT NOT NULL,
+            UNIQUE(vm_name, name)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_backups_vm_created
+            ON backups(vm_name, created_at);
 
         -- Resource plans: defines limits per user tier.
         CREATE TABLE IF NOT EXISTS plans (
@@ -889,6 +914,103 @@ fn row_to_snapshot(row: &rusqlite::Row<'_>) -> rusqlite::Result<Snapshot> {
     })
 }
 
+// ── S3 Backups ────────────────────────────────────────────────────────────────
+
+/// A backup object record stored in the database.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Backup {
+    pub id: String,
+    pub vm_name: String,
+    pub name: String,
+    pub host_id: Option<String>,
+    pub bucket: String,
+    pub object_key: String,
+    pub checksum_sha256: String,
+    pub compression: String,
+    pub size_bytes_compressed: Option<u64>,
+    pub size_bytes_uncompressed: Option<u64>,
+    pub created_at: String,
+}
+
+/// Insert a backup record.
+pub fn insert_backup(conn: &Connection, backup: &Backup) -> Result<()> {
+    conn.execute(
+        "INSERT INTO backups
+            (id, vm_name, name, host_id, bucket, object_key, checksum_sha256,
+             compression, size_bytes_compressed, size_bytes_uncompressed, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            backup.id,
+            backup.vm_name,
+            backup.name,
+            backup.host_id,
+            backup.bucket,
+            backup.object_key,
+            backup.checksum_sha256,
+            backup.compression,
+            backup.size_bytes_compressed.map(|s| s as i64),
+            backup.size_bytes_uncompressed.map(|s| s as i64),
+            backup.created_at,
+        ],
+    )
+    .context("insert backup")?;
+    Ok(())
+}
+
+/// Retrieve a backup by VM name + backup name.
+pub fn get_backup(conn: &Connection, vm_name: &str, backup_name: &str) -> Result<Option<Backup>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, vm_name, name, host_id, bucket, object_key, checksum_sha256,
+                compression, size_bytes_compressed, size_bytes_uncompressed, created_at
+         FROM backups WHERE vm_name=?1 AND name=?2",
+    )?;
+    let mut rows = stmt.query(params![vm_name, backup_name])?;
+    match rows.next()? {
+        None => Ok(None),
+        Some(row) => Ok(Some(row_to_backup(row)?)),
+    }
+}
+
+/// List all backups for a VM, ordered by creation time.
+pub fn list_backups(conn: &Connection, vm_name: &str) -> Result<Vec<Backup>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, vm_name, name, host_id, bucket, object_key, checksum_sha256,
+                compression, size_bytes_compressed, size_bytes_uncompressed, created_at
+         FROM backups WHERE vm_name=?1 ORDER BY created_at",
+    )?;
+    let rows = stmt.query_map(params![vm_name], |row| {
+        Ok(row_to_backup(row).expect("parse backup row"))
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// Delete a backup record.
+pub fn delete_backup(conn: &Connection, vm_name: &str, backup_name: &str) -> Result<bool> {
+    let changed = conn.execute(
+        "DELETE FROM backups WHERE vm_name=?1 AND name=?2",
+        params![vm_name, backup_name],
+    )?;
+    Ok(changed > 0)
+}
+
+fn row_to_backup(row: &rusqlite::Row<'_>) -> rusqlite::Result<Backup> {
+    let size_bytes_compressed: Option<i64> = row.get(8)?;
+    let size_bytes_uncompressed: Option<i64> = row.get(9)?;
+    Ok(Backup {
+        id: row.get(0)?,
+        vm_name: row.get(1)?,
+        name: row.get(2)?,
+        host_id: row.get(3)?,
+        bucket: row.get(4)?,
+        object_key: row.get(5)?,
+        checksum_sha256: row.get(6)?,
+        compression: row.get(7)?,
+        size_bytes_compressed: size_bytes_compressed.map(|s| s as u64),
+        size_bytes_uncompressed: size_bytes_uncompressed.map(|s| s as u64),
+        created_at: row.get(10)?,
+    })
+}
+
 // ── Custom Domains ────────────────────────────────────────────────────────────
 
 /// A custom domain record stored in the database.
@@ -1143,11 +1265,7 @@ pub fn create_user_from_google(
 
 /// Create a new user from email registration (no Google).
 /// Also assigns the free plan subscription automatically.
-pub fn create_user_from_email(
-    conn: &Connection,
-    email: &str,
-    name: Option<&str>,
-) -> Result<User> {
+pub fn create_user_from_email(conn: &Connection, email: &str, name: Option<&str>) -> Result<User> {
     let user_id = Uuid::new_v4().to_string();
     let sub_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
@@ -1177,9 +1295,8 @@ pub fn create_user_from_email(
 
 /// Get a user by their ID.
 pub fn get_user(conn: &Connection, id: &str) -> Result<Option<User>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, email, name, google_id, created_at FROM users WHERE id = ?1"
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, email, name, google_id, created_at FROM users WHERE id = ?1")?;
     let mut rows = stmt.query(params![id])?;
     match rows.next()? {
         Some(row) => Ok(Some(User {
@@ -1195,9 +1312,8 @@ pub fn get_user(conn: &Connection, id: &str) -> Result<Option<User>> {
 
 /// Get a user by their Google ID.
 pub fn get_user_by_google_id(conn: &Connection, google_id: &str) -> Result<Option<User>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, email, name, google_id, created_at FROM users WHERE google_id = ?1"
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT id, email, name, google_id, created_at FROM users WHERE google_id = ?1")?;
     let mut rows = stmt.query(params![google_id])?;
     match rows.next()? {
         Some(row) => Ok(Some(User {
@@ -1213,9 +1329,8 @@ pub fn get_user_by_google_id(conn: &Connection, google_id: &str) -> Result<Optio
 
 /// Get a user by their email address.
 pub fn get_user_by_email(conn: &Connection, email: &str) -> Result<Option<User>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, email, name, google_id, created_at FROM users WHERE email = ?1"
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, email, name, google_id, created_at FROM users WHERE email = ?1")?;
     let mut rows = stmt.query(params![email])?;
     match rows.next()? {
         Some(row) => Ok(Some(User {
@@ -1275,16 +1390,13 @@ pub fn insert_api_token(
 /// Validate an API token by its hash.
 /// Returns (user_id, email) if valid, None otherwise.
 /// Also updates the last_used timestamp.
-pub fn validate_api_token(
-    conn: &Connection,
-    token_hash: &str,
-) -> Result<Option<(String, String)>> {
+pub fn validate_api_token(conn: &Connection, token_hash: &str) -> Result<Option<(String, String)>> {
     let now = Utc::now().to_rfc3339();
 
     // Update last_used and return user info in one query
     let mut stmt = conn.prepare(
         "UPDATE api_tokens SET last_used = ?1 WHERE token_hash = ?2
-         RETURNING user_id"
+         RETURNING user_id",
     )?;
     let mut rows = stmt.query(params![now, token_hash])?;
 
@@ -1304,7 +1416,7 @@ pub fn validate_api_token(
 pub fn list_api_tokens(conn: &Connection, user_id: &str) -> Result<Vec<ApiToken>> {
     let mut stmt = conn.prepare(
         "SELECT id, user_id, name, created_at, last_used
-         FROM api_tokens WHERE user_id = ?1 ORDER BY created_at"
+         FROM api_tokens WHERE user_id = ?1 ORDER BY created_at",
     )?;
     let rows = stmt.query_map(params![user_id], |row| {
         Ok(ApiToken {
@@ -1363,7 +1475,7 @@ pub fn add_ssh_key(
 pub fn list_ssh_keys(conn: &Connection, user_id: &str) -> Result<Vec<SshKey>> {
     let mut stmt = conn.prepare(
         "SELECT id, user_id, public_key, fingerprint, name, created_at
-         FROM ssh_keys WHERE user_id = ?1 ORDER BY created_at"
+         FROM ssh_keys WHERE user_id = ?1 ORDER BY created_at",
     )?;
     let rows = stmt.query_map(params![user_id], |row| {
         Ok(SshKey {
@@ -1395,7 +1507,7 @@ pub fn get_user_by_fingerprint(conn: &Connection, fingerprint: &str) -> Result<O
         "SELECT u.id, u.email, u.name, u.google_id, u.created_at
          FROM users u
          JOIN ssh_keys k ON k.user_id = u.id
-         WHERE k.fingerprint = ?1"
+         WHERE k.fingerprint = ?1",
     )?;
     let mut rows = stmt.query(params![fingerprint])?;
     match rows.next()? {
@@ -1706,5 +1818,50 @@ mod tests {
 
         assert_eq!(list_snapshots(&conn, "myvm").unwrap().len(), 0);
         assert_eq!(list_snapshots(&conn, "othervm").unwrap().len(), 1);
+    }
+
+    // ── S3 backup tests ─────────────────────────────────────────────────────
+
+    fn sample_backup(vm_name: &str, backup_name: &str) -> Backup {
+        Backup {
+            id: format!("{vm_name}-{backup_name}-id"),
+            vm_name: vm_name.to_string(),
+            name: backup_name.to_string(),
+            host_id: Some("local".to_string()),
+            bucket: "my-backups".to_string(),
+            object_key: format!("minions/v1/local/{vm_name}/{backup_name}.ext4.zst"),
+            checksum_sha256: "deadbeef".repeat(8),
+            compression: "zstd".to_string(),
+            size_bytes_compressed: Some(1000),
+            size_bytes_uncompressed: Some(2000),
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_backup_insert_get_list_delete() {
+        let conn = test_conn();
+
+        let b1 = sample_backup("myvm", "b1");
+        let b2 = sample_backup("myvm", "b2");
+        let b3 = sample_backup("othervm", "x");
+
+        insert_backup(&conn, &b1).unwrap();
+        insert_backup(&conn, &b2).unwrap();
+        insert_backup(&conn, &b3).unwrap();
+
+        let found = get_backup(&conn, "myvm", "b1").unwrap().unwrap();
+        assert_eq!(found.name, "b1");
+        assert_eq!(found.bucket, "my-backups");
+
+        let listed = list_backups(&conn, "myvm").unwrap();
+        assert_eq!(listed.len(), 2);
+
+        let deleted = delete_backup(&conn, "myvm", "b1").unwrap();
+        assert!(deleted);
+        assert_eq!(list_backups(&conn, "myvm").unwrap().len(), 1);
+
+        let missing = delete_backup(&conn, "myvm", "missing").unwrap();
+        assert!(!missing);
     }
 }

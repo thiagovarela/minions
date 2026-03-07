@@ -5,6 +5,7 @@
 //! - A standalone binary (`minions-node`) for remote host agents (multi-host deployments)
 
 pub mod agent;
+pub mod backup;
 pub mod hypervisor;
 pub mod network;
 pub mod storage;
@@ -15,8 +16,9 @@ pub use minions_db as db;
 
 // Re-export commonly used types
 pub use vm::{
-    MAX_SNAPSHOTS_PER_VM, check_quota, copy, create, create_with_os, delete_snapshot, destroy, list,
-    list_snapshots, rename, resize, restart, restore_snapshot, snapshot, start, stop,
+    MAX_SNAPSHOTS_PER_VM, backup_to_s3, check_quota, copy, create, create_with_os, delete_backup,
+    delete_snapshot, destroy, list, list_backups, list_snapshots, rename, resize, restart,
+    restore_backup, restore_snapshot, snapshot, start, stop,
 };
 
 // Re-export OsType for convenience

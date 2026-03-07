@@ -26,8 +26,7 @@ pub fn router(state: AppState) -> Router {
     let auth_config = state.auth.clone();
 
     // Public routes (no auth required)
-    let public_router = Router::new()
-        .route("/api/auth/register", post(register));
+    let public_router = Router::new().route("/api/auth/register", post(register));
 
     // Authenticated routes (require valid token)
     let auth_router = Router::new()
@@ -70,6 +69,14 @@ pub fn router(state: AppState) -> Router {
             post(restore_snapshot),
         )
         .route("/api/vms/{name}/snapshots/{snap}", delete(delete_snapshot))
+        // S3 backup routes
+        .route("/api/vms/{name}/backups", post(create_backup))
+        .route("/api/vms/{name}/backups", get(list_backups))
+        .route(
+            "/api/vms/{name}/backups/{backup}/restore",
+            post(restore_backup),
+        )
+        .route("/api/vms/{name}/backups/{backup}", delete(delete_backup))
         // Resource / billing routes
         .route("/api/billing/plans", get(billing_plans))
         .route("/api/billing/subscription", get(billing_subscription))
@@ -411,19 +418,19 @@ async fn register(
 
     info!(user_id = %user.id, email = %user.email, "new user registered");
 
-    Ok((StatusCode::CREATED, Json(RegisterResponse {
-        user_id: user.id,
-        email: user.email,
-        token: raw_token,
-        message: "Save this token — it will not be shown again.".to_string(),
-    })))
+    Ok((
+        StatusCode::CREATED,
+        Json(RegisterResponse {
+            user_id: user.id,
+            email: user.email,
+            token: raw_token,
+            message: "Save this token — it will not be shown again.".to_string(),
+        }),
+    ))
 }
 
 /// `GET /api/auth/me` — Get current user info.
-async fn get_me(
-    State(state): State<AppState>,
-    auth: auth::Auth,
-) -> impl IntoResponse {
+async fn get_me(State(state): State<AppState>, auth: auth::Auth) -> impl IntoResponse {
     let conn = db::open(&state.db_path).map_err(internal)?;
 
     let user_id = match auth.0 {
@@ -470,23 +477,24 @@ async fn create_token(
     };
 
     let (raw_token, token_hash) = minions_db::generate_api_token();
-    let token = minions_db::insert_api_token(&conn, &user_id, &token_hash, &req.name).map_err(internal)?;
+    let token =
+        minions_db::insert_api_token(&conn, &user_id, &token_hash, &req.name).map_err(internal)?;
 
     info!(user_id = %user_id, "new api token created");
 
-    Ok((StatusCode::CREATED, Json(CreateTokenResponse {
-        id: token.id,
-        name: token.name,
-        token: raw_token,
-        message: "Save this token — it will not be shown again.".to_string(),
-    })))
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateTokenResponse {
+            id: token.id,
+            name: token.name,
+            token: raw_token,
+            message: "Save this token — it will not be shown again.".to_string(),
+        }),
+    ))
 }
 
 /// `GET /api/auth/tokens` — List user's API tokens.
-async fn list_tokens(
-    State(state): State<AppState>,
-    auth: auth::Auth,
-) -> impl IntoResponse {
+async fn list_tokens(State(state): State<AppState>, auth: auth::Auth) -> impl IntoResponse {
     let conn = db::open(&state.db_path).map_err(internal)?;
 
     let auth = &auth.0;
@@ -558,7 +566,8 @@ async fn add_ssh_key(
     let fp = minions_db::fingerprint(&req.public_key)
         .map_err(|e| bad_request(format!("invalid ssh key: {}", e)))?;
 
-    let key = minions_db::add_ssh_key(&conn, &user_id, &req.public_key, &fp, &req.name).map_err(internal)?;
+    let key = minions_db::add_ssh_key(&conn, &user_id, &req.public_key, &fp, &req.name)
+        .map_err(internal)?;
 
     info!(user_id = %user_id, fingerprint = %fp, "ssh key added");
 
@@ -566,10 +575,7 @@ async fn add_ssh_key(
 }
 
 /// `GET /api/auth/ssh-keys` — List user's SSH keys.
-async fn list_ssh_keys(
-    State(state): State<AppState>,
-    auth: auth::Auth,
-) -> impl IntoResponse {
+async fn list_ssh_keys(State(state): State<AppState>, auth: auth::Auth) -> impl IntoResponse {
     let conn = db::open(&state.db_path).map_err(internal)?;
 
     let user_id = match auth.0 {
@@ -585,7 +591,11 @@ async fn list_ssh_keys(
     };
 
     let keys = minions_db::list_ssh_keys(&conn, &user_id).map_err(internal)?;
-    Ok(Json(keys.into_iter().map(SshKeyResponse::from).collect::<Vec<_>>()))
+    Ok(Json(
+        keys.into_iter()
+            .map(SshKeyResponse::from)
+            .collect::<Vec<_>>(),
+    ))
 }
 
 /// `DELETE /api/auth/ssh-keys/{id}` — Remove an SSH key.
@@ -1605,6 +1615,170 @@ async fn delete_snapshot(
     match vm::delete_snapshot(&db_path, &name, &snap).await {
         Ok(()) => Json(serde_json::json!({
             "message": format!("snapshot '{snap}' deleted for VM '{name}'")
+        }))
+        .into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg })).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
+    }
+}
+
+// ── S3 backup types ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CreateBackupRequest {
+    /// Backup name (optional — defaults to UTC timestamp).
+    name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BackupResponse {
+    id: String,
+    vm_name: String,
+    name: String,
+    bucket: String,
+    object_key: String,
+    checksum_sha256: String,
+    compression: String,
+    size_bytes_compressed: Option<u64>,
+    size_bytes_uncompressed: Option<u64>,
+    created_at: String,
+}
+
+impl From<db::Backup> for BackupResponse {
+    fn from(b: db::Backup) -> Self {
+        BackupResponse {
+            id: b.id,
+            vm_name: b.vm_name,
+            name: b.name,
+            bucket: b.bucket,
+            object_key: b.object_key,
+            checksum_sha256: b.checksum_sha256,
+            compression: b.compression,
+            size_bytes_compressed: b.size_bytes_compressed,
+            size_bytes_uncompressed: b.size_bytes_uncompressed,
+            created_at: b.created_at,
+        }
+    }
+}
+
+// ── S3 backup handlers ────────────────────────────────────────────────────────
+
+/// `POST /api/vms/:name/backups` — Create an S3 backup.
+async fn create_backup(
+    State(state): State<AppState>,
+    auth: auth::Auth,
+    Path(name): Path<String>,
+    Json(req): Json<CreateBackupRequest>,
+) -> impl IntoResponse {
+    info!(vm = %name, backup_name = ?req.name, "create backup");
+
+    if let Err(e) = get_vm_checked(&state.db_path, &auth.0, &name) {
+        return e.into_response();
+    }
+
+    let db_path = state.db_path.as_str().to_string();
+    match vm::backup(&db_path, &name, req.name).await {
+        Ok(backup) => (StatusCode::CREATED, Json(BackupResponse::from(backup))).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                not_found(&name).into_response()
+            } else if msg.contains("already exists")
+                || msg.contains("must be")
+                || msg.contains("still starting")
+                || msg.contains("MINIONS_BACKUP_S3_BUCKET")
+            {
+                bad_request(msg).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
+    }
+}
+
+/// `GET /api/vms/:name/backups` — List S3 backups.
+async fn list_backups(
+    State(state): State<AppState>,
+    auth: auth::Auth,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = get_vm_checked(&state.db_path, &auth.0, &name) {
+        return e.into_response();
+    }
+
+    let db_path = state.db_path.as_str().to_string();
+    match vm::list_backups(&db_path, &name).await {
+        Ok(backups) => Json(
+            backups
+                .into_iter()
+                .map(BackupResponse::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                not_found(&name).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
+    }
+}
+
+/// `POST /api/vms/:name/backups/:backup/restore` — Restore from S3 backup.
+async fn restore_backup(
+    State(state): State<AppState>,
+    auth: auth::Auth,
+    Path((name, backup)): Path<(String, String)>,
+) -> impl IntoResponse {
+    info!(vm = %name, backup = %backup, "restore backup");
+
+    if let Err(e) = get_vm_checked(&state.db_path, &auth.0, &name) {
+        return e.into_response();
+    }
+
+    let db_path = state.db_path.as_str().to_string();
+    match vm::restore_backup(&db_path, &name, &backup).await {
+        Ok(()) => Json(serde_json::json!({
+            "message": format!("VM '{name}' restored from backup '{backup}'")
+        }))
+        .into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg })).into_response()
+            } else if msg.contains("must be stopped") {
+                bad_request(msg).into_response()
+            } else {
+                internal(msg).into_response()
+            }
+        }
+    }
+}
+
+/// `DELETE /api/vms/:name/backups/:backup` — Delete an S3 backup.
+async fn delete_backup(
+    State(state): State<AppState>,
+    auth: auth::Auth,
+    Path((name, backup)): Path<(String, String)>,
+) -> impl IntoResponse {
+    info!(vm = %name, backup = %backup, "delete backup");
+
+    if let Err(e) = get_vm_checked(&state.db_path, &auth.0, &name) {
+        return e.into_response();
+    }
+
+    let db_path = state.db_path.as_str().to_string();
+    match vm::delete_backup(&db_path, &name, &backup).await {
+        Ok(()) => Json(serde_json::json!({
+            "message": format!("backup '{backup}' deleted for VM '{name}'")
         }))
         .into_response(),
         Err(e) => {
