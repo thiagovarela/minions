@@ -220,6 +220,7 @@ sudo minions serve \
 This gives you:
 - **HTTP API** on port 3000 for programmatic VM management
 - **SSH gateway** on port 2222 — connect to any VM via `ssh vmname@mycloud.example.com -p 2222`
+- **SSH port forwarding** in VM proxy mode (for example `ssh -N -L 3050:127.0.0.1:3000 vmname@mycloud.example.com -p 2222`)
 - **HTTPS proxy** — each VM is reachable at `https://vmname.mycloud.example.com` (with automatic Let's Encrypt certificates)
 
 ### Remote CLI

@@ -12,7 +12,7 @@ use tracing::{debug, info};
 
 use crate::commands::ApiClient;
 use crate::db::User;
-use crate::proxy::{ConnectedVm, spawn_proxy};
+use crate::proxy::{ConnectedVm, connect_direct_tcpip, spawn_direct_tcpip_proxy, spawn_proxy};
 
 /// The server::Handle type (used to write back to the SSH client from async tasks).
 pub type ServerHandle = russh::server::Handle;
@@ -149,6 +149,33 @@ impl ConnectionHandler {
         self.mode = SessionMode::Proxy { vm_stdin };
         Ok(())
     }
+
+    async fn start_proxy_direct_tcpip(
+        &mut self,
+        vm_name: &str,
+        client_channel: Channel<Msg>,
+        host_to_connect: &str,
+        port_to_connect: u32,
+        originator_address: &str,
+        originator_port: u32,
+    ) -> Result<()> {
+        let api = self.api();
+        let authed_user = self.authed_user.clone();
+        let vm_ip = resolve_vm(&api, authed_user.as_ref(), vm_name).await?;
+
+        let vm_channel = connect_direct_tcpip(
+            &vm_ip,
+            Arc::clone(&self.config.proxy_key),
+            host_to_connect,
+            port_to_connect,
+            originator_address,
+            originator_port,
+        )
+        .await?;
+
+        spawn_direct_tcpip_proxy(client_channel, vm_channel);
+        Ok(())
+    }
 }
 
 /// Look up a VM by name via the API, verify ownership, and return its IP.
@@ -222,6 +249,69 @@ impl Handler for ConnectionHandler {
         Ok(true)
     }
 
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: Channel<Msg>,
+        host_to_connect: &str,
+        port_to_connect: u32,
+        originator_address: &str,
+        originator_port: u32,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        let is_proxy = self.ssh_username != self.config.command_user;
+        if !is_proxy {
+            debug!(
+                peer = ?self.peer_addr,
+                user = %self.ssh_username,
+                dest = %format!("{}:{}", host_to_connect, port_to_connect),
+                "direct-tcpip denied in command mode"
+            );
+            return Ok(false);
+        }
+
+        if self.authed_user.is_none() {
+            debug!(
+                peer = ?self.peer_addr,
+                user = %self.ssh_username,
+                "direct-tcpip denied: unauthenticated"
+            );
+            return Ok(false);
+        }
+
+        let vm_name = self.ssh_username.clone();
+        match self
+            .start_proxy_direct_tcpip(
+                &vm_name,
+                channel,
+                host_to_connect,
+                port_to_connect,
+                originator_address,
+                originator_port,
+            )
+            .await
+        {
+            Ok(()) => {
+                debug!(
+                    peer = ?self.peer_addr,
+                    vm = %vm_name,
+                    dest = %format!("{}:{}", host_to_connect, port_to_connect),
+                    "direct-tcpip opened"
+                );
+                Ok(true)
+            }
+            Err(e) => {
+                debug!(
+                    peer = ?self.peer_addr,
+                    vm = %vm_name,
+                    dest = %format!("{}:{}", host_to_connect, port_to_connect),
+                    error = %e,
+                    "direct-tcpip open failed"
+                );
+                Ok(false)
+            }
+        }
+    }
+
     async fn pty_request(
         &mut self,
         channel: ChannelId,
@@ -257,11 +347,11 @@ impl Handler for ConnectionHandler {
         // This should not happen since unknown keys are rejected at auth time,
         // but handle it gracefully just in case.
         if self.authed_user.is_none() {
-            let msg = format!("Authentication failed. Register at https://{} and add your SSH key.\r\n", self.config.dashboard_domain);
-            session.data(
-                channel,
-                CryptoVec::from(msg.into_bytes()),
+            let msg = format!(
+                "Authentication failed. Register at https://{} and add your SSH key.\r\n",
+                self.config.dashboard_domain
             );
+            session.data(channel, CryptoVec::from(msg.into_bytes()));
             session.exit_status_request(channel, 1);
             session.eof(channel);
             session.close(channel);
@@ -315,7 +405,10 @@ impl Handler for ConnectionHandler {
 
         // This should not happen since unknown keys are rejected at auth time.
         if self.authed_user.is_none() {
-            let msg = format!("Authentication failed. Register at https://{} and add your SSH key.\r\n", self.config.dashboard_domain);
+            let msg = format!(
+                "Authentication failed. Register at https://{} and add your SSH key.\r\n",
+                self.config.dashboard_domain
+            );
             let _ = session.data(channel, CryptoVec::from(msg.into_bytes()));
             session.exit_status_request(channel, 1);
             session.eof(channel);
@@ -353,7 +446,8 @@ impl Handler for ConnectionHandler {
         let api = self.api();
         let db_path = self.config.db_path.clone();
         let vm_domain = self.config.vm_domain.clone();
-        let (output, code) = crate::commands::run(&cmd_str, &user, &api, &db_path, &vm_domain).await;
+        let (output, code) =
+            crate::commands::run(&cmd_str, &user, &api, &db_path, &vm_domain).await;
         session.data(channel, CryptoVec::from(output.into_bytes()));
         session.exit_status_request(channel, code);
         session.eof(channel);
@@ -420,7 +514,8 @@ impl Handler for ConnectionHandler {
                 let db_path = self.config.db_path.clone();
                 let vm_domain = self.config.vm_domain.clone();
                 for cmd in ready_cmds {
-                    let (output, _) = crate::commands::run(&cmd, &user, &api, &db_path, &vm_domain).await;
+                    let (output, _) =
+                        crate::commands::run(&cmd, &user, &api, &db_path, &vm_domain).await;
                     session.data(channel, CryptoVec::from(output.into_bytes()));
                     session.data(channel, CryptoVec::from(b"$ ".to_vec()));
                 }
@@ -444,7 +539,10 @@ impl Handler for ConnectionHandler {
         }
 
         if self.authed_user.is_none() {
-            let msg = format!("Authentication failed. Register at https://{} and add your SSH key.\r\n", self.config.dashboard_domain);
+            let msg = format!(
+                "Authentication failed. Register at https://{} and add your SSH key.\r\n",
+                self.config.dashboard_domain
+            );
             let _ = session.data(channel, CryptoVec::from(msg.into_bytes()));
             session.exit_status_request(channel, 1);
             session.eof(channel);
@@ -458,9 +556,7 @@ impl Handler for ConnectionHandler {
         match self.start_proxy_subsystem(&vm_name, name).await {
             Ok(()) => {}
             Err(e) => {
-                if let (Some(h), Some(id)) =
-                    (self.client_handle.clone(), self.client_channel_id)
-                {
+                if let (Some(h), Some(id)) = (self.client_handle.clone(), self.client_channel_id) {
                     let _ = h
                         .data(
                             id,
