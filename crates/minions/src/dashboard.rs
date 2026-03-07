@@ -664,11 +664,16 @@ async fn vm_add_domain(
     // Call the API internally via reqwest (reuse validation + DNS check logic)
     let api_url = format!("http://127.0.0.1:3000/api/vms/{}/domains", name);
     let client = reqwest::Client::new();
-    let resp = client
+    let mut req = client
         .post(&api_url)
-        .json(&serde_json::json!({ "domain": form.domain }))
-        .send()
-        .await;
+        .json(&serde_json::json!({ "domain": form.domain }));
+
+    // Forward daemon API auth for internal call when auth is enabled.
+    if let Some(api_key) = state.auth.api_key.as_ref() {
+        req = req.bearer_auth(api_key.as_ref());
+    }
+
+    let resp = req.send().await;
 
     match resp {
         Ok(r) if r.status().is_success() => {
