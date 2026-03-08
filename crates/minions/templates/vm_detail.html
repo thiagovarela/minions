@@ -3,324 +3,269 @@
 {% block title %}{{ vm_name }}{% endblock %}
 
 {% block content %}
-<!-- Back + header -->
-<div class="mb-6">
-  <a href="/dashboard" class="text-sm text-gray-500 hover:text-gray-300 transition">← All VMs</a>
-  <div class="flex items-center gap-3 mt-2">
-    <h1 class="text-2xl font-bold font-mono text-white">{{ vm_name }}</h1>
-    {% if vm_status == "running" %}
-      <span class="inline-flex items-center gap-1.5 rounded-full bg-green-900/40 px-2.5 py-1 text-xs font-medium text-green-400 border border-green-800">
-        <span class="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse"></span>running
-      </span>
-    {% else if vm_status == "stopped" %}
-      <span class="inline-flex items-center rounded-full bg-gray-800 px-2.5 py-1 text-xs font-medium text-gray-400 border border-gray-700">
-        stopped
-      </span>
-    {% else %}
-      <span class="inline-flex items-center rounded-full bg-yellow-900/40 px-2.5 py-1 text-xs font-medium text-yellow-400 border border-yellow-800">
-        {{ vm_status }}
-      </span>
-    {% endif %}
-  </div>
-  <p class="text-sm text-gray-500 mt-1 font-mono">{{ vm_ip }} · {{ vm_vcpus }} vCPUs · {{ vm_memory_mb }} MiB RAM · owned by {{ vm_owner }}</p>
-</div>
-
-<!-- Action buttons -->
-<div class="flex gap-2 mb-8" id="action-result">
-  {% if vm_status == "stopped" %}
-  <button
-    hx-post="/dashboard/vms/{{ vm_name }}/start"
-    hx-target="#action-result"
-    hx-swap="innerHTML"
-    class="rounded-lg bg-green-700 hover:bg-green-600 px-4 py-2 text-sm font-medium text-white transition">
-    ▶ Start
-  </button>
-  {% endif %}
-  {% if vm_status == "running" %}
-  <button
-    hx-post="/dashboard/vms/{{ vm_name }}/stop"
-    hx-target="#action-result"
-    hx-swap="innerHTML"
-    hx-confirm="Stop VM {{ vm_name }}?"
-    class="rounded-lg bg-yellow-700 hover:bg-yellow-600 px-4 py-2 text-sm font-medium text-white transition">
-    ■ Stop
-  </button>
-  <button
-    hx-post="/dashboard/vms/{{ vm_name }}/restart"
-    hx-target="#action-result"
-    hx-swap="innerHTML"
-    hx-confirm="Restart VM {{ vm_name }}?"
-    class="rounded-lg bg-blue-700 hover:bg-blue-600 px-4 py-2 text-sm font-medium text-white transition">
-    ↺ Restart
-  </button>
-  <button
-    hx-post="/dashboard/vms/{{ vm_name }}/snapshot"
-    hx-target="#action-result"
-    hx-swap="innerHTML"
-    class="rounded-lg bg-indigo-700 hover:bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition">
-    📸 Snapshot
-  </button>
-  {% endif %}
-  <button
-    hx-delete="/dashboard/vms/{{ vm_name }}"
-    hx-target="body"
-    hx-push-url="/dashboard"
-    hx-confirm="Permanently destroy {{ vm_name }} and all its data?"
-    class="rounded-lg bg-red-900 hover:bg-red-800 px-4 py-2 text-sm font-medium text-red-300 transition ml-auto">
-    🗑 Destroy
-  </button>
-</div>
-
-<!-- Proxy / Networking -->
-<section class="mb-8">
-  <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Proxy / Networking</h2>
-  <div id="proxy-settings" class="rounded-xl border border-gray-800 bg-gray-900 p-5 space-y-4">
-    <!-- Proxy URL (read-only) -->
-    <div>
-      <p class="text-xs text-gray-500 uppercase tracking-wide mb-1">URL</p>
-      <p class="font-mono text-white text-sm">
-        {% if domain == "" %}
-          <span class="text-gray-600">proxy not configured</span>
-        {% else %}
-          <a href="https://{{ vm_name }}.{{ domain }}" target="_blank" 
-             class="text-indigo-400 hover:text-indigo-300 transition">
-            https://{{ vm_name }}.{{ domain }}
-          </a>
-        {% endif %}
-      </p>
-    </div>
-
-    <!-- Port (editable) -->
-    <div class="flex items-end gap-3">
+<div class="space-y-6">
+  <section class="glass rounded-[2rem] p-6 sm:p-8">
+    <div class="flex flex-col gap-6 xl:flex-row xl:items-start xl:justify-between">
       <div>
-        <label class="text-xs text-gray-500 uppercase tracking-wide block mb-1">Port</label>
-        <form hx-post="/dashboard/vms/{{ vm_name }}/expose"
-              hx-target="#proxy-result" hx-swap="innerHTML"
-              class="flex items-center gap-2">
-          <input type="number" name="port" value="{{ proxy_port }}" min="1" max="65535"
-                 class="w-24 rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white font-mono
-                        focus:outline-none focus:border-indigo-500"/>
-          <button type="submit"
-                  class="rounded-lg bg-indigo-700 hover:bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white transition">
-            Update
-          </button>
-        </form>
+        <a href="/dashboard" class="text-sm text-mute transition hover:text-white">← Back to fleet</a>
+        <div class="mt-4 flex flex-wrap items-center gap-3">
+          <h1 class="font-mono text-3xl font-semibold tracking-tight text-white sm:text-4xl">{{ vm_name }}</h1>
+          {% if vm_status == "running" %}
+            <span class="inline-flex items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-xs font-medium text-emerald-300">
+              <span class="h-2 w-2 rounded-full bg-emerald-300 animate-pulse"></span>running
+            </span>
+          {% else if vm_status == "stopped" %}
+            <span class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-mute">
+              <span class="h-2 w-2 rounded-full bg-white/30"></span>stopped
+            </span>
+          {% else %}
+            <span class="inline-flex items-center gap-2 rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-xs font-medium text-amber-200">
+              <span class="h-2 w-2 rounded-full bg-amber-300"></span>{{ vm_status }}
+            </span>
+          {% endif %}
+        </div>
+        <p class="mt-3 max-w-3xl text-sm leading-7 text-mute">{{ vm_ip }} · {{ vm_vcpus }} vCPUs · {{ vm_memory_mb }} MiB RAM · {{ vm_disk_gb }} GiB disk · owner {{ vm_owner }}</p>
       </div>
-    </div>
 
-    <!-- Access mode toggle -->
-    <div class="flex items-center gap-3">
-      <span class="text-xs text-gray-500 uppercase tracking-wide">Access</span>
-      {% if proxy_public %}
-        <span class="inline-flex items-center rounded-full bg-green-900/40 px-2.5 py-0.5 text-xs font-medium text-green-400 border border-green-800">
-          public
-        </span>
-        <button hx-post="/dashboard/vms/{{ vm_name }}/set-private"
-                hx-target="body"
-                class="text-xs text-gray-400 hover:text-white transition">
-          Make private
-        </button>
-      {% else %}
-        <span class="inline-flex items-center rounded-full bg-yellow-900/40 px-2.5 py-0.5 text-xs font-medium text-yellow-400 border border-yellow-800">
-          private
-        </span>
-        <button hx-post="/dashboard/vms/{{ vm_name }}/set-public"
-                hx-target="body"
-                class="text-xs text-gray-400 hover:text-white transition">
-          Make public
-        </button>
-      {% endif %}
-    </div>
-
-    <!-- Result message area -->
-    <div id="proxy-result"></div>
-  </div>
-</section>
-
-<!-- Resources -->
-{% if vm_status == "stopped" %}
-<section class="mb-8">
-  <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Resources</h2>
-  <div class="rounded-xl border border-gray-800 bg-gray-900 p-5">
-    <p class="text-xs text-gray-500 mb-4">Resize VM resources (VM must be stopped). Changes take effect on next start.</p>
-    <form hx-post="/dashboard/vms/{{ vm_name }}/resize"
-          hx-target="#resize-result"
+      <div id="action-result" class="flex flex-wrap gap-3 xl:max-w-xl xl:justify-end">
+        {% if vm_status == "stopped" %}
+        <button
+          hx-post="/dashboard/vms/{{ vm_name }}/start"
+          hx-target="#action-result"
           hx-swap="innerHTML"
-          class="space-y-4">
-      
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <!-- CPU -->
-        <div>
-          <label class="text-xs text-gray-500 uppercase tracking-wide block mb-1">
-            CPU (vCPUs)
-          </label>
-          <input type="number" name="vcpus" value="{{ vm_vcpus }}" min="1" max="16"
-                 class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white font-mono
-                        focus:outline-none focus:border-indigo-500"/>
-          <p class="text-xs text-gray-600 mt-1">Range: 1-16</p>
-        </div>
-
-        <!-- Memory -->
-        <div>
-          <label class="text-xs text-gray-500 uppercase tracking-wide block mb-1">
-            Memory (MB)
-          </label>
-          <input type="number" name="memory_mb" value="{{ vm_memory_mb }}" min="128" max="16384" step="128"
-                 class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white font-mono
-                        focus:outline-none focus:border-indigo-500"/>
-          <p class="text-xs text-gray-600 mt-1">Range: 128-16384 MB</p>
-        </div>
-
-        <!-- Disk -->
-        <div>
-          <label class="text-xs text-gray-500 uppercase tracking-wide block mb-1">
-            Disk (GB)
-          </label>
-          <input type="number" name="disk_gb" value="{{ vm_disk_gb }}" min="{{ vm_disk_gb }}" max="200"
-                 class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white font-mono
-                        focus:outline-none focus:border-indigo-500"/>
-          <p class="text-xs text-gray-600 mt-1">Can only grow, not shrink</p>
-        </div>
-      </div>
-
-      <div class="flex items-center gap-3">
-        <button type="submit"
-                class="rounded-lg bg-indigo-700 hover:bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition">
-          💾 Resize
+          class="rounded-2xl bg-accent px-4 py-3 text-sm font-semibold text-black transition hover:brightness-110">
+          Start VM
         </button>
-        <div id="resize-result"></div>
-      </div>
-    </form>
-  </div>
-</section>
-{% endif %}
-
-<!-- Custom Domains -->
-<section class="mb-8">
-  <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Custom Domains</h2>
-  <div class="rounded-xl border border-gray-800 bg-gray-900 p-5 space-y-4">
-    <!-- Add domain form -->
-    <form hx-post="/dashboard/vms/{{ vm_name }}/domains"
+        {% endif %}
+        {% if vm_status == "running" %}
+        <button
+          hx-post="/dashboard/vms/{{ vm_name }}/stop"
+          hx-target="#action-result"
+          hx-swap="innerHTML"
+          hx-confirm="Stop VM {{ vm_name }}?"
+          class="rounded-2xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm font-medium text-amber-100 transition hover:bg-amber-400/15">
+          Stop
+        </button>
+        <button
+          hx-post="/dashboard/vms/{{ vm_name }}/restart"
+          hx-target="#action-result"
+          hx-swap="innerHTML"
+          hx-confirm="Restart VM {{ vm_name }}?"
+          class="rounded-2xl border border-sky-400/20 bg-sky-400/10 px-4 py-3 text-sm font-medium text-sky-100 transition hover:bg-sky-400/15">
+          Restart
+        </button>
+        <button
+          hx-post="/dashboard/vms/{{ vm_name }}/snapshot"
+          hx-target="#action-result"
+          hx-swap="innerHTML"
+          class="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-medium text-white transition hover:bg-white/10">
+          Snapshot
+        </button>
+        {% endif %}
+        <button
+          hx-delete="/dashboard/vms/{{ vm_name }}"
           hx-target="body"
-          class="flex items-end gap-3">
-      <div class="flex-1">
-        <label class="text-xs text-gray-500 uppercase tracking-wide block mb-1">Domain Name</label>
-        <input type="text" name="domain" placeholder="www.example.com"
-               class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white font-mono
-                      focus:outline-none focus:border-indigo-500"
-               required />
+          hx-push-url="/dashboard"
+          hx-confirm="Permanently destroy {{ vm_name }} and all its data?"
+          class="rounded-2xl border border-red-400/20 bg-red-500/10 px-4 py-3 text-sm font-medium text-red-200 transition hover:bg-red-500/15">
+          Destroy
+        </button>
       </div>
-      <button type="submit"
-              class="rounded-lg bg-indigo-700 hover:bg-indigo-600 px-4 py-1.5 text-sm font-medium text-white transition">
-        + Add Domain
-      </button>
-    </form>
-
-    <!-- Domain list -->
-    {% if custom_domains.is_empty() %}
-      <p class="text-sm text-gray-600">No custom domains configured. Add a CNAME record pointing to {{ vm_name }}.{{ domain }} to get started.</p>
-    {% else %}
-      <div class="overflow-hidden rounded-lg border border-gray-800">
-        <table class="w-full text-sm">
-          <thead class="bg-gray-950 text-gray-400 text-xs uppercase tracking-wide">
-            <tr>
-              <th class="px-4 py-2 text-left">Domain</th>
-              <th class="px-4 py-2 text-left">Status</th>
-              <th class="px-4 py-2 text-right"></th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-gray-800">
-            {% for d in custom_domains %}
-            <tr class="hover:bg-gray-800 transition">
-              <td class="px-4 py-2 font-mono text-white">{{ d.domain }}</td>
-              <td class="px-4 py-2">
-                {% if d.verified %}
-                  <span class="inline-flex items-center rounded-full bg-green-900/40 px-2 py-0.5 text-xs font-medium text-green-400 border border-green-800">
-                    verified
-                  </span>
-                {% else %}
-                  <span class="inline-flex items-center rounded-full bg-yellow-900/40 px-2 py-0.5 text-xs font-medium text-yellow-400 border border-yellow-800">
-                    pending
-                  </span>
-                {% endif %}
-              </td>
-              <td class="px-4 py-2 text-right">
-                <button
-                  hx-delete="/dashboard/vms/{{ vm_name }}/domains/{{ d.domain }}"
-                  hx-confirm="Remove custom domain {{ d.domain }}?"
-                  hx-target="closest tr"
-                  hx-swap="outerHTML"
-                  class="text-xs text-red-400 hover:text-red-300 transition">
-                  Remove
-                </button>
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    {% endif %}
-  </div>
-</section>
-
-<!-- Metrics -->
-<section class="mb-8">
-  <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Live Metrics</h2>
-  <div
-    class="grid grid-cols-2 md:grid-cols-4 gap-3"
-    hx-get="/dashboard/vms/{{ vm_name }}/metrics-fragment"
-    hx-trigger="load, every 30s"
-    hx-swap="outerHTML"
-  >
-    {% include "metrics_fragment.html" %}
-  </div>
-</section>
-
-<!-- Snapshots -->
-<section>
-  <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Snapshots</h2>
-  {% if snapshots.is_empty() %}
-    <p class="text-sm text-gray-600">No snapshots yet.</p>
-  {% else %}
-    <div class="overflow-hidden rounded-xl border border-gray-800">
-      <table class="w-full text-sm">
-        <thead class="bg-gray-900 text-gray-400 text-xs uppercase tracking-wide">
-          <tr>
-            <th class="px-4 py-3 text-left">Name</th>
-            <th class="px-4 py-3 text-left">Created</th>
-            <th class="px-4 py-3 text-left">Size</th>
-            <th class="px-4 py-3 text-left"></th>
-          </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-800 bg-gray-950">
-          {% for snap in snapshots %}
-          <tr class="hover:bg-gray-900 transition">
-            <td class="px-4 py-3 font-mono text-white">{{ snap.name }}</td>
-            <td class="px-4 py-3 text-gray-400">{{ snap.created_at }}</td>
-            <td class="px-4 py-3 text-gray-400">{{ snap.size_mb }} MiB</td>
-            <td class="px-4 py-3 text-right flex gap-2 justify-end">
-              <button
-                hx-post="/dashboard/vms/{{ vm_name }}/snapshots/{{ snap.name }}/restore"
-                hx-confirm="Restore from snapshot {{ snap.name }}? VM will be stopped first."
-                hx-target="#action-result"
-                hx-swap="innerHTML"
-                class="text-xs text-indigo-400 hover:text-indigo-300 transition">
-                Restore
-              </button>
-              <button
-                hx-delete="/dashboard/vms/{{ vm_name }}/snapshots/{{ snap.name }}"
-                hx-confirm="Delete snapshot {{ snap.name }}?"
-                hx-target="closest tr"
-                hx-swap="outerHTML"
-                class="text-xs text-red-400 hover:text-red-300 transition">
-                Delete
-              </button>
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
     </div>
-  {% endif %}
-</section>
+  </section>
+
+  <section>
+    {% include "metrics_fragment.html" %}
+  </section>
+
+  <div class="grid gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
+    <div class="space-y-6">
+      <section class="panel rounded-[2rem] p-6">
+        <p class="text-xs uppercase tracking-[0.3em] text-accent">Identity</p>
+        <h2 class="mt-2 text-2xl font-semibold text-white">Rename virtual machine</h2>
+        <p class="mt-2 text-sm text-mute">Rename this VM from the dashboard. CPU and memory can be increased or decreased later; disk can only grow.</p>
+
+        <form hx-post="/dashboard/vms/{{ vm_name }}/rename" hx-target="#rename-result" hx-swap="innerHTML" class="mt-6 flex flex-col gap-3 md:flex-row md:items-end">
+          <label class="block flex-1">
+            <span class="mb-2 block text-xs uppercase tracking-[0.25em] text-mute">VM name</span>
+            <input type="text" name="new_name" value="{{ vm_name }}" required maxlength="11" pattern="[A-Za-z0-9-]+"
+              class="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none transition focus:border-accent focus:bg-white/8" />
+          </label>
+          <button type="submit" class="rounded-2xl bg-accent px-4 py-3 text-sm font-semibold text-black transition hover:brightness-110">Rename VM</button>
+        </form>
+        <div id="rename-result" class="mt-3 text-sm"></div>
+      </section>
+
+      <section class="panel rounded-[2rem] p-6">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <p class="text-xs uppercase tracking-[0.3em] text-accent">Proxy</p>
+            <h2 class="mt-2 text-2xl font-semibold text-white">Networking</h2>
+          </div>
+        </div>
+
+        <div class="mt-6 grid gap-4 md:grid-cols-2">
+          <div class="rounded-3xl bg-white/5 p-4">
+            <p class="text-xs uppercase tracking-[0.25em] text-mute">Public URL</p>
+            <p class="mt-3 text-sm leading-7 text-white">
+              {% if domain == "" %}
+                <span class="text-mute">Proxy not configured</span>
+              {% else %}
+                <a href="https://{{ vm_name }}.{{ domain }}" target="_blank" class="break-all text-accent transition hover:text-white">
+                  https://{{ vm_name }}.{{ domain }}
+                </a>
+              {% endif %}
+            </p>
+          </div>
+
+          <div class="rounded-3xl bg-white/5 p-4">
+            <p class="text-xs uppercase tracking-[0.25em] text-mute">Access mode</p>
+            <div class="mt-3 flex items-center gap-3">
+              {% if proxy_public %}
+                <span class="inline-flex items-center rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-xs font-medium text-emerald-300">public</span>
+                <button hx-post="/dashboard/vms/{{ vm_name }}/set-private" hx-target="body" class="text-sm text-mute transition hover:text-white">Make private</button>
+              {% else %}
+                <span class="inline-flex items-center rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-xs font-medium text-amber-200">private</span>
+                <button hx-post="/dashboard/vms/{{ vm_name }}/set-public" hx-target="body" class="text-sm text-mute transition hover:text-white">Make public</button>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+
+        <form hx-post="/dashboard/vms/{{ vm_name }}/expose" hx-target="#proxy-result" hx-swap="innerHTML" class="mt-6 flex flex-wrap items-end gap-3">
+          <label class="block">
+            <span class="mb-2 block text-xs uppercase tracking-[0.25em] text-mute">Proxy port</span>
+            <input type="number" name="port" value="{{ proxy_port }}" min="1" max="65535"
+              class="w-36 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none transition focus:border-accent focus:bg-white/8" />
+          </label>
+          <button type="submit" class="rounded-2xl bg-accent px-4 py-3 text-sm font-semibold text-black transition hover:brightness-110">Update port</button>
+          <div id="proxy-result" class="text-sm"></div>
+        </form>
+      </section>
+
+      {% if vm_status == "stopped" %}
+      <section class="panel rounded-[2rem] p-6">
+        <p class="text-xs uppercase tracking-[0.3em] text-accent">Capacity</p>
+        <h2 class="mt-2 text-2xl font-semibold text-white">Resize resources</h2>
+        <p class="mt-2 text-sm text-mute">Resize only works while the VM is stopped. vCPUs and memory can be increased or decreased. Disk can only be increased. Changes apply on next boot.</p>
+
+        <form hx-post="/dashboard/vms/{{ vm_name }}/resize" hx-target="#resize-result" hx-swap="innerHTML" class="mt-6 space-y-5">
+          <div class="grid gap-4 md:grid-cols-3">
+            <label class="block">
+              <span class="mb-2 block text-xs uppercase tracking-[0.25em] text-mute">CPU</span>
+              <input type="number" name="vcpus" value="{{ vm_vcpus }}" min="1" max="16"
+                class="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none transition focus:border-accent focus:bg-white/8" />
+            </label>
+            <label class="block">
+              <span class="mb-2 block text-xs uppercase tracking-[0.25em] text-mute">Memory (MB)</span>
+              <input type="number" name="memory_mb" value="{{ vm_memory_mb }}" min="128" max="16384" step="128"
+                class="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none transition focus:border-accent focus:bg-white/8" />
+            </label>
+            <label class="block">
+              <span class="mb-2 block text-xs uppercase tracking-[0.25em] text-mute">Disk (GB)</span>
+              <input type="number" name="disk_gb" value="{{ vm_disk_gb }}" min="{{ vm_disk_gb }}" max="200"
+                class="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none transition focus:border-accent focus:bg-white/8" />
+            </label>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3">
+            <button type="submit" class="rounded-2xl bg-accent px-4 py-3 text-sm font-semibold text-black transition hover:brightness-110">Apply resize</button>
+            <div id="resize-result" class="text-sm"></div>
+          </div>
+        </form>
+      </section>
+      {% endif %}
+
+      <section class="panel rounded-[2rem] p-6">
+        <p class="text-xs uppercase tracking-[0.3em] text-accent">Domains</p>
+        <h2 class="mt-2 text-2xl font-semibold text-white">Custom domains</h2>
+        <p class="mt-2 text-sm text-mute">Attach your own hostname and verify DNS against the Minions proxy.</p>
+
+        <form hx-post="/dashboard/vms/{{ vm_name }}/domains" hx-target="body" class="mt-6 flex flex-col gap-3 md:flex-row md:items-end">
+          <label class="block flex-1">
+            <span class="mb-2 block text-xs uppercase tracking-[0.25em] text-mute">Domain name</span>
+            <input type="text" name="domain" placeholder="www.example.com" required
+              class="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none transition placeholder:text-white/25 focus:border-accent focus:bg-white/8" />
+          </label>
+          <button type="submit" class="rounded-2xl bg-accent px-4 py-3 text-sm font-semibold text-black transition hover:brightness-110">Add domain</button>
+        </form>
+
+        <div class="mt-6 space-y-3">
+          {% if custom_domains.is_empty() %}
+            <div class="rounded-3xl bg-white/5 px-5 py-6 text-sm leading-7 text-mute">
+              No custom domains configured yet. Point a CNAME to {{ vm_name }}.{{ domain }} and add it here.
+            </div>
+          {% else %}
+            {% for d in custom_domains %}
+            <div class="flex flex-col gap-3 rounded-3xl bg-white/5 px-5 py-4 md:flex-row md:items-center md:justify-between">
+              <div>
+                <p class="font-mono text-sm text-white">{{ d.domain }}</p>
+                <div class="mt-2">
+                  {% if d.verified %}
+                    <span class="inline-flex items-center rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-xs font-medium text-emerald-300">verified</span>
+                  {% else %}
+                    <span class="inline-flex items-center rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-xs font-medium text-amber-200">pending</span>
+                  {% endif %}
+                </div>
+              </div>
+              <button
+                hx-delete="/dashboard/vms/{{ vm_name }}/domains/{{ d.domain }}"
+                hx-confirm="Remove custom domain {{ d.domain }}?"
+                hx-target="closest .rounded-3xl"
+                hx-swap="outerHTML"
+                class="rounded-2xl border border-red-400/20 bg-red-500/10 px-4 py-2 text-sm text-red-200 transition hover:bg-red-500/15">
+                Remove
+              </button>
+            </div>
+            {% endfor %}
+          {% endif %}
+        </div>
+      </section>
+    </div>
+
+    <aside class="space-y-6">
+      <section class="panel rounded-[2rem] p-6">
+        <p class="text-xs uppercase tracking-[0.3em] text-accent">Snapshots</p>
+        <h2 class="mt-2 text-2xl font-semibold text-white">Recovery points</h2>
+        <p class="mt-2 text-sm text-mute">Create snapshots before risky changes and restore them when needed.</p>
+
+        <div class="mt-6 space-y-3">
+          {% if snapshots.is_empty() %}
+            <div class="rounded-3xl bg-white/5 px-5 py-6 text-sm text-mute">No snapshots yet.</div>
+          {% else %}
+            {% for snap in snapshots %}
+            <div class="rounded-3xl bg-white/5 p-4">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <p class="font-mono text-sm text-white">{{ snap.name }}</p>
+                  <p class="mt-2 text-xs text-mute">{{ snap.created_at }}</p>
+                  <p class="mt-1 text-xs text-mute">{{ snap.size_mb }} MiB</p>
+                </div>
+                <div class="flex flex-col items-end gap-2">
+                  <button
+                    hx-post="/dashboard/vms/{{ vm_name }}/snapshots/{{ snap.name }}/restore"
+                    hx-confirm="Restore from snapshot {{ snap.name }}? VM will be stopped first."
+                    hx-target="#action-result"
+                    hx-swap="innerHTML"
+                    class="text-sm text-accent transition hover:text-white">
+                    Restore
+                  </button>
+                  <button
+                    hx-delete="/dashboard/vms/{{ vm_name }}/snapshots/{{ snap.name }}"
+                    hx-confirm="Delete snapshot {{ snap.name }}?"
+                    hx-target="closest .rounded-3xl"
+                    hx-swap="outerHTML"
+                    class="text-sm text-red-200 transition hover:text-red-100">
+                    Delete
+                  </button>
+                </div>
+              </div>
+            </div>
+            {% endfor %}
+          {% endif %}
+        </div>
+      </section>
+    </aside>
+  </div>
+</div>
 {% endblock %}

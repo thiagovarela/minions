@@ -4,9 +4,8 @@
 //! `MINIONS_API_KEY`. On success a session cookie is issued. All other
 //! dashboard routes require a valid session cookie.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use askama::Template;
 use axum::{
@@ -16,8 +15,9 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
     routing::{delete, get, post},
 };
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use uuid::Uuid;
+use tracing::{error, warn};
 
 use crate::{db, metrics::MetricsStore, server::AppState, vm};
 
@@ -26,38 +26,65 @@ use crate::{db, metrics::MetricsStore, server::AppState, vm};
 const SESSION_COOKIE: &str = "minions_session";
 const SESSION_TTL: Duration = Duration::from_secs(24 * 3600);
 
-#[derive(Clone, Default)]
-pub struct DashboardSessions(Arc<Mutex<HashMap<String, Instant>>>);
+#[derive(Clone)]
+pub struct DashboardSessions {
+    db_path: Arc<String>,
+}
 
 impl DashboardSessions {
-    pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(HashMap::new())))
+    pub fn new(db_path: Arc<String>) -> Self {
+        Self { db_path }
     }
 
-    pub fn create(&self) -> String {
-        let token = Uuid::new_v4().to_string();
-        if let Ok(mut m) = self.0.lock() {
-            m.insert(token.clone(), Instant::now());
-        }
-        token
+    fn now() -> DateTime<Utc> {
+        Utc::now()
+    }
+
+    fn expires_at(now: DateTime<Utc>) -> DateTime<Utc> {
+        now + chrono::Duration::from_std(SESSION_TTL).expect("valid dashboard session ttl")
+    }
+
+    pub fn create(&self) -> anyhow::Result<String> {
+        let conn = db::open(&self.db_path)?;
+        let (token, token_hash) = db::generate_dashboard_session_token();
+        let now = Self::now();
+        let expires_at = Self::expires_at(now).to_rfc3339();
+        db::insert_dashboard_session(&conn, &token_hash, &expires_at)?;
+        Ok(token)
     }
 
     pub fn validate(&self, token: &str) -> bool {
-        let Ok(mut m) = self.0.lock() else {
-            return false;
-        };
-        if let Some(ts) = m.get(token) {
-            if ts.elapsed() < SESSION_TTL {
-                return true;
+        let conn = match db::open(&self.db_path) {
+            Ok(conn) => conn,
+            Err(e) => {
+                error!(error = %e, "failed to open db while validating dashboard session");
+                return false;
             }
-            m.remove(token);
+        };
+        let now = Self::now();
+        let token_hash = db::dashboard_session_token_hash(token);
+        let now_str = now.to_rfc3339();
+        let expires_at = Self::expires_at(now).to_rfc3339();
+        match db::validate_dashboard_session(&conn, &token_hash, &now_str, &expires_at) {
+            Ok(valid) => valid,
+            Err(e) => {
+                warn!(error = %e, "failed to validate dashboard session");
+                false
+            }
         }
-        false
     }
 
     pub fn delete(&self, token: &str) {
-        if let Ok(mut m) = self.0.lock() {
-            m.remove(token);
+        let conn = match db::open(&self.db_path) {
+            Ok(conn) => conn,
+            Err(e) => {
+                warn!(error = %e, "failed to open db while deleting dashboard session");
+                return;
+            }
+        };
+        let token_hash = db::dashboard_session_token_hash(token);
+        if let Err(e) = db::revoke_dashboard_session(&conn, &token_hash) {
+            warn!(error = %e, "failed to revoke dashboard session");
         }
     }
 }
@@ -133,6 +160,14 @@ struct CustomDomainRow {
     verified: bool,
 }
 
+struct SessionRow {
+    id: String,
+    created_at: String,
+    expires_at: String,
+    last_used_at: String,
+    is_current: bool,
+}
+
 // ── Templates ─────────────────────────────────────────────────────────────────
 
 #[derive(Template)]
@@ -196,6 +231,12 @@ struct MetricsFragmentTemplate {
     net_tx_str: String,
 }
 
+#[derive(Template)]
+#[template(path = "settings.html")]
+struct SettingsTemplate {
+    sessions: Vec<SessionRow>,
+}
+
 // ── Router ────────────────────────────────────────────────────────────────────
 
 pub fn router() -> Router<AppState> {
@@ -203,6 +244,15 @@ pub fn router() -> Router<AppState> {
         .route("/dashboard/login", get(login_page).post(login_submit))
         .route("/dashboard/logout", get(logout))
         .route("/dashboard", get(dashboard))
+        .route("/dashboard/settings", get(settings_page))
+        .route(
+            "/dashboard/settings/sessions/revoke-others",
+            post(revoke_other_sessions),
+        )
+        .route(
+            "/dashboard/settings/sessions/{id}/revoke",
+            post(revoke_session),
+        )
         .route("/dashboard/vms-fragment", get(vms_fragment))
         .route("/dashboard/vms", post(vm_create))
         .route("/dashboard/vms/{name}", get(vm_detail))
@@ -215,6 +265,7 @@ pub fn router() -> Router<AppState> {
         .route("/dashboard/vms/{name}/stop", post(vm_stop))
         .route("/dashboard/vms/{name}/snapshot", post(vm_snapshot))
         .route("/dashboard/vms/{name}/expose", post(vm_expose))
+        .route("/dashboard/vms/{name}/rename", post(vm_rename))
         .route("/dashboard/vms/{name}/resize", post(vm_resize))
         .route("/dashboard/vms/{name}/set-public", post(vm_set_public))
         .route("/dashboard/vms/{name}/set-private", post(vm_set_private))
@@ -257,7 +308,14 @@ async fn login_submit(State(state): State<AppState>, Form(form): Form<LoginForm>
             error: "Invalid API key.".to_string(),
         });
     }
-    let token = state.sessions.create();
+    let token = match state.sessions.create() {
+        Ok(token) => token,
+        Err(e) => {
+            return render(LoginTemplate {
+                error: format!("Could not create session: {e}"),
+            });
+        }
+    };
     let mut resp = Redirect::to("/dashboard").into_response();
     resp.headers_mut()
         .insert(header::SET_COOKIE, set_session_cookie(&token));
@@ -290,6 +348,68 @@ async fn vms_fragment(headers: HeaderMap, State(state): State<AppState>) -> Resp
     }
     let vms = load_vm_rows(&state);
     render(VmsFragmentTemplate { vms })
+}
+
+async fn settings_page(headers: HeaderMap, State(state): State<AppState>) -> Response {
+    let Some(current_token) = check_session(&headers, &state.sessions) else {
+        return Redirect::to("/dashboard/login").into_response();
+    };
+
+    let current_hash = db::dashboard_session_token_hash(&current_token);
+    let sessions = match load_session_rows(&state, &current_hash) {
+        Ok(rows) => rows,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    render(SettingsTemplate { sessions })
+}
+
+async fn revoke_other_sessions(headers: HeaderMap, State(state): State<AppState>) -> Response {
+    let Some(current_token) = check_session(&headers, &state.sessions) else {
+        return Redirect::to("/dashboard/login").into_response();
+    };
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let current_hash = db::dashboard_session_token_hash(&current_token);
+    match db::revoke_other_dashboard_sessions(&conn, &current_hash) {
+        Ok(_) => Redirect::to("/dashboard/settings").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn revoke_session(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(current_token) = check_session(&headers, &state.sessions) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let conn = match db::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let current_hash = db::dashboard_session_token_hash(&current_token);
+    let current_session_id = match db::get_dashboard_session_id_by_hash(&conn, &current_hash) {
+        Ok(id) => id,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    match db::revoke_dashboard_session_by_id(&conn, &id) {
+        Ok(true) => {
+            if current_session_id.as_deref() == Some(id.as_str()) {
+                let mut resp = Redirect::to("/dashboard/login").into_response();
+                resp.headers_mut()
+                    .insert(header::SET_COOKIE, clear_session_cookie());
+                return resp;
+            }
+            Redirect::to("/dashboard/settings").into_response()
+        }
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 async fn vm_detail(
@@ -517,6 +637,40 @@ async fn vm_expose(
         .into_response(),
         Ok(false) => {
             Html("<span class='text-red-400 text-sm'>✗ VM not found</span>").into_response()
+        }
+        Err(e) => Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct RenameForm {
+    new_name: String,
+}
+
+async fn vm_rename(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Form(form): Form<RenameForm>,
+) -> Response {
+    if check_session(&headers, &state.sessions).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let new_name = form.new_name.trim().to_string();
+    if new_name.is_empty() {
+        return Html("<span class='text-red-400 text-sm'>✗ New name is required</span>")
+            .into_response();
+    }
+
+    let db_path = state.db_path.clone();
+    match vm::rename(&db_path, &name, &new_name).await {
+        Ok(()) => {
+            let mut resp = Html("").into_response();
+            if let Ok(value) = HeaderValue::from_str(&format!("/dashboard/vms/{new_name}")) {
+                resp.headers_mut().insert("HX-Redirect", value);
+            }
+            resp
         }
         Err(e) => Html(format!("<span class='text-red-400 text-sm'>✗ {e}</span>")).into_response(),
     }
@@ -831,6 +985,35 @@ fn build_metrics_fields(vm_name: &str, store: &MetricsStore) -> (bool, MetricsFi
             )
         }
     }
+}
+
+fn load_session_rows(state: &AppState, current_hash: &str) -> anyhow::Result<Vec<SessionRow>> {
+    let conn = db::open(&state.db_path)?;
+    let now = Utc::now().to_rfc3339();
+    let _ = db::gc_dashboard_sessions(&conn, &now);
+    let current_session_id = db::get_dashboard_session_id_by_hash(&conn, current_hash)?;
+    let sessions = db::list_dashboard_sessions(&conn)?;
+
+    Ok(sessions
+        .into_iter()
+        .map(|s| SessionRow {
+            is_current: current_session_id.as_deref() == Some(s.id.as_str()),
+            id: s.id,
+            created_at: format_timestamp(&s.created_at),
+            expires_at: format_timestamp(&s.expires_at),
+            last_used_at: s
+                .last_used_at
+                .as_deref()
+                .map(format_timestamp)
+                .unwrap_or_else(|| "—".to_string()),
+        })
+        .collect())
+}
+
+fn format_timestamp(value: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|_| value.to_string())
 }
 
 /// Returns snapshot size in MiB by checking the rootfs file on disk.
