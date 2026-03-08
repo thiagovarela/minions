@@ -20,9 +20,12 @@ use anyhow::{Context, Result};
 use axum::{Router, routing::any, routing::get};
 use tracing::{info, warn};
 
+use crate::metrics::ProxyMetrics;
+
 pub mod auth;
 pub mod connection_limit;
 pub mod db;
+pub mod metrics;
 pub mod proxy;
 pub mod rate_limit;
 pub mod tls;
@@ -168,15 +171,18 @@ pub async fn serve(config: ProxyConfig, https_bind: &str, http_bind: &str) -> Re
         rate_limiter,
         login_rate_limiter,
         connection_limiter,
+        metrics: Arc::new(ProxyMetrics::default()),
     };
 
     // HTTPS app (port 443) — main proxy.
     let https_app = Router::new()
+        .route("/metrics", get(proxy::metrics))
         .fallback(any(proxy::handle))
         .with_state(state.clone());
 
     // HTTP app (port 80) — ACME challenges + redirect to HTTPS.
     let http_app = Router::new()
+        .route("/metrics", get(proxy::metrics))
         .route(
             "/.well-known/acme-challenge/{token}",
             get(proxy::acme_challenge),

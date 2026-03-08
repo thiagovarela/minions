@@ -25,6 +25,7 @@ use crate::auth::{
 };
 use crate::connection_limit::{ConnectionLimiter, connection_limit_response};
 use crate::db;
+use crate::metrics::ProxyMetrics;
 use crate::rate_limit::{RateLimiter, rate_limit_response};
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -54,6 +55,8 @@ pub struct AppState {
     pub login_rate_limiter: Arc<LoginRateLimiter>,
     /// Connection limiter.
     pub connection_limiter: Arc<ConnectionLimiter>,
+    /// In-memory Prometheus-style proxy metrics.
+    pub metrics: Arc<ProxyMetrics>,
 }
 
 // ── Main handler ──────────────────────────────────────────────────────────────
@@ -63,6 +66,8 @@ pub async fn handle(
     State(state): State<AppState>,
     req: Request,
 ) -> Response {
+    let method = req.method().as_str().to_string();
+    let path = req.uri().path().to_string();
     let host = req
         .headers()
         .get(header::HOST)
@@ -73,35 +78,42 @@ pub async fn handle(
     // Strip port suffix from Host if present.
     let host = host.split(':').next().unwrap_or("");
 
+    let route_kind = route_kind_for(&path, host, &state);
+    let tracker = state.metrics.start_request(&method, route_kind);
+
     // Extract client IP (respecting X-Forwarded-For, X-Real-IP headers).
-    let client_ip = crate::rate_limit::extract_client_ip(&req)
-        .unwrap_or_else(|| addr.ip());
+    let client_ip = crate::rate_limit::extract_client_ip(&req).unwrap_or_else(|| addr.ip());
 
     // ── Connection limiting check ─────────────────────────────────────────────
     let _conn_guard = match state.connection_limiter.acquire(client_ip) {
         Some(guard) => guard,
         None => {
             warn!(ip = %client_ip, "connection limit exceeded");
-            return connection_limit_response();
+            state.metrics.inc_connection_limit_denied();
+            let resp = connection_limit_response();
+            return finalize_response(tracker, resp);
         }
     };
 
     // ── Rate limiting check ───────────────────────────────────────────────────
     if !state.rate_limiter.check(client_ip) {
         warn!(ip = %client_ip, "rate limit exceeded");
-        return rate_limit_response(state.rate_limiter.config.window_secs);
+        state.metrics.inc_rate_limit_denied();
+        let resp = rate_limit_response(state.rate_limiter.config.window_secs);
+        return finalize_response(tracker, resp);
     }
 
     // ── Internal /__minions/ routes ───────────────────────────────────────────
-    let path = req.uri().path().to_string();
     if path.starts_with("/__minions/") {
-        return handle_internal(req, client_ip, &state).await;
+        let resp = handle_internal(req, client_ip, &state).await;
+        return finalize_response(tracker, resp);
     }
 
     // ── Apex domain → forward to local dashboard ──────────────────────────────
     if host == state.dashboard_domain.as_str() {
         debug!(host, "apex domain — forwarding to local dashboard");
-        return forward(req, "http://127.0.0.1:3000", host, &state.http_client).await;
+        let resp = forward(req, "http://127.0.0.1:3000", host, &state.http_client, route_kind, &state.metrics).await;
+        return finalize_response(tracker, resp);
     }
 
     // ── Try custom domain lookup first ────────────────────────────────────────
@@ -109,37 +121,49 @@ pub async fn handle(
         Ok(c) => c,
         Err(e) => {
             warn!("db open error: {}", e);
-            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
+            let resp = error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
+            return finalize_response(tracker, resp);
         }
     };
 
     if let Ok(Some(vm)) = db::get_vm_by_custom_domain(&conn, host) {
         debug!(domain = host, vm = %vm.name, "custom domain match");
-        return forward_to_vm(req, &vm, host, &state).await;
+        let resp = forward_to_vm(req, &vm, host, route_kind, &state).await;
+        return finalize_response(tracker, resp);
     }
 
     // ── Extract subdomain (*.vm_domain) ───────────────────────────────────────
     let subdomain = match extract_subdomain(host, &state.vm_domain) {
         Some(s) => s,
-        None => return error_response(StatusCode::NOT_FOUND, "Not found"),
+        None => {
+            let resp = error_response(StatusCode::NOT_FOUND, "Not found");
+            return finalize_response(tracker, resp);
+        }
     };
 
     debug!(subdomain, "proxy request (subdomain)");
 
     // ── VM lookup by subdomain ────────────────────────────────────────────────
-    match db::get_vm_proxy(&conn, &subdomain) {
-        Ok(Some(vm)) => forward_to_vm(req, &vm, host, &state).await,
+    let resp = match db::get_vm_proxy(&conn, &subdomain) {
+        Ok(Some(vm)) => forward_to_vm(req, &vm, host, route_kind, &state).await,
         Ok(None) => error_response(StatusCode::NOT_FOUND, &format!("No VM named '{subdomain}'")),
         Err(e) => {
             warn!("db query error: {}", e);
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
         }
-    }
+    };
+    finalize_response(tracker, resp)
 }
 
 // ── Forward to VM (auth + status check + proxy) ───────────────────────────────
 
-async fn forward_to_vm(req: Request, vm: &db::VmProxy, host: &str, state: &AppState) -> Response {
+async fn forward_to_vm(
+    req: Request,
+    vm: &db::VmProxy,
+    host: &str,
+    route_kind: &str,
+    state: &AppState,
+) -> Response {
     // Check VM status.
     if vm.status != "running" {
         return error_response(
@@ -156,6 +180,7 @@ async fn forward_to_vm(req: Request, vm: &db::VmProxy, host: &str, state: &AppSt
             .map(|t| state.sessions.is_valid(t))
             .unwrap_or(false);
         if !valid {
+            state.metrics.inc_auth_redirect();
             return redirect_to_login(req.uri().path());
         }
     }
@@ -163,12 +188,12 @@ async fn forward_to_vm(req: Request, vm: &db::VmProxy, host: &str, state: &AppSt
     // ── WebSocket upgrade ─────────────────────────────────────────────────────
     if is_websocket_upgrade(&req) {
         debug!(vm = %vm.name, port = vm.proxy_port, "WebSocket upgrade — tunnelling");
-        return ws_upgrade(req, &vm.ip, vm.proxy_port, host).await;
+        return ws_upgrade(req, &vm.ip, vm.proxy_port, host, route_kind, &state.metrics).await;
     }
 
     // ── Normal HTTP forward ───────────────────────────────────────────────────
     let origin = format!("http://{}:{}", vm.ip, vm.proxy_port);
-    forward(req, &origin, host, &state.http_client).await
+    forward(req, &origin, host, &state.http_client, route_kind, &state.metrics).await
 }
 
 // ── WebSocket tunnel ──────────────────────────────────────────────────────────
@@ -189,7 +214,14 @@ fn is_websocket_upgrade(req: &Request) -> bool {
 /// 4. Return a matching 101 to the client.
 /// 5. Spawn a background task that awaits hyper's `on_upgrade` and then
 ///    bidirectionally copies bytes between the two raw streams.
-async fn ws_upgrade(req: Request, vm_ip: &str, vm_port: u16, original_host: &str) -> Response {
+async fn ws_upgrade(
+    req: Request,
+    vm_ip: &str,
+    vm_port: u16,
+    original_host: &str,
+    route_kind: &str,
+    metrics: &ProxyMetrics,
+) -> Response {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
@@ -200,6 +232,8 @@ async fn ws_upgrade(req: Request, vm_ip: &str, vm_port: u16, original_host: &str
         Ok(s) => s,
         Err(e) => {
             warn!("WS: TCP connect to {} failed: {}", addr, e);
+            metrics.record_upstream_error(route_kind, "connect");
+            metrics.inc_websocket_upgrade_failure();
             return error_response(
                 StatusCode::BAD_GATEWAY,
                 "Could not reach the VM — is the web server running?",
@@ -214,10 +248,8 @@ async fn ws_upgrade(req: Request, vm_ip: &str, vm_port: u16, original_host: &str
         Some(u) => u,
         None => {
             warn!("WS: no OnUpgrade in request extensions");
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                "Connection upgrade not supported",
-            );
+            metrics.inc_websocket_upgrade_failure();
+            return error_response(StatusCode::BAD_GATEWAY, "Connection upgrade not supported");
         }
     };
 
@@ -228,7 +260,10 @@ async fn ws_upgrade(req: Request, vm_ip: &str, vm_port: u16, original_host: &str
         .unwrap_or("/");
 
     // ── 3. Build the raw HTTP/1.1 upgrade request for the VM ──────────────────
-    let mut raw = format!("GET {} HTTP/1.1\r\nHost: {}\r\n", path_and_query, original_host);
+    let mut raw = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\n",
+        path_and_query, original_host
+    );
 
     for (name, value) in &parts.headers {
         let n = name.as_str();
@@ -250,6 +285,8 @@ async fn ws_upgrade(req: Request, vm_ip: &str, vm_port: u16, original_host: &str
     // Send to VM.
     if let Err(e) = vm_stream.write_all(raw.as_bytes()).await {
         warn!("WS: write upgrade request to {} failed: {}", addr, e);
+        metrics.record_upstream_error(route_kind, "write");
+        metrics.inc_websocket_upgrade_failure();
         return error_response(StatusCode::BAD_GATEWAY, "Failed to send upgrade to VM");
     }
 
@@ -261,12 +298,16 @@ async fn ws_upgrade(req: Request, vm_ip: &str, vm_port: u16, original_host: &str
         match tokio::time::timeout_at(deadline, vm_stream.read(&mut tmp)).await {
             Ok(Ok(0)) => {
                 warn!("WS: VM closed during upgrade handshake");
+                metrics.record_upstream_error(route_kind, "closed");
+                metrics.inc_websocket_upgrade_failure();
                 return error_response(StatusCode::BAD_GATEWAY, "VM closed during upgrade");
             }
             Ok(Ok(n)) => {
                 buf.extend_from_slice(&tmp[..n]);
                 if buf.len() > 8192 {
                     warn!("WS: upgrade response too large from {}", addr);
+                    metrics.record_upstream_error(route_kind, "response_too_large");
+                    metrics.inc_websocket_upgrade_failure();
                     return error_response(StatusCode::BAD_GATEWAY, "Upgrade response too large");
                 }
                 if buf.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -275,19 +316,20 @@ async fn ws_upgrade(req: Request, vm_ip: &str, vm_port: u16, original_host: &str
             }
             Ok(Err(e)) => {
                 warn!("WS: read error during upgrade from {}: {}", addr, e);
+                metrics.record_upstream_error(route_kind, "read");
+                metrics.inc_websocket_upgrade_failure();
                 return error_response(StatusCode::BAD_GATEWAY, "Read error during upgrade");
             }
             Err(_) => {
                 warn!("WS: timeout waiting for upgrade response from {}", addr);
+                metrics.record_upstream_error(route_kind, "timeout");
+                metrics.inc_websocket_upgrade_failure();
                 return error_response(StatusCode::GATEWAY_TIMEOUT, "VM upgrade response timeout");
             }
         }
     }
 
-    let header_end = buf
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .unwrap();
+    let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
     // Any bytes after the headers are already WebSocket frame data — keep them.
     let leftover = buf[header_end + 4..].to_vec();
     let header_bytes = &buf[..header_end];
@@ -298,11 +340,15 @@ async fn ws_upgrade(req: Request, vm_ip: &str, vm_port: u16, original_host: &str
     let status_line = lines.next().unwrap_or("");
     if !status_line.contains("101") {
         warn!("WS: VM rejected upgrade: {}", status_line);
+        metrics.record_upstream_error(route_kind, "upgrade_rejected");
+        metrics.inc_websocket_upgrade_failure();
         return error_response(
             StatusCode::BAD_GATEWAY,
             &format!("VM rejected WebSocket upgrade: {status_line}"),
         );
     }
+
+    metrics.inc_websocket_upgrade();
 
     // Parse response headers to mirror back to the client.
     let mut response = Response::builder()
@@ -373,7 +419,10 @@ async fn ws_upgrade(req: Request, vm_ip: &str, vm_port: u16, original_host: &str
 
     // ── 7. Return the 101 to the client ───────────────────────────────────────
     response.body(Body::empty()).unwrap_or_else(|_| {
-        error_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to build upgrade response")
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to build upgrade response",
+        )
     })
 }
 
@@ -475,6 +524,8 @@ async fn forward(
     origin: &str,
     original_host: &str,
     client: &reqwest::Client,
+    route_kind: &str,
+    metrics: &ProxyMetrics,
 ) -> Response {
     let (parts, body) = req.into_parts();
 
@@ -532,6 +583,14 @@ async fn forward(
         Ok(r) => r,
         Err(e) => {
             warn!("upstream error: {}", e);
+            let kind = if e.is_timeout() {
+                "timeout"
+            } else if e.is_connect() {
+                "connect"
+            } else {
+                "request"
+            };
+            metrics.record_upstream_error(route_kind, kind);
             return error_response(
                 StatusCode::BAD_GATEWAY,
                 "Could not reach the VM — is the web server running?",
@@ -568,6 +627,26 @@ async fn forward(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn finalize_response(tracker: crate::metrics::RequestTracker, resp: Response) -> Response {
+    let status = resp.status();
+    tracker.finish(status);
+    resp
+}
+
+fn route_kind_for<'a>(path: &str, host: &'a str, state: &'a AppState) -> &'static str {
+    if path == "/metrics" {
+        "metrics"
+    } else if path.starts_with("/__minions/") {
+        "internal"
+    } else if host == state.dashboard_domain.as_str() {
+        "apex"
+    } else if host.ends_with(&format!(".{}", state.vm_domain.as_str())) {
+        "subdomain"
+    } else {
+        "custom_domain"
+    }
+}
 
 /// Add security headers to a response builder.
 pub fn add_security_headers(
@@ -606,6 +685,18 @@ fn query_param(uri: &Uri, key: &str) -> Option<String> {
             None
         }
     })
+}
+
+pub async fn metrics(State(state): State<AppState>) -> Response {
+    let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string());
+    let body = state
+        .metrics
+        .prometheus_text(&host, &state.rate_limiter, &state.connection_limiter);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")
+        .body(Body::from(body))
+        .unwrap()
 }
 
 pub fn error_response(status: StatusCode, message: &str) -> Response {
@@ -659,11 +750,9 @@ pub async fn acme_challenge(State(state): State<AppState>, Path(token): Path<Str
             .body(Body::from(response_text))
             .unwrap()
     } else {
-        add_security_headers(
-            Response::builder().status(StatusCode::NOT_FOUND)
-        )
-        .body(Body::from("challenge not found"))
-        .unwrap()
+        add_security_headers(Response::builder().status(StatusCode::NOT_FOUND))
+            .body(Body::from("challenge not found"))
+            .unwrap()
     }
 }
 
