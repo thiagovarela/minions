@@ -1,46 +1,54 @@
 {% extends "base.html" %}
 
-{% block nav %}{% endblock %}
-
 {% block title %}Login{% endblock %}
 
-{% block content %}
-<div class="min-h-screen flex items-center justify-center -mt-8">
-  <div class="w-full max-w-sm">
-    <div class="text-center mb-8">
-      <p class="text-4xl mb-2">⚡</p>
-      <h1 class="text-2xl font-bold text-white">Minions Dashboard</h1>
-      <p class="text-gray-400 text-sm mt-1">Enter your API key to continue</p>
-    </div>
-
-    {% if error.is_empty() == false %}
-    <div class="mb-4 rounded-lg bg-red-900/40 border border-red-700 px-4 py-3 text-sm text-red-300">
-      {{ error }}
-    </div>
-    {% endif %}
-
-    <form method="POST" action="/dashboard/login" class="space-y-4">
-      <div>
-        <label class="block text-sm font-medium text-gray-300 mb-1">API Key</label>
-        <input
-          type="password"
-          name="api_key"
-          required
-          autofocus
-          placeholder="••••••••••••••••"
-          class="w-full rounded-lg bg-gray-800 border border-gray-700 px-4 py-2.5
-                 text-white placeholder-gray-500 focus:outline-none focus:ring-2
-                 focus:ring-indigo-500 focus:border-transparent text-sm"
-        />
+{% block shell %}
+<div class="relative min-h-screen overflow-hidden">
+  <div class="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(62,207,142,.16),transparent_28%),linear-gradient(180deg,rgba(255,255,255,.02),transparent)]"></div>
+  <div class="relative mx-auto flex min-h-screen max-w-6xl items-center px-4 py-10 sm:px-6 lg:grid lg:grid-cols-[1.15fr_.85fr] lg:gap-10 lg:px-8">
+    <section class="hidden lg:block">
+      <div class="max-w-xl">
+        <p class="text-xs uppercase tracking-[0.38em] text-accent">Minions dashboard</p>
+        <h1 class="mt-4 text-5xl font-semibold tracking-tight text-white">A calmer control room for your fleet.</h1>
+        <p class="mt-6 text-base leading-8 text-mute">The refreshed dashboard uses a sidebar layout, a Supabase-inspired dark palette, and persistent sessions stored in SQLite so logins survive service restarts.</p>
       </div>
-      <button
-        type="submit"
-        class="w-full rounded-lg bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700
-               px-4 py-2.5 text-sm font-semibold text-white transition"
-      >
-        Sign in
-      </button>
-    </form>
+    </section>
+
+    <section class="w-full">
+      <div class="glass mx-auto w-full max-w-md rounded-[2rem] p-6 sm:p-8">
+        <div class="mb-8 text-center">
+          <div class="mx-auto grid h-16 w-16 place-items-center rounded-[1.75rem] bg-accent/15 text-3xl text-accent ring-1 ring-accent/30">⚡</div>
+          <h2 class="mt-5 text-3xl font-semibold text-white">Sign in</h2>
+          <p class="mt-2 text-sm text-mute">Enter the admin API key to access the dashboard.</p>
+        </div>
+
+        {% if error.is_empty() == false %}
+        <div class="mb-4 rounded-2xl border border-red-400/20 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+          {{ error }}
+        </div>
+        {% endif %}
+
+        <form method="POST" action="/dashboard/login" class="space-y-5">
+          <label class="block">
+            <span class="mb-2 block text-xs uppercase tracking-[0.25em] text-mute">API key</span>
+            <input
+              type="password"
+              name="api_key"
+              required
+              autofocus
+              placeholder="••••••••••••••••"
+              class="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none transition placeholder:text-white/25 focus:border-accent focus:bg-white/8"
+            />
+          </label>
+          <button
+            type="submit"
+            class="w-full rounded-2xl bg-accent px-4 py-3 text-sm font-semibold text-black transition hover:brightness-110"
+          >
+            Continue to dashboard
+          </button>
+        </form>
+      </div>
+    </section>
   </div>
 </div>
 {% endblock %}

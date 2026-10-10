@@ -29,6 +29,7 @@ pub mod metrics;
 pub mod proxy;
 pub mod rate_limit;
 pub mod tls;
+pub mod trusted_proxies;
 // Simplified TLS with manual cert provisioning (deprecated, kept for reference)
 #[allow(dead_code)]
 pub mod tls_simple;
@@ -152,6 +153,14 @@ pub async fn serve(config: ProxyConfig, https_bind: &str, http_bind: &str) -> Re
     }
     let connection_limiter = Arc::new(connection_limit::ConnectionLimiter::new(conn_limit_config));
 
+    // Trusted proxies — forwarding headers (CF-Connecting-IP, X-Forwarded-For,
+    // X-Real-IP) are only honored when the direct peer is trusted.
+    let trusted_proxies = Arc::new(trusted_proxies::TrustedProxies::from_env());
+    info!(
+        "Trusted proxy networks: {} (MINIONS_TRUSTED_PROXIES)",
+        trusted_proxies.len()
+    );
+
     // Build shared app state.
     let state = AppState {
         db_path: Arc::new(config.db_path.clone()),
@@ -171,6 +180,7 @@ pub async fn serve(config: ProxyConfig, https_bind: &str, http_bind: &str) -> Re
         rate_limiter,
         login_rate_limiter,
         connection_limiter,
+        trusted_proxies,
         metrics: Arc::new(ProxyMetrics::default()),
     };
 

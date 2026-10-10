@@ -472,14 +472,26 @@ async fn check_owns<'a>(api: &ApiClient, name: &str, user: &User) -> Result<VmIn
 
 /// Execute a command string on behalf of `user`, returning output to send
 /// back to the SSH client. Returns `(output, exit_code)`.
-pub async fn run(cmd_str: &str, user: &User, api: &ApiClient, db_path: &str, vm_domain: &str) -> (String, u32) {
+pub async fn run(
+    cmd_str: &str,
+    user: &User,
+    api: &ApiClient,
+    db_path: &str,
+    vm_domain: &str,
+) -> (String, u32) {
     match execute(cmd_str, user, api, db_path, vm_domain).await {
         Ok(output) => (output, 0),
         Err(e) => (format!("error: {}\r\n", e), 1),
     }
 }
 
-async fn execute(cmd_str: &str, user: &User, api: &ApiClient, db_path: &str, vm_domain: &str) -> Result<String> {
+async fn execute(
+    cmd_str: &str,
+    user: &User,
+    api: &ApiClient,
+    db_path: &str,
+    vm_domain: &str,
+) -> Result<String> {
     let parts: Vec<&str> = cmd_str.split_whitespace().collect();
     if parts.is_empty() {
         return Ok(help(vm_domain));

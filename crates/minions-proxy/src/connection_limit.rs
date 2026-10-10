@@ -4,8 +4,8 @@
 //! When limits are exceeded, new connections are rejected.
 
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -106,10 +106,7 @@ impl ConnectionLimiter {
         }
 
         // Check per-IP limit
-        let ip_count = self
-            .per_ip
-            .entry(ip)
-            .or_insert_with(|| AtomicUsize::new(0));
+        let ip_count = self.per_ip.entry(ip).or_insert_with(|| AtomicUsize::new(0));
         let current_ip = ip_count.load(Ordering::Relaxed);
 
         if current_ip >= self.config.max_per_ip {
@@ -182,11 +179,7 @@ pub struct ConnectionGuard {
 
 impl ConnectionGuard {
     /// Create a new guard for an enabled limiter.
-    fn new(
-        total: Arc<AtomicUsize>,
-        per_ip: Arc<DashMap<IpAddr, AtomicUsize>>,
-        ip: IpAddr,
-    ) -> Self {
+    fn new(total: Arc<AtomicUsize>, per_ip: Arc<DashMap<IpAddr, AtomicUsize>>, ip: IpAddr) -> Self {
         Self {
             total: Some(total),
             per_ip: Some(per_ip),

@@ -17,7 +17,7 @@ use axum::http::{HeaderName, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::Response;
 use hyper_util::rt::TokioIo;
 use subtle::ConstantTimeEq;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::auth::{
     LoginRateLimiter, Sessions, clear_cookie, extract_token, locked_out_page, login_page,
@@ -55,6 +55,8 @@ pub struct AppState {
     pub login_rate_limiter: Arc<LoginRateLimiter>,
     /// Connection limiter.
     pub connection_limiter: Arc<ConnectionLimiter>,
+    /// Peers allowed to set client-IP forwarding headers.
+    pub trusted_proxies: Arc<crate::trusted_proxies::TrustedProxies>,
     /// In-memory Prometheus-style proxy metrics.
     pub metrics: Arc<ProxyMetrics>,
 }
@@ -79,10 +81,18 @@ pub async fn handle(
     let host = host.split(':').next().unwrap_or("");
 
     let route_kind = route_kind_for(&path, host, &state);
-    let tracker = state.metrics.start_request(&method, route_kind);
+    let path_group = path_group_for(&path);
+    let request_meta = RequestMeta::from_request(&req, addr.ip(), &state.trusted_proxies);
+    let tracker = state.metrics.start_request(
+        &method,
+        route_kind,
+        path_group,
+        &request_meta.country,
+        request_meta.proxy_source.as_str(),
+    );
 
     // Extract client IP (respecting X-Forwarded-For, X-Real-IP headers).
-    let client_ip = crate::rate_limit::extract_client_ip(&req).unwrap_or_else(|| addr.ip());
+    let client_ip = request_meta.client_ip;
 
     // ── Connection limiting check ─────────────────────────────────────────────
     let _conn_guard = match state.connection_limiter.acquire(client_ip) {
@@ -91,7 +101,7 @@ pub async fn handle(
             warn!(ip = %client_ip, "connection limit exceeded");
             state.metrics.inc_connection_limit_denied();
             let resp = connection_limit_response();
-            return finalize_response(tracker, resp);
+            return finalize_response(tracker, resp, &request_meta, host, &method, &path, route_kind, path_group);
         }
     };
 
@@ -100,20 +110,28 @@ pub async fn handle(
         warn!(ip = %client_ip, "rate limit exceeded");
         state.metrics.inc_rate_limit_denied();
         let resp = rate_limit_response(state.rate_limiter.config.window_secs);
-        return finalize_response(tracker, resp);
+        return finalize_response(tracker, resp, &request_meta, host, &method, &path, route_kind, path_group);
     }
 
     // ── Internal /__minions/ routes ───────────────────────────────────────────
     if path.starts_with("/__minions/") {
         let resp = handle_internal(req, client_ip, &state).await;
-        return finalize_response(tracker, resp);
+        return finalize_response(tracker, resp, &request_meta, host, &method, &path, route_kind, path_group);
     }
 
     // ── Apex domain → forward to local dashboard ──────────────────────────────
     if host == state.dashboard_domain.as_str() {
         debug!(host, "apex domain — forwarding to local dashboard");
-        let resp = forward(req, "http://127.0.0.1:3000", host, &state.http_client, route_kind, &state.metrics).await;
-        return finalize_response(tracker, resp);
+        let resp = forward(
+            req,
+            "http://127.0.0.1:3000",
+            host,
+            &state.http_client,
+            route_kind,
+            &request_meta,
+            &state.metrics,
+        ).await;
+        return finalize_response(tracker, resp, &request_meta, host, &method, &path, route_kind, path_group);
     }
 
     // ── Try custom domain lookup first ────────────────────────────────────────
@@ -122,14 +140,14 @@ pub async fn handle(
         Err(e) => {
             warn!("db open error: {}", e);
             let resp = error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
-            return finalize_response(tracker, resp);
+            return finalize_response(tracker, resp, &request_meta, host, &method, &path, route_kind, path_group);
         }
     };
 
     if let Ok(Some(vm)) = db::get_vm_by_custom_domain(&conn, host) {
         debug!(domain = host, vm = %vm.name, "custom domain match");
-        let resp = forward_to_vm(req, &vm, host, route_kind, &state).await;
-        return finalize_response(tracker, resp);
+        let resp = forward_to_vm(req, &vm, host, route_kind, &request_meta, &state).await;
+        return finalize_response(tracker, resp, &request_meta, host, &method, &path, route_kind, path_group);
     }
 
     // ── Extract subdomain (*.vm_domain) ───────────────────────────────────────
@@ -137,7 +155,7 @@ pub async fn handle(
         Some(s) => s,
         None => {
             let resp = error_response(StatusCode::NOT_FOUND, "Not found");
-            return finalize_response(tracker, resp);
+            return finalize_response(tracker, resp, &request_meta, host, &method, &path, route_kind, path_group);
         }
     };
 
@@ -145,14 +163,15 @@ pub async fn handle(
 
     // ── VM lookup by subdomain ────────────────────────────────────────────────
     let resp = match db::get_vm_proxy(&conn, &subdomain) {
-        Ok(Some(vm)) => forward_to_vm(req, &vm, host, route_kind, &state).await,
+        Ok(Some(vm)) => forward_to_vm(req, &vm, host, route_kind, &request_meta, &state).await,
         Ok(None) => error_response(StatusCode::NOT_FOUND, &format!("No VM named '{subdomain}'")),
         Err(e) => {
             warn!("db query error: {}", e);
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
         }
     };
-    finalize_response(tracker, resp)
+
+    finalize_response(tracker, resp, &request_meta, host, &method, &path, route_kind, path_group)
 }
 
 // ── Forward to VM (auth + status check + proxy) ───────────────────────────────
@@ -162,6 +181,7 @@ async fn forward_to_vm(
     vm: &db::VmProxy,
     host: &str,
     route_kind: &str,
+    request_meta: &RequestMeta,
     state: &AppState,
 ) -> Response {
     // Check VM status.
@@ -188,12 +208,30 @@ async fn forward_to_vm(
     // ── WebSocket upgrade ─────────────────────────────────────────────────────
     if is_websocket_upgrade(&req) {
         debug!(vm = %vm.name, port = vm.proxy_port, "WebSocket upgrade — tunnelling");
-        return ws_upgrade(req, &vm.ip, vm.proxy_port, host, route_kind, &state.metrics).await;
+        return ws_upgrade(
+            req,
+            &vm.ip,
+            vm.proxy_port,
+            host,
+            route_kind,
+            request_meta,
+            &state.metrics,
+        )
+        .await;
     }
 
     // ── Normal HTTP forward ───────────────────────────────────────────────────
     let origin = format!("http://{}:{}", vm.ip, vm.proxy_port);
-    forward(req, &origin, host, &state.http_client, route_kind, &state.metrics).await
+    forward(
+        req,
+        &origin,
+        host,
+        &state.http_client,
+        route_kind,
+        request_meta,
+        &state.metrics,
+    )
+    .await
 }
 
 // ── WebSocket tunnel ──────────────────────────────────────────────────────────
@@ -220,6 +258,7 @@ async fn ws_upgrade(
     vm_port: u16,
     original_host: &str,
     route_kind: &str,
+    request_meta: &RequestMeta,
     metrics: &ProxyMetrics,
 ) -> Response {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -280,7 +319,13 @@ async fn ws_upgrade(
     }
     raw.push_str("X-Forwarded-Host: ");
     raw.push_str(original_host);
-    raw.push_str("\r\nX-Forwarded-Proto: https\r\n\r\n");
+    raw.push_str("\r\nX-Forwarded-Proto: https\r\nX-Real-IP: ");
+    raw.push_str(&request_meta.client_ip.to_string());
+    raw.push_str("\r\nX-Minions-Country: ");
+    raw.push_str(&request_meta.country);
+    raw.push_str("\r\nX-Minions-Proxy-Source: ");
+    raw.push_str(request_meta.proxy_source.as_str());
+    raw.push_str("\r\n\r\n");
 
     // Send to VM.
     if let Err(e) = vm_stream.write_all(raw.as_bytes()).await {
@@ -525,6 +570,7 @@ async fn forward(
     original_host: &str,
     client: &reqwest::Client,
     route_kind: &str,
+    request_meta: &RequestMeta,
     metrics: &ProxyMetrics,
 ) -> Response {
     let (parts, body) = req.into_parts();
@@ -535,6 +581,7 @@ async fn forward(
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/");
+    let client_ip = request_meta.client_ip.to_string();
     let url = format!("{origin}{path_and_query}");
 
     // Collect the request body (32 MB limit).
@@ -574,6 +621,24 @@ async fn forward(
     let _ = fwd_headers.insert(
         reqwest::header::HeaderName::from_static("x-forwarded-proto"),
         reqwest::header::HeaderValue::from_static("https"),
+    );
+    if let Ok(v) = reqwest::header::HeaderValue::from_str(&client_ip) {
+        let _ = fwd_headers.insert(reqwest::header::HeaderName::from_static("x-real-ip"), v);
+    }
+    if !fwd_headers.contains_key("x-forwarded-for") {
+        if let Ok(v) = reqwest::header::HeaderValue::from_str(&client_ip) {
+            let _ = fwd_headers.insert(reqwest::header::HeaderName::from_static("x-forwarded-for"), v);
+        }
+    }
+    if let Ok(v) = reqwest::header::HeaderValue::from_str(path_and_query) {
+        let _ = fwd_headers.insert(reqwest::header::HeaderName::from_static("x-original-uri"), v);
+    }
+    if let Ok(v) = reqwest::header::HeaderValue::from_str(&request_meta.country) {
+        let _ = fwd_headers.insert(reqwest::header::HeaderName::from_static("x-minions-country"), v);
+    }
+    let _ = fwd_headers.insert(
+        reqwest::header::HeaderName::from_static("x-minions-proxy-source"),
+        reqwest::header::HeaderValue::from_static(request_meta.proxy_source.as_str()),
     );
 
     upstream = upstream.headers(fwd_headers);
@@ -628,8 +693,110 @@ async fn forward(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn finalize_response(tracker: crate::metrics::RequestTracker, resp: Response) -> Response {
+#[derive(Debug, Clone)]
+struct RequestMeta {
+    peer_ip: std::net::IpAddr,
+    client_ip: std::net::IpAddr,
+    forwarded_for: Option<String>,
+    cf_connecting_ip: Option<String>,
+    cf_country: Option<String>,
+    proxy_source: ProxySource,
+    country: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProxySource {
+    Direct,
+    Forwarded,
+    Cloudflare,
+}
+
+impl ProxySource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Forwarded => "forwarded",
+            Self::Cloudflare => "cloudflare",
+        }
+    }
+}
+
+impl RequestMeta {
+    /// Build request metadata, honoring forwarding headers
+    /// (`CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP`, `CF-IPCountry`)
+    /// only when the direct peer is a trusted proxy. Untrusted peers cannot
+    /// spoof their client IP or country.
+    fn from_request(
+        req: &Request,
+        peer_ip: std::net::IpAddr,
+        trusted: &crate::trusted_proxies::TrustedProxies,
+    ) -> Self {
+        let headers_trusted = trusted.is_trusted(peer_ip);
+        let header = |name: &str| {
+            if headers_trusted {
+                header_string(req, name)
+            } else {
+                None
+            }
+        };
+
+        let forwarded_for = header("x-forwarded-for");
+        let cf_connecting_ip = header("cf-connecting-ip");
+        let cf_country = header("cf-ipcountry");
+
+        let proxy_source = if cf_connecting_ip.is_some() {
+            ProxySource::Cloudflare
+        } else if forwarded_for.is_some()
+            || (headers_trusted
+                && (req.headers().contains_key("x-real-ip")
+                    || req.headers().contains_key("forwarded")))
+        {
+            ProxySource::Forwarded
+        } else {
+            ProxySource::Direct
+        };
+
+        let country = cf_country
+            .clone()
+            .filter(|v| !v.is_empty() && v != "XX" && v != "T1")
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let client_ip = cf_connecting_ip
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .or_else(|| {
+                if headers_trusted {
+                    crate::rate_limit::extract_client_ip(req)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(peer_ip);
+
+        Self {
+            peer_ip,
+            client_ip,
+            forwarded_for,
+            cf_connecting_ip,
+            cf_country,
+            proxy_source,
+            country,
+        }
+    }
+}
+
+fn finalize_response(
+    tracker: crate::metrics::RequestTracker,
+    resp: Response,
+    request_meta: &RequestMeta,
+    host: &str,
+    method: &str,
+    path: &str,
+    route_kind: &str,
+    path_group: &str,
+) -> Response {
     let status = resp.status();
+    log_request_summary(request_meta, host, method, path, route_kind, path_group, status);
     tracker.finish(status);
     resp
 }
@@ -646,6 +813,56 @@ fn route_kind_for<'a>(path: &str, host: &'a str, state: &'a AppState) -> &'stati
     } else {
         "custom_domain"
     }
+}
+
+fn path_group_for(path: &str) -> &'static str {
+    match path {
+        "/" => "root",
+        "/metrics" => "metrics",
+        "/favicon.ico" => "favicon",
+        _ if path.starts_with("/__minions/login") => "login",
+        _ if path.starts_with("/__minions/logout") => "logout",
+        _ if path.starts_with("/__minions/") => "internal",
+        _ if path.starts_with("/.well-known/acme-challenge/") => "acme",
+        _ => "other",
+    }
+}
+
+fn log_request_summary(
+    request_meta: &RequestMeta,
+    host: &str,
+    method: &str,
+    path: &str,
+    route_kind: &str,
+    path_group: &str,
+    status: StatusCode,
+) {
+    info!(
+        target: "minions_proxy::access",
+        method,
+        host,
+        path,
+        path_group,
+        route_kind,
+        status = status.as_u16(),
+        status_class = status.as_u16() / 100,
+        peer_ip = %request_meta.peer_ip,
+        client_ip = %request_meta.client_ip,
+        proxy_source = request_meta.proxy_source.as_str(),
+        country = request_meta.country.as_str(),
+        forwarded_for = request_meta.forwarded_for.as_deref().unwrap_or(""),
+        cf_connecting_ip = request_meta.cf_connecting_ip.as_deref().unwrap_or(""),
+        cf_country = request_meta.cf_country.as_deref().unwrap_or(""),
+        "proxy request"
+    );
+}
+
+fn header_string(req: &Request, name: &str) -> Option<String> {
+    req.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Add security headers to a response builder.

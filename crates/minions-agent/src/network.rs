@@ -71,7 +71,7 @@ fn resolve_ip_command() -> &'static str {
     const CANDIDATES: &[&str] = &[
         "/usr/sbin/ip",
         "/usr/bin/ip",
-        "/run/current-system/sw/bin/ip",     // NixOS
+        "/run/current-system/sw/bin/ip",          // NixOS
         "/nix/var/nix/profiles/system/sw/bin/ip", // NixOS fallback
     ];
 

@@ -95,10 +95,9 @@ pub async fn require_auth(
                     Ok(conn) => {
                         match minions_db::validate_api_token(&conn, &token_hash) {
                             Ok(Some((user_id, email))) => {
-                                request.extensions_mut().insert(AuthContext::User {
-                                    user_id,
-                                    email,
-                                });
+                                request
+                                    .extensions_mut()
+                                    .insert(AuthContext::User { user_id, email });
                                 return next.run(request).await;
                             }
                             Ok(None) => {
@@ -161,7 +160,10 @@ where
 {
     type Rejection = (StatusCode, Json<ErrorResponse>);
 
-    async fn from_request_parts(parts: &mut axum::http::request::Parts, _state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
         parts
             .extensions
             .get::<AuthContext>()
@@ -240,14 +242,20 @@ mod tests {
     fn test_effective_owner() {
         let admin = AuthContext::Admin;
         assert_eq!(effective_owner(&admin, None), None);
-        assert_eq!(effective_owner(&admin, Some("user-123")), Some("user-123".to_string()));
+        assert_eq!(
+            effective_owner(&admin, Some("user-123")),
+            Some("user-123".to_string())
+        );
 
         let user = AuthContext::User {
             user_id: "user-456".to_string(),
             email: "test@example.com".to_string(),
         };
         assert_eq!(effective_owner(&user, None), Some("user-456".to_string()));
-        assert_eq!(effective_owner(&user, Some("user-123")), Some("user-456".to_string()));
+        assert_eq!(
+            effective_owner(&user, Some("user-123")),
+            Some("user-456".to_string())
+        );
     }
 
     #[test]

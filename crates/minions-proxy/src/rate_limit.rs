@@ -140,9 +140,7 @@ impl RateLimiter {
         let max = self.config.max_requests;
 
         match self.windows.entry(ip) {
-            dashmap::mapref::entry::Entry::Occupied(mut e) => {
-                e.get_mut().add_request(max, window)
-            }
+            dashmap::mapref::entry::Entry::Occupied(mut e) => e.get_mut().add_request(max, window),
             dashmap::mapref::entry::Entry::Vacant(e) => {
                 let mut rw = RequestWindow::new();
                 let allowed = rw.add_request(max, window);
@@ -286,7 +284,9 @@ pub async fn rate_limit_middleware<B>(
     rate_limiter: &RateLimiter,
     ip: IpAddr,
     req: Request<B>,
-    next: impl FnOnce(Request<B>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>>,
+    next: impl FnOnce(
+        Request<B>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>>,
 ) -> Response {
     if rate_limiter.check(ip) {
         next(req).await
@@ -308,11 +308,18 @@ mod tests {
 
         // Should allow up to max_requests
         for i in 0..100 {
-            assert!(window.add_request(100, dur), "request {} should be allowed", i);
+            assert!(
+                window.add_request(100, dur),
+                "request {} should be allowed",
+                i
+            );
         }
 
         // 101st request should be denied
-        assert!(!window.add_request(100, dur), "request 101 should be denied");
+        assert!(
+            !window.add_request(100, dur),
+            "request 101 should be denied"
+        );
     }
 
     #[test]
@@ -439,7 +446,10 @@ mod tests {
         use axum::http::Request;
 
         let req = Request::builder()
-            .header("x-forwarded-for", "203.0.113.195, 70.41.3.18, 150.172.238.178")
+            .header(
+                "x-forwarded-for",
+                "203.0.113.195, 70.41.3.18, 150.172.238.178",
+            )
             .body(())
             .unwrap();
 

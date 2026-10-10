@@ -23,10 +23,7 @@ impl OsType {
             "ubuntu" => Ok(OsType::Ubuntu),
             "fedora" => Ok(OsType::Fedora),
             "nixos" => Ok(OsType::NixOS),
-            _ => anyhow::bail!(
-                "unsupported OS '{}' (available: ubuntu, fedora, nixos)",
-                s
-            ),
+            _ => anyhow::bail!("unsupported OS '{}' (available: ubuntu, fedora, nixos)", s),
         }
     }
 
@@ -50,9 +47,7 @@ impl OsType {
     /// NixOS uses its own kernel extracted from the NixOS build.
     pub fn kernel_path(&self) -> PathBuf {
         match self {
-            OsType::Ubuntu | OsType::Fedora => {
-                PathBuf::from("/var/lib/minions/kernel/vmlinux")
-            }
+            OsType::Ubuntu | OsType::Fedora => PathBuf::from("/var/lib/minions/kernel/vmlinux"),
             OsType::NixOS => PathBuf::from("/var/lib/minions/kernel/vmlinux-nixos"),
         }
     }

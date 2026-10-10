@@ -1,32 +1,33 @@
 <div
-  class="grid grid-cols-2 md:grid-cols-4 gap-3"
+  class="grid gap-3 md:grid-cols-2 xl:grid-cols-4"
   hx-get="/dashboard/vms/{{ vm_name }}/metrics-fragment"
   hx-trigger="every 30s"
   hx-swap="outerHTML"
 >
 {% if has_metrics %}
-  <div class="rounded-xl border border-gray-800 bg-gray-900 p-4">
-    <p class="text-xs text-gray-500 uppercase tracking-wide">CPU</p>
-    <p class="text-2xl font-bold text-white mt-1">{{ cpu_str }}%</p>
-    <p class="text-xs text-gray-600 mt-1">load avg {{ load_str }}</p>
+  <div class="panel rounded-[1.5rem] p-4">
+    <p class="text-xs uppercase tracking-[0.25em] text-mute">CPU</p>
+    <p class="mt-3 text-3xl font-semibold text-white">{{ cpu_str }}%</p>
+    <p class="mt-2 text-xs text-mute">Load average {{ load_str }}</p>
   </div>
-  <div class="rounded-xl border border-gray-800 bg-gray-900 p-4">
-    <p class="text-xs text-gray-500 uppercase tracking-wide">Memory</p>
-    <p class="text-2xl font-bold text-white mt-1">{{ mem_used_mb }} <span class="text-sm font-normal text-gray-400">/ {{ mem_total_mb }} MiB</span></p>
-    <p class="text-xs text-gray-600 mt-1">{{ mem_pct_str }}% used</p>
+  <div class="panel rounded-[1.5rem] p-4">
+    <p class="text-xs uppercase tracking-[0.25em] text-mute">Memory</p>
+    <p class="mt-3 text-3xl font-semibold text-white">{{ mem_used_mb }}</p>
+    <p class="mt-2 text-xs text-mute">of {{ mem_total_mb }} MiB · {{ mem_pct_str }}% used</p>
   </div>
-  <div class="rounded-xl border border-gray-800 bg-gray-900 p-4">
-    <p class="text-xs text-gray-500 uppercase tracking-wide">Disk</p>
-    <p class="text-2xl font-bold text-white mt-1">{{ disk_used_gb }} <span class="text-sm font-normal text-gray-400">/ {{ disk_total_gb }} GiB</span></p>
+  <div class="panel rounded-[1.5rem] p-4">
+    <p class="text-xs uppercase tracking-[0.25em] text-mute">Disk</p>
+    <p class="mt-3 text-3xl font-semibold text-white">{{ disk_used_gb }}</p>
+    <p class="mt-2 text-xs text-mute">of {{ disk_total_gb }} GiB consumed</p>
   </div>
-  <div class="rounded-xl border border-gray-800 bg-gray-900 p-4">
-    <p class="text-xs text-gray-500 uppercase tracking-wide">Network</p>
-    <p class="text-sm font-bold text-white mt-1">↓ {{ net_rx_str }} MiB</p>
-    <p class="text-sm font-bold text-white">↑ {{ net_tx_str }} MiB</p>
+  <div class="panel rounded-[1.5rem] p-4">
+    <p class="text-xs uppercase tracking-[0.25em] text-mute">Network</p>
+    <p class="mt-3 text-sm font-semibold text-white">↓ {{ net_rx_str }} MiB</p>
+    <p class="mt-1 text-sm font-semibold text-white">↑ {{ net_tx_str }} MiB</p>
   </div>
 {% else %}
-  <div class="col-span-4 rounded-xl border border-gray-800 bg-gray-900 px-6 py-8 text-center text-gray-600 text-sm">
-    No metrics yet — VM may be starting or agent unreachable.
+  <div class="panel col-span-full rounded-[1.5rem] px-6 py-8 text-center text-sm text-mute">
+    No metrics yet — the VM may still be starting, stopped, or temporarily unreachable.
   </div>
 {% endif %}
 </div>

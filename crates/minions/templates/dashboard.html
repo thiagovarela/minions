@@ -3,78 +3,78 @@
 {% block title %}Dashboard{% endblock %}
 
 {% block content %}
-<div class="flex items-center justify-between mb-6">
-  <h1 class="text-xl font-bold text-white">Virtual Machines</h1>
-  <div class="flex items-center gap-3">
-    <button
-      onclick="document.getElementById('create-vm-form').classList.toggle('hidden')"
-      class="rounded-lg bg-indigo-700 hover:bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition">
-      + Create VM
-    </button>
-    <span class="text-sm text-gray-500">auto-refresh every 30s</span>
-  </div>
-</div>
-
-<!-- Create VM form (collapsible) -->
-<div id="create-vm-form" class="hidden mb-6">
-  <div class="rounded-xl border border-gray-800 bg-gray-900 p-5">
-    <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-4">New Virtual Machine</h2>
-    <form hx-post="/dashboard/vms"
-          hx-target="#create-result"
-          hx-swap="innerHTML"
-          class="space-y-4">
-      
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <!-- Name -->
-        <div>
-          <label class="text-xs text-gray-500 uppercase tracking-wide block mb-1">
-            Name <span class="text-red-400">*</span>
-          </label>
-          <input type="text" name="name" placeholder="myvm" required maxlength="11"
-                 pattern="[a-zA-Z0-9\-]+"
-                 class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white font-mono
-                        focus:outline-none focus:border-indigo-500"/>
-          <p class="text-xs text-gray-600 mt-1">Max 11 chars, alphanumeric + hyphens</p>
+<div class="space-y-6">
+    <div class="glass rounded-[2rem] p-6 sm:p-8">
+      <div class="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+        <div class="max-w-2xl">
+          <p class="text-xs uppercase tracking-[0.35em] text-accent">Fleet overview</p>
+          <h1 class="mt-3 text-3xl font-semibold tracking-tight text-white sm:text-4xl">A cleaner home for your machines.</h1>
+          <p class="mt-3 max-w-xl text-sm leading-7 text-mute sm:text-base">The dashboard now uses a sidebar layout, sharper visual hierarchy, and a calmer dark theme inspired by Supabase. VM data still refreshes automatically every 30 seconds.</p>
         </div>
-
-        <!-- vCPUs -->
-        <div>
-          <label class="text-xs text-gray-500 uppercase tracking-wide block mb-1">
-            vCPUs
-          </label>
-          <input type="number" name="vcpus" value="2" min="1" max="16"
-                 class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white font-mono
-                        focus:outline-none focus:border-indigo-500"/>
-          <p class="text-xs text-gray-600 mt-1">Default: 2</p>
-        </div>
-
-        <!-- Memory -->
-        <div>
-          <label class="text-xs text-gray-500 uppercase tracking-wide block mb-1">
-            Memory (MB)
-          </label>
-          <input type="number" name="memory_mb" value="1024" min="128" max="16384" step="128"
-                 class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white font-mono
-                        focus:outline-none focus:border-indigo-500"/>
-          <p class="text-xs text-gray-600 mt-1">Default: 1024 MB</p>
+        <div class="grid grid-cols-2 gap-3 sm:w-auto">
+          <div class="panel rounded-3xl px-4 py-4">
+            <p class="text-xs uppercase tracking-[0.25em] text-mute">Refresh</p>
+            <p class="mt-2 text-lg font-semibold text-white">30s</p>
+          </div>
+          <button
+            type="button"
+            onclick="document.getElementById('create-vm-form').classList.toggle('hidden')"
+            class="rounded-3xl bg-accent px-4 py-4 text-left text-sm font-semibold text-black transition hover:brightness-110"
+          >
+            <span class="block text-xs uppercase tracking-[0.25em] text-black/70">Action</span>
+            <span class="mt-2 block text-lg">+ Create VM</span>
+          </button>
         </div>
       </div>
+    </div>
 
-      <div class="flex items-center gap-3">
-        <button type="submit"
-                class="rounded-lg bg-green-700 hover:bg-green-600 px-4 py-2 text-sm font-medium text-white transition">
-          🚀 Create VM
-        </button>
-        <button type="button"
-                onclick="document.getElementById('create-vm-form').classList.add('hidden'); document.getElementById('create-result').innerHTML = ''"
-                class="rounded-lg bg-gray-700 hover:bg-gray-600 px-4 py-2 text-sm font-medium text-white transition">
-          Cancel
-        </button>
-        <div id="create-result"></div>
+    <div id="create-vm-form" class="hidden">
+      <div class="panel rounded-[2rem] p-6 sm:p-7">
+        <div class="mb-6 flex items-start justify-between gap-4">
+          <div>
+            <p class="text-xs uppercase tracking-[0.3em] text-accent">Provision</p>
+            <h2 class="mt-2 text-2xl font-semibold text-white">New virtual machine</h2>
+            <p class="mt-2 text-sm text-mute">Fast path for a small instance. You can resize later from the VM detail page.</p>
+          </div>
+          <button
+            type="button"
+            onclick="document.getElementById('create-vm-form').classList.add('hidden'); document.getElementById('create-result').innerHTML = ''"
+            class="rounded-2xl border border-white/10 px-3 py-2 text-xs uppercase tracking-[0.25em] text-mute transition hover:bg-white/5 hover:text-white"
+          >
+            Close
+          </button>
+        </div>
+
+        <form hx-post="/dashboard/vms" hx-target="#create-result" hx-swap="innerHTML" class="space-y-5">
+          <div class="grid gap-4 md:grid-cols-3">
+            <label class="block">
+              <span class="mb-2 block text-xs uppercase tracking-[0.25em] text-mute">Name</span>
+              <input type="text" name="name" placeholder="myvm" required maxlength="11" pattern="[a-zA-Z0-9\-]+"
+                class="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none transition placeholder:text-white/25 focus:border-accent focus:bg-white/8" />
+              <span class="mt-2 block text-xs text-mute">Max 11 chars, letters, numbers, hyphens.</span>
+            </label>
+            <label class="block">
+              <span class="mb-2 block text-xs uppercase tracking-[0.25em] text-mute">vCPUs</span>
+              <input type="number" name="vcpus" value="2" min="1" max="16"
+                class="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none transition focus:border-accent focus:bg-white/8" />
+              <span class="mt-2 block text-xs text-mute">Default: 2 cores.</span>
+            </label>
+            <label class="block">
+              <span class="mb-2 block text-xs uppercase tracking-[0.25em] text-mute">Memory</span>
+              <input type="number" name="memory_mb" value="1024" min="128" max="16384" step="128"
+                class="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white outline-none transition focus:border-accent focus:bg-white/8" />
+              <span class="mt-2 block text-xs text-mute">Default: 1024 MB.</span>
+            </label>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3">
+            <button type="submit" class="rounded-2xl bg-accent px-5 py-3 text-sm font-semibold text-black transition hover:brightness-110">Launch VM</button>
+            <div id="create-result" class="text-sm"></div>
+          </div>
+        </form>
       </div>
-    </form>
-  </div>
-</div>
+    </div>
 
-{% include "vms_fragment.html" %}
+    {% include "vms_fragment.html" %}
+</div>
 {% endblock %}

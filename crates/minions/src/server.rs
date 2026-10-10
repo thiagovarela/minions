@@ -20,7 +20,7 @@ pub struct AppState {
     pub cors_origins: Vec<String>,
     /// Shared metrics store updated by the background collector.
     pub metrics: metrics::MetricsStore,
-    /// Dashboard session tokens (in-memory, cleared on restart).
+    /// Dashboard session store (persisted in SQLite so logins survive restarts).
     pub sessions: dashboard::DashboardSessions,
     /// Base domain for the proxy (e.g. "miniclankers.com"), or None if proxy not configured.
     pub domain: Option<Arc<String>>,
@@ -156,13 +156,14 @@ pub async fn serve(
     metrics::spawn_collector(db_path.clone(), metrics_store.clone(), metrics_interval);
     info!("✓ Metrics collector started (interval: {metrics_interval}s)");
 
+    let db_path = Arc::new(db_path.clone());
     let state = AppState {
-        db_path: Arc::new(db_path.clone()),
+        db_path: db_path.clone(),
         ssh_pubkey: ssh_pubkey.map(Arc::new),
         auth,
         cors_origins,
         metrics: metrics_store,
-        sessions: dashboard::DashboardSessions::new(),
+        sessions: dashboard::DashboardSessions::new(db_path.clone()),
         domain: domain.clone().map(Arc::new),
         public_ip: public_ip.clone().map(Arc::new),
     };
@@ -182,7 +183,9 @@ pub async fn serve(
     info!("minions daemon listening on http://{bind}");
 
     // Compute VM domain (used by both SSH and proxy)
-    let vm_domain_val = vm_domain.or_else(|| domain.clone()).unwrap_or_else(|| "localhost".to_string());
+    let vm_domain_val = vm_domain
+        .or_else(|| domain.clone())
+        .unwrap_or_else(|| "localhost".to_string());
 
     // ── SSH gateway (optional) ─────────────────────────────────────────────────
     if let Some(ssh_bind_addr) = ssh_bind {
@@ -198,7 +201,7 @@ pub async fn serve(
 
         let dashboard_domain_val = domain.clone().unwrap_or_else(|| vm_domain_val.clone());
         let gateway_config = minions_ssh::GatewayConfig {
-            db_path: db_path.clone(),
+            db_path: db_path.as_ref().clone(),
             command_user: "minions".to_string(),
             api_base_url,
             api_key: api_key.clone(),
@@ -232,7 +235,10 @@ pub async fn serve(
             .clone()
             .unwrap_or_else(|| "0.0.0.0:80".to_string());
         let email = acme_email.clone().unwrap_or_else(|| {
-            warn!("⚠️  --acme-email not set; using noreply@{}", dashboard_domain);
+            warn!(
+                "⚠️  --acme-email not set; using noreply@{}",
+                dashboard_domain
+            );
             format!("noreply@{}", dashboard_domain)
         });
 
@@ -243,7 +249,7 @@ pub async fn serve(
         }
 
         let proxy_config = minions_proxy::ProxyConfig {
-            db_path: db_path.clone(),
+            db_path: db_path.as_ref().clone(),
             dashboard_domain: dashboard_domain.clone(),
             vm_domain: vm_domain_val.clone(),
             api_key: api_key.clone(),

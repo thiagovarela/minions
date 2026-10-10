@@ -28,7 +28,9 @@ pub fn run(persist: bool) -> Result<()> {
     println!(
         "    4. Place TLS cert:    /var/lib/minions/certs/'*.yourdomain.com'/{{fullchain,privkey}}.pem"
     );
-    println!("    5. Edit env:          /etc/minions/env  (set MINIONS_API_KEY)");
+    println!(
+        "    5. Edit env:          /etc/minions/env  (set MINIONS_API_KEY, optional backup vars)"
+    );
     println!(
         "    6. Edit unit:         /etc/systemd/system/minions.service  (set --domain, --public-ip)"
     );
@@ -310,13 +312,25 @@ fn install_systemd_unit() -> Result<()> {
              MINIONS_API_KEY=\n\
              {ssh_pubkey_line}\
              # Cloudflare DNS API token (Zone:DNS:Edit) for DNS-01 wildcard cert provisioning\n\
-             # MINIONS_CF_DNS_TOKEN=\n"
+             # MINIONS_CF_DNS_TOKEN=\n\
+             # S3 backups\n\
+             # MINIONS_BACKUP_S3_BUCKET=minions-backup\n\
+             # MINIONS_BACKUP_S3_REGION=us-east-1\n\
+             # MINIONS_BACKUP_S3_PREFIX=minions/v1\n\
+             # Only set MINIONS_BACKUP_S3_ENDPOINT for non-AWS S3-compatible providers\n\
+             # MINIONS_BACKUP_S3_ENDPOINT=https://minio.example.com\n\
+             # MINIONS_BACKUP_S3_SSE=aws:kms\n\
+             # MINIONS_BACKUP_S3_KMS_KEY_ID=arn:aws:kms:region:account:key/...\n\
+             # AWS credentials for S3 backups (leave unset if the host uses an IAM role/profile)\n\
+             # AWS_ACCESS_KEY_ID=\n\
+             # AWS_SECRET_ACCESS_KEY=\n\
+             # AWS_SESSION_TOKEN=\n"
         );
         std::fs::write(env_path, env_content)?;
         // Restrict to root-only — contains secrets.
         let _ = Command::new("chmod").args(["600", env_path]).status();
         ok(format!(
-            "environment file created at {env_path} — fill in MINIONS_API_KEY"
+            "environment file created at {env_path} — fill in MINIONS_API_KEY (and backup vars if needed)"
         ));
     } else {
         ok(format!("environment file already exists at {env_path}"));
@@ -356,7 +370,7 @@ WantedBy=multi-user.target
     ok(format!(
         "systemd unit installed at {SYSTEMD_UNIT_PATH}\n  \
          Edit the unit to set --domain, --public-ip, --acme-email.\n  \
-         Fill in /etc/minions/env with MINIONS_API_KEY.\n  \
+         Fill in /etc/minions/env with MINIONS_API_KEY and any backup vars you need.\n  \
          Then: sudo systemctl enable --now minions"
     ));
     Ok(())

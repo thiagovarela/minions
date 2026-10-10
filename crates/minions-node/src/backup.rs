@@ -62,7 +62,11 @@ pub struct UploadedBackup {
 }
 
 async fn s3_client(cfg: &S3BackupConfig) -> Result<aws_sdk_s3::Client> {
-    let region_override = std::env::var("MINIONS_BACKUP_S3_REGION").ok();
+    let region_override = std::env::var("MINIONS_BACKUP_S3_REGION")
+        .ok()
+        .or_else(|| std::env::var("AWS_REGION").ok())
+        .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
+        .filter(|region| !region.trim().is_empty());
     let region_provider =
         RegionProviderChain::first_try(region_override.map(Region::new)).or_default_provider();
 

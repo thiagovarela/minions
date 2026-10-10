@@ -124,10 +124,10 @@ impl LoginAttemptRecord {
         // Progressive backoff: 5, 10, 20, 20+ failures
         let lockout_idx = match self.failures {
             0..=4 => return None,
-            5 => 0,   // 1 minute
-            10 => 1,  // 5 minutes
-            20 => 2,  // 10 minutes
-            _ => 3,   // 1 hour for 20+ failures
+            5 => 0,  // 1 minute
+            10 => 1, // 5 minutes
+            20 => 2, // 10 minutes
+            _ => 3,  // 1 hour for 20+ failures
         };
 
         let duration = Duration::from_secs(LOCKOUT_DURATIONS[lockout_idx]);
@@ -189,7 +189,10 @@ impl LoginRateLimiter {
     pub fn check(&self, ip: IpAddr) -> Result<(), u64> {
         if let Some(record) = self.attempts.get(&ip) {
             if record.is_locked_out() {
-                return Err(record.remaining_lockout().unwrap_or(Duration::ZERO).as_secs());
+                return Err(record
+                    .remaining_lockout()
+                    .unwrap_or(Duration::ZERO)
+                    .as_secs());
             }
         }
         Ok(())
@@ -198,7 +201,10 @@ impl LoginRateLimiter {
     /// Record a failed login attempt from this IP.
     /// Returns the lockout duration if this triggered a lockout.
     pub fn record_failure(&self, ip: IpAddr) -> Option<Duration> {
-        let mut entry = self.attempts.entry(ip).or_insert_with(LoginAttemptRecord::new);
+        let mut entry = self
+            .attempts
+            .entry(ip)
+            .or_insert_with(LoginAttemptRecord::new);
         let lockout = entry.record_failure();
 
         if let Some(duration) = lockout {
@@ -225,10 +231,7 @@ impl LoginRateLimiter {
 
     /// Get the number of failures for an IP.
     pub fn get_failures(&self, ip: IpAddr) -> usize {
-        self.attempts
-            .get(&ip)
-            .map(|r| r.failures)
-            .unwrap_or(0)
+        self.attempts.get(&ip).map(|r| r.failures).unwrap_or(0)
     }
 
     /// Reset rate limit for an IP (e.g., manual unblock).

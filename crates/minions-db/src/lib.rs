@@ -113,6 +113,16 @@ pub struct ApiToken {
     // token_hash is intentionally excluded from serialization
 }
 
+/// Represents a persisted dashboard session.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DashboardSession {
+    pub id: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub last_used_at: Option<String>,
+    // token_hash is intentionally excluded from serialization
+}
+
 /// Represents an SSH public key for a user.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SshKey {
@@ -127,10 +137,14 @@ pub struct SshKey {
 /// Generate a new API token.
 /// Returns (raw_token, token_hash) where raw_token is the value to show once,
 /// and token_hash is the SHA-256 hex digest to store in the database.
-pub fn generate_api_token() -> (String, String) {
+fn sha256_hex(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(value.as_bytes()))
+}
+
+fn generate_prefixed_token(prefix: &str) -> (String, String) {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use rand::RngCore;
-    use sha2::{Digest, Sha256};
 
     // Generate 32 bytes of randomness
     let mut random_bytes = [0u8; 32];
@@ -138,13 +152,25 @@ pub fn generate_api_token() -> (String, String) {
 
     // Encode as base64url (URL-safe, no padding)
     let encoded = URL_SAFE_NO_PAD.encode(&random_bytes);
-    let raw_token = format!("mnt_{}", encoded);
-
-    // Hash for storage
-    let hash = Sha256::digest(raw_token.as_bytes());
-    let token_hash = hex::encode(hash);
+    let raw_token = format!("{prefix}{encoded}");
+    let token_hash = sha256_hex(&raw_token);
 
     (raw_token, token_hash)
+}
+
+pub fn dashboard_session_token_hash(token: &str) -> String {
+    sha256_hex(token)
+}
+
+pub fn generate_api_token() -> (String, String) {
+    generate_prefixed_token("mnt_")
+}
+
+/// Generate a new dashboard session token.
+/// Returns (raw_token, token_hash) where raw_token is stored in the cookie
+/// and token_hash is stored in SQLite.
+pub fn generate_dashboard_session_token() -> (String, String) {
+    generate_prefixed_token("mds_")
 }
 
 /// Open (or create) the state database.
@@ -359,6 +385,22 @@ fn migrate(conn: &Connection) -> Result<()> {
         ",
     )
     .context("create api_tokens table")?;
+
+    // Persistent dashboard sessions so logins survive daemon restarts.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS dashboard_sessions (
+            id              TEXT PRIMARY KEY,
+            token_hash      TEXT UNIQUE NOT NULL,
+            created_at      TEXT NOT NULL,
+            expires_at      TEXT NOT NULL,
+            last_used_at    TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_hash ON dashboard_sessions(token_hash);
+        CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_expires_at ON dashboard_sessions(expires_at);
+        ",
+    )
+    .context("create dashboard_sessions table")?;
 
     Ok(())
 }
@@ -1439,6 +1481,131 @@ pub fn revoke_api_token(conn: &Connection, user_id: &str, token_id: &str) -> Res
         params![token_id, user_id],
     )?;
     Ok(rows > 0)
+}
+
+// ── Dashboard session operations ───────────────────────────────────────────
+
+/// Insert a new dashboard session into the database.
+pub fn insert_dashboard_session(
+    conn: &Connection,
+    token_hash: &str,
+    expires_at: &str,
+) -> Result<DashboardSession> {
+    let session_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO dashboard_sessions (id, token_hash, created_at, expires_at, last_used_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![session_id, token_hash, now, expires_at, now],
+    )
+    .context("insert dashboard session")?;
+
+    Ok(DashboardSession {
+        id: session_id,
+        created_at: now.clone(),
+        expires_at: expires_at.to_string(),
+        last_used_at: Some(now),
+    })
+}
+
+/// Validate a dashboard session and extend its TTL when it is still valid.
+pub fn validate_dashboard_session(
+    conn: &Connection,
+    token_hash: &str,
+    now: &str,
+    new_expires_at: &str,
+) -> Result<bool> {
+    // Best-effort cleanup of expired sessions before validating.
+    let _ = gc_dashboard_sessions(conn, now);
+
+    let mut stmt = conn.prepare(
+        "SELECT id FROM dashboard_sessions
+         WHERE token_hash = ?1 AND expires_at > ?2",
+    )?;
+    let mut rows = stmt.query(params![token_hash, now])?;
+
+    if rows.next()?.is_none() {
+        return Ok(false);
+    }
+
+    conn.execute(
+        "UPDATE dashboard_sessions
+         SET last_used_at = ?1, expires_at = ?2
+         WHERE token_hash = ?3",
+        params![now, new_expires_at, token_hash],
+    )
+    .context("update dashboard session")?;
+
+    Ok(true)
+}
+
+/// Revoke a dashboard session by its token hash.
+pub fn revoke_dashboard_session(conn: &Connection, token_hash: &str) -> Result<bool> {
+    let rows = conn.execute(
+        "DELETE FROM dashboard_sessions WHERE token_hash = ?1",
+        params![token_hash],
+    )?;
+    Ok(rows > 0)
+}
+
+/// Revoke a dashboard session by its id.
+pub fn revoke_dashboard_session_by_id(conn: &Connection, session_id: &str) -> Result<bool> {
+    let rows = conn.execute(
+        "DELETE FROM dashboard_sessions WHERE id = ?1",
+        params![session_id],
+    )?;
+    Ok(rows > 0)
+}
+
+/// Revoke every dashboard session except the current one.
+pub fn revoke_other_dashboard_sessions(conn: &Connection, current_token_hash: &str) -> Result<usize> {
+    let rows = conn.execute(
+        "DELETE FROM dashboard_sessions WHERE token_hash != ?1",
+        params![current_token_hash],
+    )?;
+    Ok(rows)
+}
+
+/// Look up a dashboard session id by token hash.
+pub fn get_dashboard_session_id_by_hash(
+    conn: &Connection,
+    token_hash: &str,
+) -> Result<Option<String>> {
+    let mut stmt = conn.prepare("SELECT id FROM dashboard_sessions WHERE token_hash = ?1")?;
+    let mut rows = stmt.query(params![token_hash])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(row.get(0)?)),
+        None => Ok(None),
+    }
+}
+
+/// List all dashboard sessions ordered by most recently used first.
+pub fn list_dashboard_sessions(conn: &Connection) -> Result<Vec<DashboardSession>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, created_at, expires_at, last_used_at
+         FROM dashboard_sessions
+         ORDER BY COALESCE(last_used_at, created_at) DESC, created_at DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(DashboardSession {
+            id: row.get(0)?,
+            created_at: row.get(1)?,
+            expires_at: row.get(2)?,
+            last_used_at: row.get(3)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("list dashboard sessions")
+}
+
+/// Remove expired dashboard sessions.
+pub fn gc_dashboard_sessions(conn: &Connection, now: &str) -> Result<usize> {
+    let rows = conn.execute(
+        "DELETE FROM dashboard_sessions WHERE expires_at <= ?1",
+        params![now],
+    )?;
+    Ok(rows)
 }
 
 // ── SSH Key operations ──────────────────────────────────────────────────────

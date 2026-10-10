@@ -35,6 +35,9 @@ struct Inner {
 struct RequestLabels {
     method: String,
     route_kind: String,
+    path_group: String,
+    country: String,
+    proxy_source: String,
     status: u16,
     status_class: &'static str,
 }
@@ -43,6 +46,9 @@ struct RequestLabels {
 struct DurationLabels {
     method: String,
     route_kind: String,
+    path_group: String,
+    country: String,
+    proxy_source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -56,6 +62,9 @@ pub struct RequestTracker {
     metrics: ProxyMetrics,
     method: String,
     route_kind: String,
+    path_group: String,
+    country: String,
+    proxy_source: String,
     started_at: Instant,
     finished: bool,
 }
@@ -94,23 +103,45 @@ impl Histogram {
 }
 
 impl ProxyMetrics {
-    pub fn start_request(&self, method: &str, route_kind: &str) -> RequestTracker {
+    pub fn start_request(
+        &self,
+        method: &str,
+        route_kind: &str,
+        path_group: &str,
+        country: &str,
+        proxy_source: &str,
+    ) -> RequestTracker {
         self.inner.inflight_requests.fetch_add(1, Ordering::Relaxed);
         RequestTracker {
             metrics: self.clone(),
             method: method.to_string(),
             route_kind: route_kind.to_string(),
+            path_group: path_group.to_string(),
+            country: country.to_string(),
+            proxy_source: proxy_source.to_string(),
             started_at: Instant::now(),
             finished: false,
         }
     }
 
-    fn finish_request(&self, method: &str, route_kind: &str, status: StatusCode, started_at: Instant) {
+    fn finish_request(
+        &self,
+        method: &str,
+        route_kind: &str,
+        path_group: &str,
+        country: &str,
+        proxy_source: &str,
+        status: StatusCode,
+        started_at: Instant,
+    ) {
         self.inner.inflight_requests.fetch_sub(1, Ordering::Relaxed);
 
         let labels = RequestLabels {
             method: method.to_string(),
             route_kind: route_kind.to_string(),
+            path_group: path_group.to_string(),
+            country: country.to_string(),
+            proxy_source: proxy_source.to_string(),
             status: status.as_u16(),
             status_class: status_class(status),
         };
@@ -121,6 +152,9 @@ impl ProxyMetrics {
         let duration_labels = DurationLabels {
             method: method.to_string(),
             route_kind: route_kind.to_string(),
+            path_group: path_group.to_string(),
+            country: country.to_string(),
+            proxy_source: proxy_source.to_string(),
         };
         if let Ok(mut durations) = self.inner.request_duration.write() {
             durations
@@ -274,6 +308,9 @@ impl ProxyMetrics {
                                 ("host", host.to_string()),
                                 ("method", labels.method.clone()),
                                 ("route_kind", labels.route_kind.clone()),
+                                ("path_group", labels.path_group.clone()),
+                                ("country", labels.country.clone()),
+                                ("proxy_source", labels.proxy_source.clone()),
                                 ("status", labels.status.to_string()),
                                 ("status_class", labels.status_class.to_string()),
                             ],
@@ -338,8 +375,15 @@ impl ProxyMetrics {
 
 impl RequestTracker {
     pub fn finish(mut self, status: StatusCode) -> StatusCode {
-        self.metrics
-            .finish_request(&self.method, &self.route_kind, status, self.started_at);
+        self.metrics.finish_request(
+            &self.method,
+            &self.route_kind,
+            &self.path_group,
+            &self.country,
+            &self.proxy_source,
+            status,
+            self.started_at,
+        );
         self.finished = true;
         status
     }
@@ -351,6 +395,9 @@ impl Drop for RequestTracker {
             self.metrics.finish_request(
                 &self.method,
                 &self.route_kind,
+                &self.path_group,
+                &self.country,
+                &self.proxy_source,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 self.started_at,
             );
@@ -413,6 +460,9 @@ fn histogram_owned(
                 ("host", host),
                 ("method", labels.method.as_str()),
                 ("route_kind", labels.route_kind.as_str()),
+                ("path_group", labels.path_group.as_str()),
+                ("country", labels.country.as_str()),
+                ("proxy_source", labels.proxy_source.as_str()),
             ];
             let bound_str = bound.to_string();
             sample_labels.push(("le", bound_str.as_str()));
@@ -429,6 +479,9 @@ fn histogram_owned(
             ("host", host),
             ("method", labels.method.as_str()),
             ("route_kind", labels.route_kind.as_str()),
+            ("path_group", labels.path_group.as_str()),
+            ("country", labels.country.as_str()),
+            ("proxy_source", labels.proxy_source.as_str()),
         ];
         write_sample(out, &format!("{name}_sum"), &base_labels, hist.sum_secs);
         write_sample(out, &format!("{name}_count"), &base_labels, hist.count as f64);
