@@ -177,14 +177,21 @@ sudo minions snapshot delete myvm before-upgrade
 Upload VM disk backups to S3-compatible object storage:
 
 ```bash
-# Required environment variables (on the host running minions)
-export MINIONS_BACKUP_S3_BUCKET=my-minions-backups
-export MINIONS_BACKUP_S3_REGION=us-east-1
+# Minions backup config (required)
+export MINIONS_BACKUP_S3_BUCKET=minions-backup
+export MINIONS_BACKUP_S3_REGION=us-east-1   # or AWS_REGION / AWS_DEFAULT_REGION
+
+# AWS credentials (unless the host already has an IAM role/profile/session)
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+# export AWS_SESSION_TOKEN=...              # if using temporary credentials
 
 # Optional
 export MINIONS_BACKUP_S3_PREFIX=minions/v1
-export MINIONS_BACKUP_S3_ENDPOINT=https://s3.amazonaws.com   # or MinIO endpoint
-export MINIONS_BACKUP_S3_SSE=aws:kms                         # or AES256
+# Only set MINIONS_BACKUP_S3_ENDPOINT for non-AWS S3-compatible providers
+# such as MinIO, R2, or LocalStack.
+# export MINIONS_BACKUP_S3_ENDPOINT=https://minio.example.com
+export MINIONS_BACKUP_S3_SSE=aws:kms        # or AES256
 export MINIONS_BACKUP_S3_KMS_KEY_ID=arn:aws:kms:...
 
 # Create / list / restore / delete
@@ -194,6 +201,8 @@ sudo minions backup list myvm
 sudo minions backup restore myvm nightly-2026-03-07
 sudo minions backup delete myvm nightly-2026-03-07
 ```
+
+If Minions is running under systemd, put these in `/etc/minions/env` and restart the daemon.
 
 Backups are compressed with zstd before upload. Restore requires the VM to be stopped.
 
