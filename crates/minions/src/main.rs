@@ -533,6 +533,13 @@ async fn main() -> Result<()> {
     let api_key = cli.api_key.clone();
 
     // Init and Serve always run directly — they ARE the server side.
+    //
+    // Host management is dispatched directly too: the `hosts` table lives in
+    // the control plane's own database and the daemon exposes no API for it, so
+    // it can only run where that database is. Doing it here also keeps
+    // `minions host …` working on a host that has the daemon running, where the
+    // CLI would otherwise auto-detect the daemon and take the remote path.
+    let mut run_hosts_directly = false;
     match &cli.command {
         Commands::Init { persist } => return init::run(*persist),
         Commands::Serve {
@@ -564,7 +571,21 @@ async fn main() -> Result<()> {
         }
         // Ssh is always local (interactive terminal).
         Commands::Ssh { name } => return cmd_ssh(&cli.db, name).await,
+        // See the note above: host management is control-plane state.
+        Commands::Host { .. } => {
+            if cli.host.is_some() {
+                anyhow::bail!(
+                    "host management is not exposed over --host; \
+                     run it on the control plane host"
+                );
+            }
+            run_hosts_directly = true;
+        }
         _ => {}
+    }
+
+    if run_hosts_directly {
+        return run_direct(&cli.db, cli.command, json).await;
     }
 
     // Determine whether to use HTTP client or direct mode.
@@ -820,8 +841,12 @@ async fn run_remote(
             }
         },
 
-        // Already handled above or unreachable in remote mode.
-        _ => unreachable!(),
+        // Commands that need the control plane's own state (init, serve, host
+        // management) are dispatched in `main` before we get here.
+        _ => anyhow::bail!(
+            "this command is not available in remote mode; \
+             run it on the control plane host"
+        ),
     }
 
     Ok(())
