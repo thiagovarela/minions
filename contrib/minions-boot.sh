@@ -35,11 +35,27 @@ if [ -w /proc/sys/net/bridge/bridge-nf-call-iptables ]; then
   echo 1 > /proc/sys/net/bridge/bridge-nf-call-iptables
 fi
 
-# ── 3. iptables (restore only when the VM masquerade rule is missing) ────────
-if command -v iptables >/dev/null && [ -f /etc/iptables/rules.v4 ]; then
-  if ! iptables -t nat -S POSTROUTING 2>/dev/null | grep -q '10\.0\.0\.0/16'; then
-    log "restoring iptables rules (VM masquerade rule missing)"
-    iptables-restore < /etc/iptables/rules.v4 2>/dev/null || log "iptables-restore failed"
+# ── 3. VM egress NAT ─────────────────────────────────────────────────────────
+# Add the masquerade rule directly instead of `iptables-restore`ing a whole
+# ruleset: a restore flushes every table, which silently wipes ufw's chains —
+# ufw then reports "Status: inactive" even though it is enabled, leaving the
+# host without a firewall until `ufw reload` is run.
+WAN_IF=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
+if [ -n "${WAN_IF:-}" ] && ! iptables -t nat -C POSTROUTING -s 10.0.0.0/16 -o "$WAN_IF" -j MASQUERADE 2>/dev/null; then
+  log "adding VM masquerade rule on $WAN_IF"
+  iptables -t nat -A POSTROUTING -s 10.0.0.0/16 -o "$WAN_IF" -j MASQUERADE \
+    || log "WARNING: could not add masquerade rule"
+fi
+
+# ── 3b. Re-apply ufw if it manages this host ─────────────────────────────────
+# Something earlier in the boot path (netfilter-persistent, or a manual
+# iptables-restore) may have replaced the tables. Reloading ufw restores its
+# chains and the deny-incoming policy. Safe to call when ufw is disabled.
+if command -v ufw >/dev/null 2>&1 && grep -q '^ENABLED=yes' /etc/ufw/ufw.conf 2>/dev/null; then
+  if ufw reload >/dev/null 2>&1; then
+    log "ufw reloaded ($(ufw status | head -1))"
+  else
+    log "WARNING: ufw reload failed"
   fi
 fi
 
