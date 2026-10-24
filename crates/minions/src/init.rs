@@ -352,6 +352,10 @@ ExecStart=/usr/local/bin/minions serve \
     --vm-domain miniclankers.xyz \
     --acme-email admin@miniclankers.com
 EnvironmentFile=-/etc/minions/env
+# systemd kills the entire cgroup on stop/restart by default, which would also
+# kill every cloud-hypervisor VM child process. KillMode=process limits the
+# signal to the daemon itself, so VMs keep running across `systemctl restart`.
+KillMode=process
 Restart=always
 RestartSec=5
 StandardOutput=journal

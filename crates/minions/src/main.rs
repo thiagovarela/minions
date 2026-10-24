@@ -67,11 +67,23 @@ enum Commands {
         /// Operating system: ubuntu (default), fedora, nixos
         #[arg(long, default_value = "ubuntu")]
         os: String,
+        /// Port inside the guest that the HTTPS proxy forwards to.
+        #[arg(long, default_value_t = 80)]
+        proxy_port: u16,
+        /// Expose the VM publicly at <name>.<domain> without the proxy password.
+        #[arg(long)]
+        public: bool,
     },
     /// Destroy a running VM (halt + remove rootfs + remove from DB)
     Destroy { name: String },
-    /// Start a stopped VM using its existing rootfs
-    Start { name: String },
+    /// Start a stopped VM (use --all to start every stopped VM)
+    Start {
+        /// VM name (omit when using --all)
+        name: Option<String>,
+        /// Start every VM that is currently stopped
+        #[arg(long)]
+        all: bool,
+    },
     /// Stop a VM (halt CH process, keep rootfs + DB record)
     Stop { name: String },
     /// List all VMs
@@ -620,9 +632,14 @@ async fn run_remote(
             memory,
             owner_id,
             os,
+            proxy_port,
+            public,
         } => {
             if !json {
-                println!("Creating VM '{name}' (os: {os}) via {host}…");
+                println!(
+                    "Creating VM '{name}' (os: {os}, proxy port {proxy_port}{}) via {host}…",
+                    if public { ", public" } else { "" }
+                );
             }
             let vm = c
                 .create_vm(client::CreateRequest {
@@ -631,6 +648,8 @@ async fn run_remote(
                     memory_mb: memory,
                     owner_id,
                     os: Some(os),
+                    proxy_port: Some(proxy_port),
+                    proxy_public: public.then_some(true),
                 })
                 .await?;
             print_vm(VmJson::from(vm), json);
@@ -656,12 +675,33 @@ async fn run_remote(
             print_vm_list(vms.into_iter().map(VmJson::from), json);
         }
 
-        Commands::Start { name } => {
-            if !json {
-                println!("Starting VM '{name}' via {host}…");
+        Commands::Start { name, all } => {
+            if all {
+                let vms = c.list_vms().await?;
+                let stopped: Vec<_> = vms.into_iter().filter(|v| v.status == "stopped").collect();
+                if stopped.is_empty() {
+                    if !json {
+                        println!("No stopped VMs to start.");
+                    }
+                    return Ok(());
+                }
+                for vm in stopped {
+                    if !json {
+                        println!("Starting VM '{}' via {host}…", vm.name);
+                    }
+                    match c.start_vm(&vm.name).await {
+                        Ok(started) => print_vm(VmJson::from(started), json),
+                        Err(e) => eprintln!("  failed to start '{}': {e:#}", vm.name),
+                    }
+                }
+            } else {
+                let name = name.context("a VM name is required (or pass --all)")?;
+                if !json {
+                    println!("Starting VM '{name}' via {host}…");
+                }
+                let vm = c.start_vm(&name).await?;
+                print_vm(VmJson::from(vm), json);
             }
-            let vm = c.start_vm(&name).await?;
-            print_vm(VmJson::from(vm), json);
         }
 
         Commands::Stop { name } => {
@@ -862,9 +902,14 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
             memory,
             owner_id,
             os,
+            proxy_port,
+            public,
         } => {
             if !json {
-                println!("Creating VM '{name}' (os: {os})…");
+                println!(
+                    "Creating VM '{name}' (os: {os}, proxy port {proxy_port}{})…",
+                    if public { ", public" } else { "" }
+                );
             }
             let os_type = minions_node::OsType::from_str(&os)?;
             let ssh_pubkey = find_ssh_pubkey();
@@ -881,6 +926,18 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
                 os_type,
             )
             .await?;
+
+            // Apply the proxy settings requested on the command line.
+            let vm = {
+                let conn = minions_db::open(db_path)?;
+                if proxy_port != 80 {
+                    minions_db::set_proxy_port(&conn, &name, proxy_port)?;
+                }
+                if public {
+                    minions_db::set_proxy_public(&conn, &name, true)?;
+                }
+                minions_db::get_vm(&conn, &name)?.unwrap_or(vm)
+            };
             print_vm(VmJson::from(vm), json);
         }
 
@@ -905,12 +962,39 @@ async fn run_direct(db_path: &str, command: Commands, json: bool) -> Result<()> 
             print_vm_list(vms.into_iter().map(VmJson::from), json);
         }
 
-        Commands::Start { name } => {
-            if !json {
-                println!("Starting VM '{name}'…");
+        Commands::Start { name, all } => {
+            if all {
+                let stopped: Vec<String> = {
+                    let conn = minions_db::open(db_path)?;
+                    minions_db::list_vms(&conn)?
+                        .into_iter()
+                        .filter(|v| v.status == "stopped")
+                        .map(|v| v.name)
+                        .collect()
+                };
+                if stopped.is_empty() {
+                    if !json {
+                        println!("No stopped VMs to start.");
+                    }
+                    return Ok(());
+                }
+                for vm_name in stopped {
+                    if !json {
+                        println!("Starting VM '{vm_name}'…");
+                    }
+                    match vm::start(db_path, &vm_name).await {
+                        Ok(started) => print_vm(VmJson::from(started), json),
+                        Err(e) => eprintln!("  failed to start '{vm_name}': {e:#}"),
+                    }
+                }
+            } else {
+                let name = name.context("a VM name is required (or pass --all)")?;
+                if !json {
+                    println!("Starting VM '{name}'…");
+                }
+                let vm = vm::start(db_path, &name).await?;
+                print_vm(VmJson::from(vm), json);
             }
-            let vm = vm::start(db_path, &name).await?;
-            print_vm(VmJson::from(vm), json);
         }
 
         Commands::Stop { name } => {

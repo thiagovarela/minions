@@ -20,6 +20,12 @@ pub struct CreateRequest {
     /// Operating system (optional, defaults to "ubuntu" on server).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os: Option<String>,
+    /// Port inside the guest the HTTPS proxy forwards to (default 80 on server).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_port: Option<u16>,
+    /// Expose the VM publicly (no proxy password).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_public: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

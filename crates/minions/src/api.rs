@@ -142,6 +142,12 @@ pub struct CreateRequest {
     /// Operating system: "ubuntu" (default), "fedora", or "nixos".
     #[serde(default = "default_os")]
     pub os: String,
+    /// Port inside the guest that the HTTPS proxy forwards to (default 80).
+    #[serde(default)]
+    pub proxy_port: Option<u16>,
+    /// Expose the VM publicly (no proxy password): sets `proxy_public`.
+    #[serde(default)]
+    pub proxy_public: Option<bool>,
 }
 
 fn default_cpus() -> u32 {
@@ -654,6 +660,12 @@ async fn create_vm(
 
     let ssh_pubkey = state.ssh_pubkey.as_deref().map(|s| s.to_string());
     let db_path = state.db_path.as_str().to_string();
+    let proxy_port = req.proxy_port;
+    let proxy_public = req.proxy_public.unwrap_or(false);
+
+    if proxy_port == Some(0) {
+        return bad_request("proxy_port must be between 1 and 65535").into_response();
+    }
 
     match vm::create_with_os(
         &db_path,
@@ -666,7 +678,31 @@ async fn create_vm(
     )
     .await
     {
-        Ok(v) => (StatusCode::CREATED, Json(VmResponse::from(v))).into_response(),
+        Ok(_) => {
+            // Apply proxy settings requested at create time, then return the
+            // stored row so the caller sees the final state.
+            let conn = match db::open(&db_path) {
+                Ok(c) => c,
+                Err(e) => return internal(e).into_response(),
+            };
+            if let Some(port) = proxy_port {
+                match db::set_proxy_port(&conn, &req.name, port) {
+                    Ok(_) => {}
+                    Err(e) => return internal(e).into_response(),
+                }
+            }
+            if proxy_public {
+                match db::set_proxy_public(&conn, &req.name, true) {
+                    Ok(_) => {}
+                    Err(e) => return internal(e).into_response(),
+                }
+            }
+            match db::get_vm(&conn, &req.name) {
+                Ok(Some(v)) => (StatusCode::CREATED, Json(VmResponse::from(v))).into_response(),
+                Ok(None) => internal(format!("VM '{}' vanished after create", req.name)).into_response(),
+                Err(e) => internal(e).into_response(),
+            }
+        }
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("already exists") || msg.contains("unsupported OS") {

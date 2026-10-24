@@ -5,7 +5,7 @@ use chrono::Utc;
 use std::time::Duration;
 use tracing::info;
 
-use minions_proto::Request;
+use minions_proto::{Request, Response, ResponseData};
 
 use crate::{agent, backup as s3_backup, db, hypervisor, network, storage};
 use uuid::Uuid;
@@ -155,35 +155,14 @@ pub async fn create_with_os(
         .await
         .context("configure guest network")?;
 
-        if let Some(pubkey) = ssh_pubkey {
-            info!("injecting SSH public key into VM");
-
-            // Validate SSH key format (basic sanity check)
-            let pubkey = pubkey.trim();
-            if !pubkey.starts_with("ssh-") && !pubkey.starts_with("ecdsa-") {
-                anyhow::bail!("invalid SSH public key format (must start with ssh-* or ecdsa-*)");
-            }
-            if pubkey.contains('\n') || pubkey.contains('\r') {
-                anyhow::bail!("SSH public key contains invalid newline characters");
-            }
-
-            // Use WriteFile request instead of shell interpolation to prevent injection
-            let key_content = format!("{}\n", pubkey);
-            agent::send_request(
-                &vsock_socket,
-                Request::WriteFile {
-                    path: "/root/.ssh/authorized_keys".to_string(),
-                    content: key_content,
-                    mode: 0o600,
-                    append: true,
-                },
-            )
-            .await
-            .context("inject SSH key")?;
-        }
+        // Inject the host's configured SSH key(s) — the file may hold several.
+        inject_ssh_keys(&vsock_socket, ssh_pubkey, false).await?;
 
         // Inject the SSH gateway's proxy key so the gateway can SSH into this VM.
         inject_proxy_key(&vsock_socket).await;
+
+        // Warn about guest kernels without IPv6 (services binding to [::] fail).
+        warn_if_no_ipv6(&vsock_socket).await;
 
         anyhow::Ok(())
     }
@@ -319,6 +298,19 @@ pub async fn start(db_path: &str, name: &str) -> Result<db::Vm> {
         )
         .await
         .context("configure guest network")?;
+
+        // Re-inject the host's SSH key(s) and the gateway proxy key on every
+        // start. This self-heals VMs whose image came from somewhere else
+        // (e.g. restored from an S3 backup taken on another host), and dedupes
+        // the file so repeated starts don't accumulate keys. Failures here are
+        // non-fatal: the VM is already up and usable via `minions exec`.
+        if let Some(keys) = host_ssh_keys() {
+            if let Err(e) = inject_ssh_keys(&vsock_socket, Some(keys), false).await {
+                tracing::warn!("could not inject SSH key(s) on start: {e:#}");
+            }
+        }
+        inject_proxy_key(&vsock_socket).await;
+        warn_if_no_ipv6(&vsock_socket).await;
 
         anyhow::Ok(())
     }
@@ -756,26 +748,13 @@ pub async fn copy(
         .await
         .context("configure guest network")?;
 
-        if let Some(pubkey) = ssh_pubkey {
-            let pubkey = pubkey.trim();
-            if !pubkey.starts_with("ssh-") && !pubkey.starts_with("ecdsa-") {
-                anyhow::bail!("invalid SSH public key format");
-            }
-            agent::send_request(
-                &vsock_socket,
-                Request::WriteFile {
-                    path: "/root/.ssh/authorized_keys".to_string(),
-                    content: format!("{}\n", pubkey),
-                    mode: 0o600,
-                    append: false, // overwrite — key came from current host user
-                },
-            )
-            .await
-            .context("inject SSH key into copied VM")?;
-        }
+        // Overwrite with the host's key(s): the copy belongs to the current host.
+        inject_ssh_keys(&vsock_socket, ssh_pubkey, true).await?;
 
         // Inject the SSH gateway's proxy key.
         inject_proxy_key(&vsock_socket).await;
+
+        warn_if_no_ipv6(&vsock_socket).await;
 
         anyhow::Ok(())
     }
@@ -1260,6 +1239,143 @@ fn copy_rootfs_sparse(source_rootfs: &str, dest_rootfs: &str) -> Result<()> {
     Ok(())
 }
 
+/// Read the host's configured authorized-keys content.
+///
+/// `MINIONS_SSH_PUBKEY_PATH` may point at a file containing one key per line
+/// (comments and blank lines are ignored), or `MINIONS_SSH_PUBKEY` may hold the
+/// content inline.
+fn host_ssh_keys() -> Option<String> {
+    std::env::var("MINIONS_SSH_PUBKEY_PATH")
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .filter(|contents| !contents.trim().is_empty())
+        .or_else(|| {
+            std::env::var("MINIONS_SSH_PUBKEY")
+                .ok()
+                .filter(|inline| !inline.trim().is_empty())
+        })
+}
+
+/// Parse authorized_keys content into individual keys.
+///
+/// Accepts one key per line; blank lines and `#` comments are ignored. This is
+/// what allows `MINIONS_SSH_PUBKEY_PATH` to point at a normal
+/// `authorized_keys`-style file with several keys.
+fn parse_authorized_keys(content: &str) -> Result<Vec<String>> {
+    const MAX_KEYS: usize = 32;
+    const PREFIXES: [&str; 4] = ["ssh-", "ecdsa-", "sk-ssh-", "sk-ecdsa-"];
+
+    let mut keys = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.chars().any(|c| c.is_control()) {
+            anyhow::bail!("SSH public key contains control characters");
+        }
+        if !PREFIXES.iter().any(|p| line.starts_with(p)) {
+            anyhow::bail!("invalid SSH public key format (must start with ssh-* or ecdsa-*)");
+        }
+        keys.push(line.to_string());
+        if keys.len() > MAX_KEYS {
+            anyhow::bail!("too many SSH public keys (max {MAX_KEYS})");
+        }
+    }
+    Ok(keys)
+}
+
+/// Write keys into the guest's `/root/.ssh/authorized_keys` and normalise the
+/// file (dedupe + 0600) so repeated injections stay stable.
+async fn write_authorized_keys(
+    vsock_socket: &std::path::Path,
+    keys: &[String],
+    overwrite: bool,
+) -> Result<()> {
+    let mut body = String::new();
+    for key in keys {
+        body.push_str(key);
+        body.push('\n');
+    }
+
+    // WriteFile avoids shell interpolation entirely (no injection risk).
+    agent::send_request(
+        vsock_socket,
+        Request::WriteFile {
+            path: "/root/.ssh/authorized_keys".to_string(),
+            content: body,
+            mode: 0o600,
+            append: !overwrite,
+        },
+    )
+    .await
+    .context("write authorized_keys")?;
+
+    // Dedupe + permissions. Best effort: a failure here must not fail the VM.
+    let _ = agent::send_request(
+        vsock_socket,
+        Request::Exec {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "sort -u -o /root/.ssh/authorized_keys /root/.ssh/authorized_keys && \
+                 chmod 600 /root/.ssh/authorized_keys"
+                    .to_string(),
+            ],
+        },
+    )
+    .await;
+
+    Ok(())
+}
+
+/// Inject the host's configured SSH key(s) into a guest.
+async fn inject_ssh_keys(
+    vsock_socket: &std::path::Path,
+    keys_content: Option<String>,
+    overwrite: bool,
+) -> Result<()> {
+    let Some(content) = keys_content else {
+        return Ok(());
+    };
+    let keys = parse_authorized_keys(&content)?;
+    if keys.is_empty() {
+        return Ok(());
+    }
+    info!(keys = keys.len(), "injecting SSH public key(s) into VM");
+    write_authorized_keys(vsock_socket, &keys, overwrite).await
+}
+
+/// Warn when the guest kernel has no IPv6 support.
+///
+/// The Cloud Hypervisor guest kernel is built without `CONFIG_IPV6`, so any
+/// service that binds to `[::]` (nginx's stock config, for example) fails at
+/// startup with `Address family not supported by protocol`.
+async fn warn_if_no_ipv6(vsock_socket: &std::path::Path) {
+    let result = agent::send_request(
+        vsock_socket,
+        Request::Exec {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "[ -e /proc/net/if_inet6 ]".to_string()],
+        },
+    )
+    .await;
+
+    match result {
+        Ok(Response::Ok {
+            data: Some(ResponseData::Exec { exit_code, .. }),
+            ..
+        }) if exit_code != 0 => {
+            tracing::warn!(
+                "guest has no IPv6 support (kernel built without CONFIG_IPV6) — \
+                 services binding to [::] will fail to start; use IPv4-only listeners \
+                 (e.g. remove `listen [::]:80` from nginx configs)"
+            );
+        }
+        _ => {}
+    }
+}
+
 /// Inject the SSH gateway's proxy public key into the VM's authorized_keys.
 ///
 /// This allows the SSH gateway to authenticate as root when proxying SSH
@@ -1295,7 +1411,83 @@ async fn inject_proxy_key(vsock_socket: &std::path::Path) {
     .await;
 
     match result {
-        Ok(_) => tracing::info!("✓ injected proxy key into VM"),
+        Ok(_) => {
+            // Keep the file deduped even across repeated starts.
+            let _ = agent::send_request(
+                vsock_socket,
+                Request::Exec {
+                    command: "sh".to_string(),
+                    args: vec![
+                        "-c".to_string(),
+                        "sort -u -o /root/.ssh/authorized_keys /root/.ssh/authorized_keys && \
+                         chmod 600 /root/.ssh/authorized_keys"
+                            .to_string(),
+                    ],
+                },
+            )
+            .await;
+            tracing::info!("✓ injected proxy key into VM")
+        }
         Err(e) => tracing::warn!("failed to inject proxy key: {}", e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_authorized_keys;
+
+    const KEY_A: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEsHVJsOcSTMItZQ3IvL5gMv user@a";
+    const KEY_B: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQ user@b";
+
+    #[test]
+    fn parses_single_key() {
+        let keys = parse_authorized_keys(KEY_A).expect("valid key");
+        assert_eq!(keys, vec![KEY_A.to_string()]);
+    }
+
+    #[test]
+    fn parses_multiple_keys_with_blank_lines_and_comments() {
+        let content = format!("# laptop\n{KEY_A}\n\n  {KEY_B}  \n# trailing comment\n");
+        let keys = parse_authorized_keys(&content).expect("valid keys");
+        assert_eq!(keys, vec![KEY_A.to_string(), KEY_B.to_string()]);
+    }
+
+    #[test]
+    fn accepts_ecdsa_and_sk_prefixed_keys() {
+        let content = "ecdsa-sha2-nistp256 AAAAE2VjZHNh c@host\nsk-ssh-ed25519@openssh.com AAAAGnNr k@host";
+        let keys = parse_authorized_keys(content).expect("valid keys");
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn ignores_empty_content() {
+        assert!(parse_authorized_keys("").expect("empty is fine").is_empty());
+        assert!(parse_authorized_keys("\n\n# only comments\n")
+            .expect("comments only is fine")
+            .is_empty());
+    }
+
+    #[test]
+    fn rejects_garbage_lines() {
+        let err = parse_authorized_keys("not-a-key").unwrap_err().to_string();
+        assert!(err.contains("invalid SSH public key format"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_control_characters() {
+        let err = parse_authorized_keys("ssh-ed25519 AAAA\u{7}B x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("control characters"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_too_many_keys() {
+        let content = (0..40)
+            .map(|i| format!("ssh-ed25519 AAAA{i} host{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let err = parse_authorized_keys(&content).unwrap_err().to_string();
+        assert!(err.contains("too many SSH public keys"), "got: {err}");
     }
 }

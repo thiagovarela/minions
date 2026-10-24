@@ -80,6 +80,26 @@ sudo minions create myvm --os nixos    # NixOS 25.11
 
 The base image for the chosen OS must be built first (see "Build the base image" above).
 
+**Expose it through the HTTPS proxy in one step:**
+
+```bash
+sudo minions create myvm --public --proxy-port 3000
+```
+
+- `--proxy-port` — port inside the guest the proxy forwards to (default `80`)
+- `--public` — serve `https://myvm.<domain>` without the proxy password
+
+**SSH keys:** the host key(s) from `MINIONS_SSH_PUBKEY_PATH` are injected into
+`/root/.ssh/authorized_keys`. That file may contain **several** keys, one per
+line (blank lines and `#` comments are ignored), so a shared
+`authorized_keys`-style file works as-is. Keys are re-injected (and deduped) on
+every start, which also repairs VMs whose disk image came from another host.
+
+> **Note:** the Cloud Hypervisor guest kernel is built without `CONFIG_IPV6`.
+> Services that bind to `[::]` fail with `Address family not supported by
+> protocol` — use IPv4-only listeners (e.g. drop `listen [::]:80` from nginx).
+> `minions create`/`start` logs a warning when the guest has no IPv6.
+
 ### List VMs
 
 ```bash
@@ -117,6 +137,9 @@ sudo minions exec myvm -- apt-get update
 sudo minions stop myvm
 sudo minions start myvm
 sudo minions restart myvm
+
+# start every VM that is currently stopped (handy after a host reboot)
+sudo minions start --all
 ```
 
 ### Resize a VM
@@ -232,8 +255,24 @@ This gives you:
 - **SSH port forwarding** in VM proxy mode (for example `ssh -N -L 3050:127.0.0.1:3000 vmname@mycloud.example.com -p 2222`)
 - **HTTPS proxy** — each VM is reachable at `https://vmname.mycloud.example.com` (with automatic Let's Encrypt certificates)
 
-### Remote CLI
+### systemd unit and host reboots
 
+`sudo minions init` installs `minions.service`. It sets `KillMode=process`, so
+restarting the daemon does **not** stop the VMs — `systemctl restart minions`
+leaves the cloud-hypervisor processes running and the daemon reattaches to them
+on start.
+
+A host **reboot** is different: the `br0` bridge is not persisted by
+`minions init --persist`, and the daemon never auto-starts VMs. Install the boot
+helper to recreate networking and start every VM:
+
+```bash
+sudo install -m 755 contrib/minions-boot.sh /usr/local/bin/minions-boot.sh
+sudo install -m 644 contrib/systemd/minions-boot.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now minions-boot
+```
+
+### Remote CLI
 When the daemon is running, the CLI auto-detects it and becomes a thin HTTP client — no `sudo` required:
 
 ```bash

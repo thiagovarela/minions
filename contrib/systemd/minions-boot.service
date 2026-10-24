@@ -1,0 +1,17 @@
+[Unit]
+Description=Minions boot: host networking (br0) + VM autostart
+Documentation=https://github.com/thiagovarela/minions
+After=network-online.target minions.service
+Wants=network-online.target
+Requires=minions.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/minions/env
+ExecStart=/usr/local/bin/minions-boot.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
